@@ -18,11 +18,12 @@ pub struct Ctx<'a> {
     pub params: [&'a str; MAX_PARAMS],
     pub nparams: usize,
     pub body: Value,
+    pub query: Value,
 }
 
 impl<'a> Default for Ctx<'a> {
     fn default() -> Self {
-        Ctx { params: [""; MAX_PARAMS], nparams: 0, body: Value::Null }
+        Ctx { params: [""; MAX_PARAMS], nparams: 0, body: Value::Null, query: Value::Null }
     }
 }
 
@@ -40,6 +41,7 @@ pub enum Expr {
     Const(Value),
     Param(usize),
     Body,
+    Query,
     Field(Box<Expr>, Arc<str>),
     Object(Vec<(Arc<str>, Expr)>),
     Array(Vec<Expr>),
@@ -50,6 +52,7 @@ pub enum Op {
     All,
     Count,
     Find(Box<Expr>),
+    Where(Box<Expr>, Box<Expr>),
     Create(Box<Expr>),
     Update(Box<Expr>, Box<Expr>),
     Delete(Box<Expr>),
@@ -59,8 +62,9 @@ impl Expr {
     pub fn eval(&self, c: &Ctx) -> Result<Value, Err_> {
         match self {
             Expr::Const(v) => Ok(v.clone()),
-            Expr::Param(i) => Ok(Value::str(c.param(*i))),
+            Expr::Param(i) => Ok(decode_param(c.param(*i))),
             Expr::Body => Ok(c.body.clone()),
+            Expr::Query => Ok(c.query.clone()),
             Expr::Field(base, key) => Ok(base.eval(c)?.get(key)),
             Expr::Object(fields) => {
                 let mut out = Vec::with_capacity(fields.len());
@@ -80,6 +84,11 @@ impl Expr {
                 Op::All => Ok(col.all()),
                 Op::Count => Ok(Value::Num(col.count() as f64)),
                 Op::Find(k) => col.find(&k.eval(c)?.as_key()).ok_or(NOT_FOUND),
+                Op::Where(f, v) => {
+                    let field = f.eval(c)?.as_key();
+                    let want = v.eval(c)?.as_key();
+                    Ok(col.filter(&field, &want))
+                }
                 Op::Create(v) => match v.eval(c)? {
                     Value::Null => Err(BAD_BODY),
                     val => Ok(col.create(val)),
@@ -110,6 +119,7 @@ pub struct Route {
     pub const_text: bool,
     pub status: u16,
     pub uses_body: bool,
+    pub uses_query: bool,
     pub line: usize,
 }
 
@@ -171,6 +181,7 @@ pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> 
         params: Vec::new(),
         pure: true,
         body: false,
+        query: false,
     };
     p.advance()?;
     let mut routes = Vec::new();
@@ -190,6 +201,7 @@ struct Parser<'a> {
     params: Vec<String>,
     pure: bool,
     body: bool,
+    query: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -229,6 +241,7 @@ impl<'a> Parser<'a> {
         self.params = params.clone();
         self.pure = true;
         self.body = false;
+        self.query = false;
         let expr = self.expr()?;
         let status = if method == Method::Post { 201 } else { 200 };
         let (konst, const_text) = if self.pure {
@@ -249,6 +262,7 @@ impl<'a> Parser<'a> {
             const_text,
             status,
             uses_body: self.body,
+            uses_query: self.query,
             line,
         })
     }
@@ -327,6 +341,11 @@ impl<'a> Parser<'a> {
                 self.body = true;
                 return self.fields(Expr::Body);
             }
+            "query" => {
+                self.pure = false;
+                self.query = true;
+                return self.fields(Expr::Query);
+            }
             _ => {}
         }
         if let Some(i) = self.params.iter().position(|p| *p == head.text) {
@@ -388,6 +407,11 @@ impl<'a> Parser<'a> {
                 want(1)?;
                 Op::Find(Box::new(args.next().unwrap()))
             }
+            "where" => {
+                want(2)?;
+                let f = Box::new(args.next().unwrap());
+                Op::Where(f, Box::new(args.next().unwrap()))
+            }
             "create" => {
                 want(1)?;
                 Op::Create(Box::new(args.next().unwrap()))
@@ -410,6 +434,68 @@ impl<'a> Parser<'a> {
         };
         Ok(Expr::Db(col, op))
     }
+}
+
+pub fn decode_param(s: &str) -> Value {
+    if !s.contains('%') && !s.contains('+') {
+        return Value::str(s);
+    }
+    Value::Str(std::sync::Arc::from(percent_decode(s).as_str()))
+}
+
+pub fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => match hex(b[i + 1]).zip(hex(b[i + 2])) {
+                Some((h, l)) => {
+                    out.push(h << 4 | l);
+                    i += 3;
+                }
+                None => {
+                    out.push(b[i]);
+                    i += 1;
+                }
+            },
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+pub fn parse_query(q: &str) -> Value {
+    let mut fields: Vec<(std::sync::Arc<str>, Value)> = Vec::new();
+    for pair in q.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = match pair.split_once('=') {
+            Some((k, v)) => (k, v),
+            None => (pair, ""),
+        };
+        let key = percent_decode(k);
+        let val = percent_decode(v);
+        fields.push((std::sync::Arc::from(key.as_str()), Value::Str(std::sync::Arc::from(val.as_str()))));
+    }
+    Value::obj(fields)
 }
 
 fn pattern_params(pattern: &str, line: usize) -> Result<Vec<String>, String> {

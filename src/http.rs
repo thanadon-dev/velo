@@ -53,9 +53,9 @@ impl Server {
         raw_body: &[u8],
         out: &mut Vec<u8>,
     ) -> (u16, Ctype) {
-        let path = match path.find('?') {
-            Some(i) => &path[..i],
-            None => path,
+        let (path, query) = match path.find('?') {
+            Some(i) => (&path[..i], &path[i + 1..]),
+            None => (path, ""),
         };
         let Some(m) = Method::from_str(method) else {
             return err_body(Err_ { status: 405, msg: "method not allowed" }, out);
@@ -77,6 +77,9 @@ impl Server {
             return err_body(e, out);
         };
         let rt = &self.routes[idx];
+        if rt.uses_query {
+            ctx.query = crate::parser::parse_query(query);
+        }
         if rt.uses_body && !raw_body.is_empty() {
             match crate::value::parse_json(raw_body) {
                 Ok(v) => ctx.body = v,

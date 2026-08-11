@@ -17,6 +17,9 @@ GET  /stats           => { users: db.users.count() }
 GET  /echo/:a/x/:b    => { a: a, b: b }
 POST /name            => body.name
 GET  /list            => [1, 2, "three", true, null]
+GET  /search          => db.users.where("name", query.name)
+GET  /q               => { limit: query.limit, tag: query.tag }
+GET  /raw/:v          => { v: v }
 "#;
 
 fn server() -> Arc<Server> {
@@ -263,4 +266,40 @@ fn http_many_connections() {
     for h in handles {
         h.join().unwrap();
     }
+}
+
+#[test]
+fn query_params() {
+    let s = server();
+    assert_eq!(
+        call(&s, "GET", "/q?limit=10&tag=a+b", "").1,
+        r#"{"limit":"10","tag":"a b"}"#
+    );
+    assert_eq!(call(&s, "GET", "/q", "").1, r#"{"limit":null,"tag":null}"#);
+    assert_eq!(
+        call(&s, "GET", "/q?tag=%E0%B9%84%E0%B8%97%E0%B8%A2", "").1,
+        "{\"limit\":null,\"tag\":\"ไทย\"}"
+    );
+}
+
+#[test]
+fn path_params_percent_decoded() {
+    let s = server();
+    assert_eq!(call(&s, "GET", "/raw/a%20b", "").1, r#"{"v":"a b"}"#);
+    assert_eq!(call(&s, "GET", "/raw/plain", "").1, r#"{"v":"plain"}"#);
+}
+
+#[test]
+fn where_filter() {
+    let s = server();
+    call(&s, "POST", "/users", r#"{"name":"a","team":"x"}"#);
+    call(&s, "POST", "/users", r#"{"name":"b","team":"y"}"#);
+    call(&s, "POST", "/users", r#"{"name":"a","team":"z"}"#);
+    let (status, body, _) = call(&s, "GET", "/search?name=a", "");
+    assert_eq!(status, 200);
+    assert_eq!(
+        body,
+        r#"[{"id":1,"name":"a","team":"x"},{"id":3,"name":"a","team":"z"}]"#
+    );
+    assert_eq!(call(&s, "GET", "/search?name=zz", "").1, "[]");
 }

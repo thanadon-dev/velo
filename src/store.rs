@@ -36,6 +36,17 @@ impl Collection {
         s.by_id.get(id).map(|&i| s.rows[i].clone())
     }
 
+    pub fn filter(&self, field: &str, want: &str) -> Value {
+        let s = self.snap.read().unwrap();
+        let rows: Vec<Value> = s
+            .rows
+            .iter()
+            .filter(|r| r.get(field).as_key() == want)
+            .cloned()
+            .collect();
+        Value::Arr(Arc::new(rows))
+    }
+
     pub fn create(&self, v: Value) -> Value {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let row = with_id(v, id as f64);

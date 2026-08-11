@@ -91,9 +91,10 @@ fn routes(args: &[String]) {
     match compile(&source, None) {
         Ok(p) => {
             for r in &p.routes {
-                let kind = match (&r.konst, r.uses_body) {
-                    (Some(_), _) => "const",
-                    (None, true) => "body",
+                let kind = match (&r.konst, r.uses_body, r.uses_query) {
+                    (Some(_), _, _) => "const",
+                    (None, true, _) => "body",
+                    (None, _, true) => "query",
                     _ => "dynamic",
                 };
                 println!(

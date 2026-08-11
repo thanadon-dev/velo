@@ -1,6 +1,6 @@
 # Velo
 
-**v0.3.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.4.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -10,6 +10,7 @@ POST   /users      => db.users.create(body)
 PUT    /users/:id  => db.users.update(id, body)
 DELETE /users/:id  => db.users.delete(id)
 GET    /stats      => { users: db.users.count(), ok: true }
+GET    /search     => db.users.where("team", query.team)
 ```
 
 That file is a complete, running API server.
@@ -55,6 +56,7 @@ Expressions:
 | array | `[1, 2, 3]` | |
 | path param | `id` | resolved to a slot index at compile time |
 | request body | `body`, `body.name` | parsed only if the route mentions it |
+| query string | `query.limit` | parsed only if the route mentions it, percent-decoded |
 | store call | `db.users.find(id)` | see below |
 
 Built-in store (`db.<collection>.<op>`):
@@ -64,6 +66,7 @@ Built-in store (`db.<collection>.<op>`):
 | `all()` | array of rows | |
 | `count()` | number | |
 | `find(key)` | row | 404 |
+| `where(field, value)` | array of matching rows | `[]` |
 | `create(value)` | row with generated `id` | 400 if body is empty |
 | `update(key, patch)` | merged row | 404 |
 | `delete(key)` | `{"deleted":true}` | 404 |
@@ -84,13 +87,13 @@ Env knobs: `VELO_ADDR`, `VELO_WORKERS` (default: cores), `VELO_MAX_CONNS` per wo
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.3.0:
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.4.0:
 
 | route | kind | req/s | p50 | p99 |
 | --- | --- | --- | --- | --- |
-| `/health` | const fold | 90 500 | 0.41 ms | 2.25 ms |
+| `/health` | const fold | 89 700 | 0.44 ms | 2.19 ms |
 | `/users` | store scan | 80 300 | 0.44 ms | 4.05 ms |
-| `/users/:id` | store lookup | 73 800 | 0.49 ms | 4.23 ms |
+| `/users/:id` | store lookup | 81 800 | 0.49 ms | 2.31 ms |
 | `/stats` | 2 store counts | 70 500 | 0.37 ms | 6.07 ms |
 | `/teams/:tid/members/:mid` | 2 params | 66 400 | 0.44 ms | 5.39 ms |
 | `POST /users` | JSON parse + insert | 49 500 | | |
@@ -120,13 +123,15 @@ velobench -c 200 -d 10 -p 16 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-16 tests (15 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+19 tests (18 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 ## Build notes
 
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.4.0** — query strings (`query.name`), percent-decoding for path params and query values, `db.x.where(field, value)` filters. Query parsing happens only for routes that mention `query`.
 
 **v0.3.0** — epoll event loop replaces thread-per-connection: one epoll per core sharing the listener with `EPOLLEXCLUSIVE`, non-blocking sockets, EPOLLOUT-driven partial-write handling, idle sweep on `VELO_KEEPALIVE`. 1 000 connections in 896 kB RSS, p99 on `/health` down from 3.96 ms to 2.25 ms.
 
