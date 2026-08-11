@@ -55,6 +55,7 @@ pub enum Expr {
     Array(Vec<Expr>),
     Db(Arc<Collection>, Op),
     Call(Builtin, Vec<Expr>),
+    Cmp(Box<Expr>, bool, Box<Expr>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -99,6 +100,10 @@ impl Expr {
                     out.push(e.eval(c)?);
                 }
                 Ok(Value::Arr(Arc::new(out)))
+            }
+            Expr::Cmp(l, eq, r) => {
+                let same = l.eval(c)?.as_key() == r.eval(c)?.as_key();
+                Ok(Value::Bool(same == *eq))
             }
             Expr::Call(f, args) => {
                 let mut vals = Vec::with_capacity(args.len());
@@ -164,6 +169,7 @@ pub struct Route {
     pub uses_body: bool,
     pub uses_query: bool,
     pub uses_header: bool,
+    pub guard: Option<Expr>,
     pub line: usize,
 }
 
@@ -313,6 +319,22 @@ impl<'a> Parser<'a> {
             }
             status = code.num as u16;
         }
+        let guard = if self.tok.kind == Kind::Ident && self.tok.text == "when" {
+            self.advance()?;
+            let left = self.expr()?;
+            let g = match self.tok.kind {
+                Kind::Eq | Kind::Ne => {
+                    let eq = self.tok.kind == Kind::Eq;
+                    self.advance()?;
+                    Expr::Cmp(Box::new(left), eq, Box::new(self.expr()?))
+                }
+                _ => left,
+            };
+            self.pure = false;
+            Some(g)
+        } else {
+            None
+        };
         let (konst, const_text) = if self.pure {
             match expr.eval(&Ctx::default()) {
                 Ok(Value::Str(s)) => (Some(s.as_bytes().to_vec()), true),
@@ -333,6 +355,7 @@ impl<'a> Parser<'a> {
             uses_body: self.body,
             uses_query: self.query,
             uses_header: self.header,
+            guard,
             line,
         })
     }
@@ -553,6 +576,16 @@ impl<'a> Parser<'a> {
             }
         };
         Ok(Expr::Db(col, op))
+    }
+}
+
+pub fn truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Num(n) => *n != 0.0,
+        Value::Str(s) => !s.is_empty(),
+        _ => true,
     }
 }
 

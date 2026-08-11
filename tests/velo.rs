@@ -31,6 +31,9 @@ GET  /sorted          => db.users.order("name")
 GET  /rsorted         => db.users.order("-id")
 GET  /whoami          => { agent: header.user_agent, auth: header.authorization }
 GET  /tenant          => db.users.where("team", header.x_team)
+GET  /admin           => db.users.all() when header.authorization == "Bearer secret"
+GET  /gated           => "in" when header.x_key
+DELETE /purge/:id     => db.users.delete(id) : 204 when header.x_key != "block"
 POST /events          => db.events.create({ at: now(), id: uuid(), data: body })
 "#;
 
@@ -544,4 +547,59 @@ fn http_header_routing_end_to_end() {
     );
     assert!(res.ends_with(r#"[{"id":2,"name":"b","team":"blue"}]"#), "{res}");
     s.shutdown();
+}
+
+#[test]
+fn guards_gate_routes() {
+    let s = server();
+    call(&s, "POST", "/users", r#"{"name":"a"}"#);
+
+    let hdr = |h: &str| format!("GET /admin HTTP/1.1\r\nHost: x\r\n{h}\r\n\r\n");
+    let mut out = Vec::new();
+    let raw = hdr("Authorization: Bearer secret");
+    let (status, _) = s.handle("GET", "/admin", b"", raw.as_bytes(), &mut out);
+    assert_eq!(status, 200);
+    assert_eq!(String::from_utf8(out).unwrap(), r#"[{"id":1,"name":"a"}]"#);
+
+    let mut out = Vec::new();
+    let raw = hdr("Authorization: Bearer wrong");
+    let (status, _) = s.handle("GET", "/admin", b"", raw.as_bytes(), &mut out);
+    assert_eq!(status, 401);
+    assert_eq!(String::from_utf8(out).unwrap(), r#"{"error":"unauthorized"}"#);
+
+    let mut out = Vec::new();
+    let (status, _) = s.handle("GET", "/admin", b"", b"GET /admin HTTP/1.1\r\n\r\n", &mut out);
+    assert_eq!(status, 401);
+
+    let mut out = Vec::new();
+    let raw = "GET /gated HTTP/1.1\r\nX-Key: anything\r\n\r\n";
+    let (status, _) = s.handle("GET", "/gated", b"", raw.as_bytes(), &mut out);
+    assert_eq!((status, String::from_utf8(out).unwrap()), (200, "in".to_string()));
+
+    let mut out = Vec::new();
+    let raw = "GET /gated HTTP/1.1\r\nX-Key: \r\n\r\n";
+    let (status, _) = s.handle("GET", "/gated", b"", raw.as_bytes(), &mut out);
+    assert_eq!(status, 401);
+
+    let mut out = Vec::new();
+    let raw = "DELETE /purge/1 HTTP/1.1\r\nX-Key: block\r\n\r\n";
+    let (status, _) = s.handle("DELETE", "/purge/1", b"", raw.as_bytes(), &mut out);
+    assert_eq!(status, 401);
+
+    let mut out = Vec::new();
+    let raw = "DELETE /purge/1 HTTP/1.1\r\nX-Key: ok\r\n\r\n";
+    let (status, _) = s.handle("DELETE", "/purge/1", b"", raw.as_bytes(), &mut out);
+    assert_eq!(status, 204);
+    assert_eq!(call(&s, "GET", "/users", "").1, "[]");
+}
+
+#[test]
+fn guarded_routes_are_not_const_folded() {
+    let prog = compile(SRC, None).unwrap();
+    let gated = prog.routes.iter().find(|r| r.pattern == "/gated").unwrap();
+    assert!(gated.konst.is_none());
+    assert!(gated.guard.is_some());
+    let health = prog.routes.iter().find(|r| r.pattern == "/health").unwrap();
+    assert!(health.guard.is_none());
+    assert!(health.konst.is_some());
 }

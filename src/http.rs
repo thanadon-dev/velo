@@ -129,6 +129,13 @@ impl Server {
                 Err(_) => return err_body(crate::parser::BAD_BODY, out),
             }
         }
+        if let Some(g) = &rt.guard {
+            match g.eval(&ctx) {
+                Ok(v) if crate::parser::truthy(&v) => {}
+                Ok(_) => return err_body(Err_ { status: 401, msg: "unauthorized" }, out),
+                Err(e) => return err_body(e, out),
+            }
+        }
         if let Some(k) = &rt.konst {
             out.extend_from_slice(k);
             return (rt.status, if rt.const_text { Ctype::Text } else { Ctype::Json });
@@ -234,6 +241,8 @@ fn status_text(code: u16) -> &'static str {
         204 => "No Content",
         304 => "Not Modified",
         400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         411 => "Length Required",

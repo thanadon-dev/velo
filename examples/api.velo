@@ -1,5 +1,5 @@
 GET  /health              => "ok"
-GET  /version             => { name: "velo", version: "0.13.0" }
+GET  /version             => { name: "velo", version: "0.14.0" }
 
 GET  /users               => db.users.all()
 GET  /users/:id           => db.users.find(id)
@@ -9,6 +9,7 @@ DELETE /users/:id         => db.users.delete(id) : 204
 GET  /users/page          => db.users.page(query.offset, query.limit)
 GET  /users/sorted        => db.users.order(query.by)
 GET  /users/mine          => db.users.where("team", header.x_team)
+GET  /admin/users         => db.users.all() when header.authorization == env("ADMIN_TOKEN")
 GET  /users/by/team       => db.users.where("team", query.team)
 
 GET  /posts               => db.posts.all()

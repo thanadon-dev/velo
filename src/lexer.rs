@@ -15,6 +15,8 @@ pub enum Kind {
     Dot,
     Comma,
     Colon,
+    Eq,
+    Ne,
 }
 
 impl Kind {
@@ -35,6 +37,8 @@ impl Kind {
             Kind::Dot => ".",
             Kind::Comma => ",",
             Kind::Colon => ":",
+            Kind::Eq => "==",
+            Kind::Ne => "!=",
         }
     }
 }
@@ -119,6 +123,14 @@ impl<'a> Lexer<'a> {
         if c == b'=' && self.src.get(self.pos + 1) == Some(&b'>') {
             self.pos += 2;
             return Ok(Token::new(Kind::Arrow, "=>", self.line));
+        }
+        if c == b'=' && self.src.get(self.pos + 1) == Some(&b'=') {
+            self.pos += 2;
+            return Ok(Token::new(Kind::Eq, "==", self.line));
+        }
+        if c == b'!' && self.src.get(self.pos + 1) == Some(&b'=') {
+            self.pos += 2;
+            return Ok(Token::new(Kind::Ne, "!=", self.line));
         }
         let kind = match c {
             b'(' => Kind::LParen,
