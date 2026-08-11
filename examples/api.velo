@@ -1,5 +1,5 @@
 GET  /health              => "ok"
-GET  /version             => { name: "velo", version: "0.7.1" }
+GET  /version             => { name: "velo", version: "0.8.0" }
 
 GET  /users               => db.users.all()
 GET  /users/:id           => db.users.find(id)
@@ -17,3 +17,5 @@ GET  /posts/of/:author    => db.posts.where("author", author)
 GET  /stats               => { users: db.users.count(), posts: db.posts.count() }
 GET  /teams/:tid/members/:mid => { team: tid, member: mid }
 GET  /search              => { q: query.q, page: query.page }
+POST /events              => db.events.create({ id: uuid(), at: now(), data: body })
+GET  /events              => db.events.all()

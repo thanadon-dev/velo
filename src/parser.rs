@@ -46,6 +46,15 @@ pub enum Expr {
     Object(Vec<(Arc<str>, Expr)>),
     Array(Vec<Expr>),
     Db(Arc<Collection>, Op),
+    Call(Builtin, Vec<Expr>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Builtin {
+    Now,
+    Uuid,
+    Len,
+    Env,
 }
 
 pub enum Op {
@@ -80,6 +89,13 @@ impl Expr {
                     out.push(e.eval(c)?);
                 }
                 Ok(Value::Arr(Arc::new(out)))
+            }
+            Expr::Call(f, args) => {
+                let mut vals = Vec::with_capacity(args.len());
+                for a in args {
+                    vals.push(a.eval(c)?);
+                }
+                Ok(call_builtin(*f, &vals))
             }
             Expr::Db(col, op) => match op {
                 Op::All => Ok(col.all()),
@@ -362,6 +378,42 @@ impl<'a> Parser<'a> {
             }
             _ => {}
         }
+        if self.tok.kind == Kind::LParen {
+            let f = match head.text.as_str() {
+                "now" => Builtin::Now,
+                "uuid" => Builtin::Uuid,
+                "len" => Builtin::Len,
+                "env" => Builtin::Env,
+                other => {
+                    return Err(format!("line {}: unknown function {other}()", head.line))
+                }
+            };
+            self.advance()?;
+            let mut args = Vec::new();
+            while self.tok.kind != Kind::RParen {
+                args.push(self.expr()?);
+                if self.tok.kind == Kind::Comma {
+                    self.advance()?;
+                }
+            }
+            self.advance()?;
+            let arity = match f {
+                Builtin::Now | Builtin::Uuid => 0,
+                Builtin::Len | Builtin::Env => 1,
+            };
+            if args.len() != arity {
+                return Err(format!(
+                    "line {}: {}() expects {arity} argument(s), got {}",
+                    head.line,
+                    head.text,
+                    args.len()
+                ));
+            }
+            if f != Builtin::Env {
+                self.pure = false;
+            }
+            return self.fields(Expr::Call(f, args));
+        }
         if let Some(i) = self.params.iter().position(|p| *p == head.text) {
             self.pure = false;
             return self.fields(Expr::Param(i));
@@ -453,6 +505,79 @@ impl<'a> Parser<'a> {
         };
         Ok(Expr::Db(col, op))
     }
+}
+
+pub fn call_builtin(f: Builtin, args: &[Value]) -> Value {
+    match f {
+        Builtin::Now => Value::Num(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as f64)
+                .unwrap_or(0.0),
+        ),
+        Builtin::Uuid => Value::Str(Arc::from(uuid_v4().as_str())),
+        Builtin::Len => Value::Num(match &args[0] {
+            Value::Str(s) => s.chars().count() as f64,
+            Value::Arr(a) => a.len() as f64,
+            Value::Obj(o) | Value::Row(o, _) => o.len() as f64,
+            Value::Null => 0.0,
+            _ => 1.0,
+        }),
+        Builtin::Env => match std::env::var(args[0].as_key()) {
+            Ok(v) => Value::Str(Arc::from(v.as_str())),
+            Err(_) => Value::Null,
+        },
+    }
+}
+
+fn uuid_v4() -> String {
+    let mut b = [0u8; 16];
+    fill_random(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let hex = b"0123456789abcdef";
+    let mut out = String::with_capacity(36);
+    for (i, byte) in b.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            out.push('-');
+        }
+        out.push(hex[(byte >> 4) as usize] as char);
+        out.push(hex[(byte & 0xf) as usize] as char);
+    }
+    out
+}
+
+fn fill_random(out: &mut [u8]) {
+    use std::cell::Cell;
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new(0);
+    }
+    STATE.with(|st| {
+        let mut x = st.get();
+        if x == 0 {
+            let mut seed = [0u8; 8];
+            if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+                use std::io::Read;
+                let _ = f.read_exact(&mut seed);
+            }
+            x = u64::from_ne_bytes(seed)
+                ^ std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u64)
+                    .unwrap_or(1);
+            if x == 0 {
+                x = 0x9e3779b97f4a7c15;
+            }
+        }
+        for chunk in out.chunks_mut(8) {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let bytes = x.to_ne_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
+        }
+        st.set(x);
+    });
 }
 
 fn num_arg(v: &Value) -> usize {

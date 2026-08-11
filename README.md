@@ -1,6 +1,6 @@
 # Velo
 
-**v0.7.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.8.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -60,6 +60,7 @@ Expressions:
 | request body | `body`, `body.name` | parsed only if the route mentions it |
 | query string | `query.limit` | parsed only if the route mentions it, percent-decoded |
 | store call | `db.users.find(id)` | see below |
+| function call | `now()`, `uuid()`, `len(x)`, `env("PORT")` | see below |
 
 Built-in store (`db.<collection>.<op>`):
 
@@ -73,6 +74,19 @@ Built-in store (`db.<collection>.<op>`):
 | `create(value)` | row with generated `id` | 400 if body is empty |
 | `update(key, patch)` | merged row | 404 |
 | `delete(key)` | `{"deleted":true}` | 404 |
+
+Built-in functions:
+
+| function | returns |
+| --- | --- |
+| `now()` | Unix time in milliseconds |
+| `uuid()` | random v4 UUID string |
+| `len(x)` | length of a string, array, or object (`null` is 0) |
+| `env("NAME")` | environment variable, or `null`; folded at compile time |
+
+```velo
+POST /events => db.events.create({ id: uuid(), at: now(), data: body })
+```
 
 `POST` routes answer `201`, everything else `200`. Append `: <code>` to set it yourself:
 
@@ -108,13 +122,13 @@ Env knobs: `VELO_ADDR`, `VELO_WORKERS` (default: cores), `VELO_MAX_CONNS` per wo
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.7.1:
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.8.0:
 
 | route | kind | req/s | p50 | p99 |
 | --- | --- | --- | --- | --- |
-| `/health` | const fold | 94 900 | 0.44 ms | 2.19 ms |
+| `/health` | const fold | 96 500 | 0.44 ms | 2.19 ms |
 | `/users` (200 rows, 9 kB) | cached list | 53 900 | | |
-| `/users/:id` | store lookup | 81 900 | 0.49 ms | 2.31 ms |
+| `/users/:id` | store lookup | 84 800 | 0.49 ms | 2.31 ms |
 | `/users/page` (20 of 200) | slice + render | 56 700 | | |
 | `/stats` | 2 store counts | 70 500 | 0.37 ms | 6.07 ms |
 | `/teams/:tid/members/:mid` | 2 params | 66 400 | 0.44 ms | 5.39 ms |
@@ -145,13 +159,15 @@ velobench -c 200 -d 10 -p 16 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-25 tests (24 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+26 tests (25 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 ## Build notes
 
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.8.0** — built-in functions: `now()`, `uuid()` (v4, seeded from `/dev/urandom`, per-thread xorshift after that), `len(x)`, `env("NAME")`.
 
 **v0.7.1** — graceful shutdown: `SIGINT`/`SIGTERM` unwind the event loop and flush a final snapshot when `--data` is set. `Server::shutdown()` does the same from code.
 

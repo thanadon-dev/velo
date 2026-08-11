@@ -23,6 +23,11 @@ GET  /raw/:v          => { v: v }
 DELETE /gone/:id      => { id: id } : 204
 POST /accepted        => "queued" : 202
 GET  /paged           => db.users.page(query.offset, query.limit)
+GET  /time            => { at: now() }
+GET  /id              => uuid()
+GET  /sizes           => { s: len("abc"), a: len([1,2]), n: len(null) }
+GET  /home            => env("VELO_TEST_ENV")
+POST /events          => db.events.create({ at: now(), id: uuid(), data: body })
 "#;
 
 fn server() -> Arc<Server> {
@@ -388,4 +393,30 @@ fn serve_stops_on_shutdown() {
     s.shutdown();
     h.join().unwrap().unwrap();
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err() || s.stopping());
+}
+
+#[test]
+fn builtins() {
+    std::env::set_var("VELO_TEST_ENV", "set");
+    let s = Server::new(compile(SRC, None).unwrap()).unwrap();
+    assert_eq!(call(&s, "GET", "/sizes", "").1, r#"{"s":3,"a":2,"n":0}"#);
+    assert_eq!(call(&s, "GET", "/home", "").1, "set");
+
+    let (_, id, _) = call(&s, "GET", "/id", "");
+    assert_eq!(id.len(), 36, "{id}");
+    assert_eq!(id.as_bytes()[14], b'4');
+    let (_, id2, _) = call(&s, "GET", "/id", "");
+    assert_ne!(id, id2);
+
+    let (_, body, _) = call(&s, "GET", "/time", "");
+    let at = body.trim_start_matches("{\"at\":").trim_end_matches('}').parse::<u64>().unwrap();
+    assert!(at > 1_700_000_000_000, "{at}");
+
+    let (status, ev, _) = call(&s, "POST", "/events", r#"{"kind":"ping"}"#);
+    assert_eq!(status, 201);
+    assert!(ev.contains(r#""data":{"kind":"ping"}"#), "{ev}");
+
+    assert!(compile("GET /a => nope()", None).is_err());
+    assert!(compile("GET /a => len()", None).is_err());
+    assert!(compile("GET /a => now(1)", None).is_err());
 }
