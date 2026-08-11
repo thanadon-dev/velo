@@ -33,11 +33,9 @@ impl Value {
 
     pub fn get(&self, key: &str) -> Value {
         match self {
-            Value::Obj(o) | Value::Row(o, _) => o
-                .iter()
-                .find(|(k, _)| &**k == key)
-                .map(|(_, v)| v.clone())
-                .unwrap_or(Value::Null),
+            Value::Obj(o) | Value::Row(o, _) => {
+                o.iter().find(|(k, _)| &**k == key).map(|(_, v)| v.clone()).unwrap_or(Value::Null)
+            }
             _ => Value::Null,
         }
     }
@@ -114,7 +112,7 @@ pub fn write_number(out: &mut Vec<u8>, f: f64) {
 pub fn write_i64(out: &mut Vec<u8>, n: i64) {
     let mut buf = [0u8; 20];
     let neg = n < 0;
-    let mut u = if neg { (n as i128).unsigned_abs() as u128 } else { n as u128 };
+    let mut u = if neg { (n as i128).unsigned_abs() } else { n as u128 };
     let mut i = buf.len();
     loop {
         i -= 1;
@@ -173,13 +171,16 @@ pub fn write_string(out: &mut Vec<u8>, s: &str) {
     out.push(b'"');
 }
 
-pub fn parse_json(b: &[u8]) -> Result<Value, ()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JsonError;
+
+pub fn parse_json(b: &[u8]) -> Result<Value, JsonError> {
     let mut p = P { b, i: 0 };
     p.ws();
     let v = p.value()?;
     p.ws();
     if p.i != p.b.len() {
-        return Err(());
+        return Err(JsonError);
     }
     Ok(v)
 }
@@ -199,9 +200,9 @@ impl<'a> P<'a> {
         }
     }
 
-    fn value(&mut self) -> Result<Value, ()> {
+    fn value(&mut self) -> Result<Value, JsonError> {
         if self.i >= self.b.len() {
-            return Err(());
+            return Err(JsonError);
         }
         match self.b[self.i] {
             b'{' => self.object(),
@@ -214,15 +215,15 @@ impl<'a> P<'a> {
         }
     }
 
-    fn lit(&mut self, s: &[u8]) -> Result<(), ()> {
+    fn lit(&mut self, s: &[u8]) -> Result<(), JsonError> {
         if self.b.len() < self.i + s.len() || &self.b[self.i..self.i + s.len()] != s {
-            return Err(());
+            return Err(JsonError);
         }
         self.i += s.len();
         Ok(())
     }
 
-    fn object(&mut self) -> Result<Value, ()> {
+    fn object(&mut self) -> Result<Value, JsonError> {
         self.i += 1;
         let mut fields: Obj = Vec::new();
         self.ws();
@@ -235,7 +236,7 @@ impl<'a> P<'a> {
             let k = self.string()?;
             self.ws();
             if self.i >= self.b.len() || self.b[self.i] != b':' {
-                return Err(());
+                return Err(JsonError);
             }
             self.i += 1;
             self.ws();
@@ -248,12 +249,12 @@ impl<'a> P<'a> {
                     self.i += 1;
                     return Ok(Value::obj(fields));
                 }
-                _ => return Err(()),
+                _ => return Err(JsonError),
             }
         }
     }
 
-    fn array(&mut self) -> Result<Value, ()> {
+    fn array(&mut self) -> Result<Value, JsonError> {
         self.i += 1;
         let mut items = Vec::new();
         self.ws();
@@ -271,21 +272,21 @@ impl<'a> P<'a> {
                     self.i += 1;
                     return Ok(Value::Arr(Arc::new(items)));
                 }
-                _ => return Err(()),
+                _ => return Err(JsonError),
             }
         }
     }
 
-    fn string(&mut self) -> Result<Arc<str>, ()> {
+    fn string(&mut self) -> Result<Arc<str>, JsonError> {
         if self.i >= self.b.len() || self.b[self.i] != b'"' {
-            return Err(());
+            return Err(JsonError);
         }
         self.i += 1;
         let start = self.i;
         while self.i < self.b.len() {
             match self.b[self.i] {
                 b'"' => {
-                    let s = std::str::from_utf8(&self.b[start..self.i]).map_err(|_| ())?;
+                    let s = std::str::from_utf8(&self.b[start..self.i]).map_err(|_| JsonError)?;
                     self.i += 1;
                     return Ok(Arc::from(s));
                 }
@@ -293,22 +294,22 @@ impl<'a> P<'a> {
                 _ => self.i += 1,
             }
         }
-        Err(())
+        Err(JsonError)
     }
 
-    fn string_slow(&mut self, start: usize) -> Result<Arc<str>, ()> {
+    fn string_slow(&mut self, start: usize) -> Result<Arc<str>, JsonError> {
         let mut buf = Vec::with_capacity(self.b.len() - start);
         buf.extend_from_slice(&self.b[start..self.i]);
         while self.i < self.b.len() {
             match self.b[self.i] {
                 b'"' => {
                     self.i += 1;
-                    let s = String::from_utf8(buf).map_err(|_| ())?;
+                    let s = String::from_utf8(buf).map_err(|_| JsonError)?;
                     return Ok(Arc::from(s.as_str()));
                 }
                 b'\\' => {
                     self.i += 1;
-                    let e = *self.b.get(self.i).ok_or(())?;
+                    let e = *self.b.get(self.i).ok_or(JsonError)?;
                     match e {
                         b'"' => buf.push(b'"'),
                         b'\\' => buf.push(b'\\'),
@@ -343,7 +344,7 @@ impl<'a> P<'a> {
                             let mut tmp = [0u8; 4];
                             buf.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
                         }
-                        _ => return Err(()),
+                        _ => return Err(JsonError),
                     }
                     self.i += 1;
                 }
@@ -353,20 +354,20 @@ impl<'a> P<'a> {
                 }
             }
         }
-        Err(())
+        Err(JsonError)
     }
 
-    fn hex4(&mut self) -> Result<u32, ()> {
+    fn hex4(&mut self) -> Result<u32, JsonError> {
         if self.i + 4 >= self.b.len() {
-            return Err(());
+            return Err(JsonError);
         }
-        let s = std::str::from_utf8(&self.b[self.i + 1..self.i + 5]).map_err(|_| ())?;
-        let n = u32::from_str_radix(s, 16).map_err(|_| ())?;
+        let s = std::str::from_utf8(&self.b[self.i + 1..self.i + 5]).map_err(|_| JsonError)?;
+        let n = u32::from_str_radix(s, 16).map_err(|_| JsonError)?;
         self.i += 4;
         Ok(n)
     }
 
-    fn number(&mut self) -> Result<Value, ()> {
+    fn number(&mut self) -> Result<Value, JsonError> {
         let start = self.i;
         while self.i < self.b.len() {
             match self.b[self.i] {
@@ -375,9 +376,9 @@ impl<'a> P<'a> {
             }
         }
         if start == self.i {
-            return Err(());
+            return Err(JsonError);
         }
-        let s = std::str::from_utf8(&self.b[start..self.i]).map_err(|_| ())?;
-        s.parse::<f64>().map(Value::Num).map_err(|_| ())
+        let s = std::str::from_utf8(&self.b[start..self.i]).map_err(|_| JsonError)?;
+        s.parse::<f64>().map(Value::Num).map_err(|_| JsonError)
     }
 }

@@ -92,14 +92,8 @@ fn main() {
     let start = Instant::now();
     let mut handles = Vec::new();
     for _ in 0..a.conns {
-        let (a, req, stop, done, errors, bytes) = (
-            a.clone(),
-            req.clone(),
-            stop.clone(),
-            done.clone(),
-            errors.clone(),
-            bytes.clone(),
-        );
+        let (a, req, stop, done, errors, bytes) =
+            (a.clone(), req.clone(), stop.clone(), done.clone(), errors.clone(), bytes.clone());
         handles.push(std::thread::spawn(move || worker(a, req, stop, done, errors, bytes)));
     }
 
@@ -123,7 +117,12 @@ fn main() {
     println!("errors      {}", errors.load(Ordering::Relaxed));
     println!("throughput  {:.0} req/s", total as f64 / elapsed);
     println!("transfer    {:.1} MB/s", bytes.load(Ordering::Relaxed) as f64 / elapsed / 1e6);
-    println!("latency     p50 {:.3} ms  p99 {:.3} ms  max {:.3} ms", pick(0.50), pick(0.99), pick(1.0));
+    println!(
+        "latency     p50 {:.3} ms  p99 {:.3} ms  max {:.3} ms",
+        pick(0.50),
+        pick(0.99),
+        pick(1.0)
+    );
 }
 
 fn worker(

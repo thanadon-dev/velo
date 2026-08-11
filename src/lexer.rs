@@ -76,9 +76,7 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
             } else if c == b' ' || c == b'\t' || c == b'\r' {
                 self.pos += 1;
-            } else if c == b'#'
-                || (c == b'/' && self.src.get(self.pos + 1) == Some(&b'/'))
-            {
+            } else if c == b'#' || (c == b'/' && self.src.get(self.pos + 1) == Some(&b'/')) {
                 while self.pos < self.src.len() && self.src[self.pos] != b'\n' {
                     self.pos += 1;
                 }
@@ -88,7 +86,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn next(&mut self) -> Result<Token, String> {
+    pub fn next_token(&mut self) -> Result<Token, String> {
         self.skip();
         if self.pos >= self.src.len() {
             return Ok(Token::new(Kind::Eof, "", self.line));
@@ -142,12 +140,7 @@ impl<'a> Lexer<'a> {
             b'.' => Kind::Dot,
             b',' => Kind::Comma,
             b':' => Kind::Colon,
-            _ => {
-                return Err(format!(
-                    "line {}: unexpected character {:?}",
-                    self.line, c as char
-                ))
-            }
+            _ => return Err(format!("line {}: unexpected character {:?}", self.line, c as char)),
         };
         self.pos += 1;
         Ok(Token::new(kind, &(c as char).to_string(), self.line))

@@ -34,6 +34,12 @@ pub struct Router {
     nodes: Vec<Node>,
 }
 
+impl Default for Router {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Router {
     pub fn new() -> Router {
         Router {
@@ -150,7 +156,7 @@ impl Router {
             }
         }
         let idx = self.nodes[cur].route?;
-        if let Some(c) = c.as_deref_mut() {
+        if let Some(c) = c {
             c.nparams = n.min(MAX_PARAMS);
         }
         Some(idx)

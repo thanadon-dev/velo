@@ -94,7 +94,7 @@ impl Server {
             Some(i) => (&path[..i], &path[i + 1..]),
             None => (path, ""),
         };
-        let Some(m) = Method::from_str(method) else {
+        let Some(m) = Method::parse(method) else {
             return err_body(Err_ { status: 405, msg: "method not allowed" }, out);
         };
         let mut ctx = Ctx::default();
@@ -220,10 +220,7 @@ fn cors_headers(origin: &Option<String>) -> Vec<u8> {
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+    std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
 fn err_body(e: Err_, out: &mut Vec<u8>) -> (u16, Ctype) {
@@ -418,7 +415,9 @@ fn write_head(
     }
     out.extend_from_slice(match ct {
         Ctype::Json => b"\r\nContent-Type: application/json\r\nContent-Length: ".as_slice(),
-        Ctype::Text => b"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ".as_slice(),
+        Ctype::Text => {
+            b"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ".as_slice()
+        }
     });
     write_i64(out, len as i64);
     out.extend_from_slice(if keep_alive {

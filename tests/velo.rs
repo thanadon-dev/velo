@@ -54,11 +54,9 @@ fn const_routes_fold() {
     assert_eq!(health.konst.as_deref(), Some(b"ok".as_slice()));
     assert!(health.const_text);
     let version = prog.routes.iter().find(|r| r.pattern == "/version").unwrap();
-    assert_eq!(
-        version.konst.as_deref(),
-        Some(br#"{"name":"velo","n":2}"#.as_slice())
-    );
-    let users = prog.routes.iter().find(|r| r.pattern == "/users" && r.method.name() == "GET").unwrap();
+    assert_eq!(version.konst.as_deref(), Some(br#"{"name":"velo","n":2}"#.as_slice()));
+    let users =
+        prog.routes.iter().find(|r| r.pattern == "/users" && r.method.name() == "GET").unwrap();
     assert!(users.konst.is_none());
 }
 
@@ -86,14 +84,8 @@ fn crud_roundtrip() {
 #[test]
 fn params_and_body_fields() {
     let s = server();
-    assert_eq!(
-        call(&s, "GET", "/echo/1/x/2", "").1,
-        r#"{"a":"1","b":"2"}"#
-    );
-    assert_eq!(
-        call(&s, "POST", "/name", r#"{"name":"velo"}"#),
-        (201, "velo".into(), Ctype::Text)
-    );
+    assert_eq!(call(&s, "GET", "/echo/1/x/2", "").1, r#"{"a":"1","b":"2"}"#);
+    assert_eq!(call(&s, "POST", "/name", r#"{"name":"velo"}"#), (201, "velo".into(), Ctype::Text));
 }
 
 #[test]
@@ -140,10 +132,7 @@ fn json_roundtrip() {
 #[test]
 fn json_escapes() {
     let v = Value::str("a\"b\\c\nd\te\u{1}");
-    assert_eq!(
-        String::from_utf8(v.to_json()).unwrap(),
-        "\"a\\\"b\\\\c\\nd\\te\\u0001\""
-    );
+    assert_eq!(String::from_utf8(v.to_json()).unwrap(), "\"a\\\"b\\\\c\\nd\\te\\u0001\"");
 }
 
 fn spawn() -> u16 {
@@ -273,7 +262,8 @@ fn http_many_connections() {
     let handles: Vec<_> = (0..100)
         .map(|_| {
             std::thread::spawn(move || {
-                let res = raw(port, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+                let res =
+                    raw(port, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
                 assert!(res.ends_with("ok"), "{res}");
             })
         })
@@ -286,10 +276,7 @@ fn http_many_connections() {
 #[test]
 fn query_params() {
     let s = server();
-    assert_eq!(
-        call(&s, "GET", "/q?limit=10&tag=a+b", "").1,
-        r#"{"limit":"10","tag":"a b"}"#
-    );
+    assert_eq!(call(&s, "GET", "/q?limit=10&tag=a+b", "").1, r#"{"limit":"10","tag":"a b"}"#);
     assert_eq!(call(&s, "GET", "/q", "").1, r#"{"limit":null,"tag":null}"#);
     assert_eq!(
         call(&s, "GET", "/q?tag=%E0%B9%84%E0%B8%97%E0%B8%A2", "").1,
@@ -312,10 +299,7 @@ fn where_filter() {
     call(&s, "POST", "/users", r#"{"name":"a","team":"z"}"#);
     let (status, body, _) = call(&s, "GET", "/search?name=a", "");
     assert_eq!(status, 200);
-    assert_eq!(
-        body,
-        r#"[{"id":1,"name":"a","team":"x"},{"id":3,"name":"a","team":"z"}]"#
-    );
+    assert_eq!(body, r#"[{"id":1,"name":"a","team":"x"},{"id":3,"name":"a","team":"z"}]"#);
     assert_eq!(call(&s, "GET", "/search?name=zz", "").1, "[]");
 }
 
@@ -357,7 +341,10 @@ fn status_override_and_paging() {
     for i in 0..5 {
         call(&s, "POST", "/users", &format!(r#"{{"n":{i}}}"#));
     }
-    assert_eq!(call(&s, "GET", "/paged?offset=1&limit=2", "").1, r#"[{"id":2,"n":1},{"id":3,"n":2}]"#);
+    assert_eq!(
+        call(&s, "GET", "/paged?offset=1&limit=2", "").1,
+        r#"[{"id":2,"n":1},{"id":3,"n":2}]"#
+    );
     assert_eq!(call(&s, "GET", "/paged?offset=4&limit=10", "").1, r#"[{"id":5,"n":4}]"#);
     assert_eq!(call(&s, "GET", "/paged?offset=99&limit=2", "").1, "[]");
     assert_eq!(call(&s, "GET", "/paged", "").1.matches(r#""id""#).count(), 5);
@@ -519,13 +506,11 @@ fn sorted_cache_invalidates() {
 fn request_headers() {
     let s = server();
     let mut out = Vec::new();
-    let raw = b"GET /whoami HTTP/1.1\r\nHost: x\r\nUser-Agent: velo/1\r\nAuthorization: Bearer t\r\n\r\n";
+    let raw =
+        b"GET /whoami HTTP/1.1\r\nHost: x\r\nUser-Agent: velo/1\r\nAuthorization: Bearer t\r\n\r\n";
     let (status, _) = s.handle("GET", "/whoami", b"", raw, &mut out);
     assert_eq!(status, 200);
-    assert_eq!(
-        String::from_utf8(out).unwrap(),
-        r#"{"agent":"velo/1","auth":"Bearer t"}"#
-    );
+    assert_eq!(String::from_utf8(out).unwrap(), r#"{"agent":"velo/1","auth":"Bearer t"}"#);
 
     let mut out = Vec::new();
     s.handle("GET", "/whoami", b"", b"GET /whoami HTTP/1.1\r\n\r\n", &mut out);
@@ -541,10 +526,8 @@ fn http_header_routing_end_to_end() {
     let port = listener.local_addr().unwrap().port();
     let bg = s.clone();
     std::thread::spawn(move || bg.serve(listener));
-    let res = raw(
-        port,
-        b"GET /tenant HTTP/1.1\r\nHost: x\r\nX-Team: blue\r\nConnection: close\r\n\r\n",
-    );
+    let res =
+        raw(port, b"GET /tenant HTTP/1.1\r\nHost: x\r\nX-Team: blue\r\nConnection: close\r\n\r\n");
     assert!(res.ends_with(r#"[{"id":2,"name":"b","team":"blue"}]"#), "{res}");
     s.shutdown();
 }

@@ -58,11 +58,8 @@ fn run(args: &[String]) {
         .cloned()
         .or_else(|| std::env::var("VELO_ADDR").ok())
         .unwrap_or_else(|| ":8080".to_string());
-    let addr = if let Some(port) = addr.strip_prefix(':') {
-        format!("0.0.0.0:{port}")
-    } else {
-        addr
-    };
+    let addr =
+        if let Some(port) = addr.strip_prefix(':') { format!("0.0.0.0:{port}") } else { addr };
     let store = Store::new();
     let prog = match compile(&source, Some(store.clone())) {
         Ok(p) => p,
@@ -129,13 +126,7 @@ fn routes(args: &[String]) {
                     (None, _, true) => "query",
                     _ => "dynamic",
                 };
-                println!(
-                    "{:<7} {:<28} {:<8} {}",
-                    r.method.name(),
-                    r.pattern,
-                    kind,
-                    r.status
-                );
+                println!("{:<7} {:<28} {:<8} {}", r.method.name(), r.pattern, kind, r.status);
             }
         }
         Err(e) => {

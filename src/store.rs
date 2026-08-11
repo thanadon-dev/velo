@@ -1,8 +1,8 @@
 use crate::value::{Obj, Value};
 use std::cmp::Ordering as Ordering2;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 const SORT_CACHE_MAX: usize = 16;
@@ -123,22 +123,15 @@ impl Collection {
 
     pub fn filter(&self, field: &str, want: &str) -> Value {
         let s = self.snap.read().unwrap();
-        let rows: Vec<Value> = s
-            .rows
-            .iter()
-            .filter(|r| r.get(field).as_key() == want)
-            .cloned()
-            .collect();
+        let rows: Vec<Value> =
+            s.rows.iter().filter(|r| r.get(field).as_key() == want).cloned().collect();
         Value::Arr(Arc::new(rows))
     }
 
     pub fn page(&self, offset: usize, limit: usize) -> Value {
         let s = self.snap.read().unwrap();
-        let end = if limit == 0 {
-            s.rows.len()
-        } else {
-            offset.saturating_add(limit).min(s.rows.len())
-        };
+        let end =
+            if limit == 0 { s.rows.len() } else { offset.saturating_add(limit).min(s.rows.len()) };
         let rows = match s.rows.get(offset.min(s.rows.len())..end) {
             Some(slice) => slice.to_vec(),
             None => Vec::new(),
@@ -315,10 +308,7 @@ fn with_id(v: Value, id: f64) -> Value {
             }
             Value::row(row)
         }
-        other => Value::row(vec![
-            (Arc::from("id"), Value::Num(id)),
-            (Arc::from("value"), other),
-        ]),
+        other => Value::row(vec![(Arc::from("id"), Value::Num(id)), (Arc::from("value"), other)]),
     }
 }
 
@@ -342,7 +332,7 @@ fn merge(base: &Value, patch: &Value) -> Value {
     Value::row(out)
 }
 
-fn obj_of(v: &Value) -> Option<&Arc<Vec<(Arc<str>, Value)>>> {
+fn obj_of(v: &Value) -> Option<&Arc<Obj>> {
     match v {
         Value::Obj(o) | Value::Row(o, _) => Some(o),
         _ => None,

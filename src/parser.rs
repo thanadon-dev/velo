@@ -187,7 +187,7 @@ pub enum Method {
 pub const N_METHODS: usize = 7;
 
 impl Method {
-    pub fn from_str(s: &str) -> Option<Method> {
+    pub fn parse(s: &str) -> Option<Method> {
         Some(match s {
             "GET" => Method::Get,
             "POST" => Method::Post,
@@ -223,7 +223,7 @@ pub struct Program {
 }
 
 pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> {
-    let store = store.unwrap_or_else(Store::new);
+    let store = store.unwrap_or_default();
     let mut p = Parser {
         lex: Lexer::new(src),
         tok: Token { kind: Kind::Eof, text: String::new(), num: 0.0, line: 0 },
@@ -252,11 +252,7 @@ fn with_source(src: &str, err: String) -> String {
     };
     let Some(text) = src.lines().nth(num.saturating_sub(1)) else { return err };
     let gutter = num.to_string();
-    format!(
-        "{err}\n  {gutter} | {}\n  {} |",
-        text.trim_end(),
-        " ".repeat(gutter.len())
-    )
+    format!("{err}\n  {gutter} | {}\n  {} |", text.trim_end(), " ".repeat(gutter.len()))
 }
 
 struct Parser<'a> {
@@ -272,7 +268,7 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn advance(&mut self) -> Result<(), String> {
-        self.tok = self.lex.next()?;
+        self.tok = self.lex.next_token()?;
         Ok(())
     }
 
@@ -298,7 +294,7 @@ impl<'a> Parser<'a> {
             ));
         }
         let line = self.tok.line;
-        let method = Method::from_str(&self.tok.text.to_uppercase())
+        let method = Method::parse(&self.tok.text.to_uppercase())
             .ok_or_else(|| format!("line {}: unknown method {:?}", line, self.tok.text))?;
         let path = self.lex.path()?;
         self.advance()?;
@@ -375,10 +371,9 @@ impl<'a> Parser<'a> {
             Kind::LBrace => self.object(),
             Kind::LBrack => self.array(),
             Kind::Ident => self.chain(),
-            _ => Err(format!(
-                "line {}: unexpected {:?} in expression",
-                self.tok.line, self.tok.text
-            )),
+            _ => {
+                Err(format!("line {}: unexpected {:?} in expression", self.tok.line, self.tok.text))
+            }
         }
     }
 
@@ -452,9 +447,7 @@ impl<'a> Parser<'a> {
                 "uuid" => Builtin::Uuid,
                 "len" => Builtin::Len,
                 "env" => Builtin::Env,
-                other => {
-                    return Err(format!("line {}: unknown function {other}()", head.line))
-                }
+                other => return Err(format!("line {}: unknown function {other}()", head.line)),
             };
             self.advance()?;
             let mut args = Vec::new();
@@ -486,10 +479,7 @@ impl<'a> Parser<'a> {
             self.pure = false;
             return self.fields(Expr::Param(i));
         }
-        Err(format!(
-            "line {}: unknown identifier {:?}",
-            head.line, head.text
-        ))
+        Err(format!("line {}: unknown identifier {:?}", head.line, head.text))
     }
 
     fn fields(&mut self, base: Expr) -> Result<Expr, String> {
@@ -569,10 +559,7 @@ impl<'a> Parser<'a> {
                 Op::Delete(Box::new(args.next().unwrap()))
             }
             other => {
-                return Err(format!(
-                    "line {}: unknown operation db.{}.{}",
-                    line, name.text, other
-                ))
+                return Err(format!("line {}: unknown operation db.{}.{}", line, name.text, other))
             }
         };
         Ok(Expr::Db(col, op))
@@ -641,7 +628,7 @@ fn uuid_v4() -> String {
 fn fill_random(out: &mut [u8]) {
     use std::cell::Cell;
     thread_local! {
-        static STATE: Cell<u64> = Cell::new(0);
+        static STATE: Cell<u64> = const { Cell::new(0) };
     }
     STATE.with(|st| {
         let mut x = st.get();
@@ -736,7 +723,10 @@ pub fn parse_query(q: &str) -> Value {
         };
         let key = percent_decode(k);
         let val = percent_decode(v);
-        fields.push((std::sync::Arc::from(key.as_str()), Value::Str(std::sync::Arc::from(val.as_str()))));
+        fields.push((
+            std::sync::Arc::from(key.as_str()),
+            Value::Str(std::sync::Arc::from(val.as_str())),
+        ));
     }
     Value::obj(fields)
 }
@@ -746,19 +736,13 @@ fn pattern_params(pattern: &str, line: usize) -> Result<Vec<String>, String> {
     for seg in pattern.trim_matches('/').split('/') {
         if let Some(name) = seg.strip_prefix(':') {
             if name.is_empty() {
-                return Err(format!(
-                    "line {}: empty parameter name in {:?}",
-                    line, pattern
-                ));
+                return Err(format!("line {}: empty parameter name in {:?}", line, pattern));
             }
             params.push(name.to_string());
         }
     }
     if params.len() > MAX_PARAMS {
-        return Err(format!(
-            "line {}: too many parameters (max {})",
-            line, MAX_PARAMS
-        ));
+        return Err(format!("line {}: too many parameters (max {})", line, MAX_PARAMS));
     }
     Ok(params)
 }
