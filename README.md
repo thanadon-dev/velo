@@ -1,6 +1,6 @@
 # Velo
 
-**v0.8.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.9.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -118,11 +118,22 @@ Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothin
 - **Event loop.** One epoll instance per worker thread (default: one per core), all sharing the listener with `EPOLLEXCLUSIVE`. Connections are non-blocking and cost a few kB each instead of a thread and a stack: 1 000 live connections fit in under 1 MB of RSS. `epoll` is called through three `extern "C"` declarations, still no crates.
 - **No dependencies.** `[dependencies]` is empty. std only.
 
-Env knobs: `VELO_ADDR`, `VELO_WORKERS` (default: cores), `VELO_MAX_CONNS` per worker (default 65536), `VELO_KEEPALIVE` idle seconds (default 60), `VELO_DATA`, `VELO_SAVE_MS`.
+Env knobs:
+
+| variable | default | effect |
+| --- | --- | --- |
+| `VELO_ADDR` | `:8080` | listen address |
+| `VELO_WORKERS` | cores | event loops, one thread each |
+| `VELO_MAX_CONNS` | 65536 | live connections per worker, extra ones get 503 |
+| `VELO_KEEPALIVE` | 60 | idle seconds before a connection is swept |
+| `VELO_DATA` | off | snapshot file, same as `--data` |
+| `VELO_SAVE_MS` | 200 | minimum gap between snapshots |
+| `VELO_CORS` | off | value for `Access-Control-Allow-Origin`; also answers `OPTIONS` preflight with 204 |
+| `VELO_LOG` | off | one line per request on stderr; costs about 75% of throughput, so keep it for development |
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.8.0:
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.9.0:
 
 | route | kind | req/s | p50 | p99 |
 | --- | --- | --- | --- | --- |
@@ -159,13 +170,15 @@ velobench -c 200 -d 10 -p 16 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-26 tests (25 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+27 tests (26 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 ## Build notes
 
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.9.0** — `VELO_CORS` adds the allow-origin headers and answers `OPTIONS` preflight with a bodyless 204; `VELO_LOG` prints one line per request.
 
 **v0.8.0** — built-in functions: `now()`, `uuid()` (v4, seeded from `/dev/urandom`, per-thread xorshift after that), `len(x)`, `env("NAME")`.
 

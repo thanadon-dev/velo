@@ -420,3 +420,28 @@ fn builtins() {
     assert!(compile("GET /a => len()", None).is_err());
     assert!(compile("GET /a => now(1)", None).is_err());
 }
+
+#[test]
+fn cors_preflight_and_headers() {
+    let mut s = Server::new(compile(SRC, None).unwrap()).unwrap();
+    {
+        let srv = Arc::get_mut(&mut s).unwrap();
+        srv.cors = true;
+        srv.extra_headers = b"Access-Control-Allow-Origin: *\r\n".to_vec();
+    }
+    assert_eq!(call(&s, "OPTIONS", "/users", ""), (204, String::new(), Ctype::Json));
+    assert_eq!(call(&s, "GET", "/nope", "").0, 404);
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let s2 = s.clone();
+    std::thread::spawn(move || s2.serve(listener));
+    let res = raw(port, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    assert!(res.contains("Access-Control-Allow-Origin: *"), "{res}");
+    assert!(res.ends_with("ok"), "{res}");
+    let pre = raw(port, b"OPTIONS /users HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    assert!(pre.starts_with("HTTP/1.1 204"), "{pre}");
+    assert!(pre.contains("Access-Control-Allow-Origin: *"), "{pre}");
+    assert!(!pre.contains("Content-Length"), "{pre}");
+    s.shutdown();
+}

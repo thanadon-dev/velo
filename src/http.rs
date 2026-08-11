@@ -47,12 +47,16 @@ pub struct Server {
     pub max_conns: usize,
     pub keepalive_secs: u64,
     pub workers: usize,
+    pub extra_headers: Vec<u8>,
+    pub cors: bool,
+    pub log: bool,
     stop: AtomicBool,
 }
 
 impl Server {
     pub fn new(prog: Program) -> Result<Arc<Server>, String> {
         let router = Router::build(&prog.routes)?;
+        let cors = std::env::var("VELO_CORS").ok().filter(|v| !v.is_empty());
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         Ok(Arc::new(Server {
             routes: prog.routes,
@@ -61,6 +65,9 @@ impl Server {
             max_conns: env_usize("VELO_MAX_CONNS", 65536),
             keepalive_secs: env_usize("VELO_KEEPALIVE", 60) as u64,
             workers: env_usize("VELO_WORKERS", cpus).max(1),
+            extra_headers: cors_headers(&cors),
+            cors: cors.is_some(),
+            log: std::env::var("VELO_LOG").map(|v| v != "0").unwrap_or(false),
             stop: AtomicBool::new(false),
         }))
     }
@@ -88,6 +95,9 @@ impl Server {
             }
         });
         let Some(idx) = found else {
+            if self.cors && m == Method::Options {
+                return (204, Ctype::Json);
+            }
             let e = if self.router.allows(path) {
                 Err_ { status: 405, msg: "method not allowed" }
             } else {
@@ -148,6 +158,17 @@ impl Server {
         }
         res
     }
+}
+
+fn cors_headers(origin: &Option<String>) -> Vec<u8> {
+    let Some(origin) = origin else { return Vec::new() };
+    let mut h = Vec::with_capacity(160);
+    h.extend_from_slice(b"Access-Control-Allow-Origin: ");
+    h.extend_from_slice(origin.as_bytes());
+    h.extend_from_slice(
+        b"\r\nAccess-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nAccess-Control-Max-Age: 86400\r\n",
+    );
+    h
 }
 
 fn env_usize(key: &str, default: usize) -> usize {
@@ -319,17 +340,26 @@ fn empty_status(status: u16) -> bool {
     status == 204 || status == 304
 }
 
-fn write_head(out: &mut Vec<u8>, status: u16, ct: Ctype, len: usize, keep_alive: bool) {
+fn write_head(
+    out: &mut Vec<u8>,
+    status: u16,
+    ct: Ctype,
+    len: usize,
+    keep_alive: bool,
+    extra: &[u8],
+) {
     out.extend_from_slice(b"HTTP/1.1 ");
     write_i64(out, status as i64);
     out.push(b' ');
     out.extend_from_slice(status_text(status).as_bytes());
     if empty_status(status) {
-        if keep_alive {
-            out.extend_from_slice(b"\r\nConnection: keep-alive\r\n\r\n");
+        out.extend_from_slice(if keep_alive {
+            b"\r\nConnection: keep-alive\r\n".as_slice()
         } else {
-            out.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
-        }
+            b"\r\nConnection: close\r\n".as_slice()
+        });
+        out.extend_from_slice(extra);
+        out.extend_from_slice(b"\r\n");
         return;
     }
     out.extend_from_slice(match ct {
@@ -337,11 +367,13 @@ fn write_head(out: &mut Vec<u8>, status: u16, ct: Ctype, len: usize, keep_alive:
         Ctype::Text => b"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ".as_slice(),
     });
     write_i64(out, len as i64);
-    if keep_alive {
-        out.extend_from_slice(b"\r\nConnection: keep-alive\r\n\r\n");
+    out.extend_from_slice(if keep_alive {
+        b"\r\nConnection: keep-alive\r\n".as_slice()
     } else {
-        out.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
-    }
+        b"\r\nConnection: close\r\n".as_slice()
+    });
+    out.extend_from_slice(extra);
+    out.extend_from_slice(b"\r\n");
 }
 
 struct Conn {
@@ -429,7 +461,7 @@ fn process(srv: &Server, c: &mut Conn) {
     loop {
         let Some(head) = parse_head(&c.inbuf[c.start..]) else {
             if c.inbuf.len() - c.start > MAX_HEAD {
-                write_head(&mut c.out, 431, Ctype::Json, 0, false);
+                write_head(&mut c.out, 431, Ctype::Json, 0, false, &[]);
                 c.closing = true;
             }
             c.compact();
@@ -441,7 +473,7 @@ fn process(srv: &Server, c: &mut Conn) {
             return;
         }
         if let Some(code) = head.error {
-            write_head(&mut c.out, code, Ctype::Json, 0, false);
+            write_head(&mut c.out, code, Ctype::Json, 0, false, &[]);
             c.closing = true;
             c.start += need;
             c.compact();
@@ -453,7 +485,10 @@ fn process(srv: &Server, c: &mut Conn) {
         c.body.clear();
         let mut body = std::mem::take(&mut c.body);
         let (status, ct) = srv.dispatch(method, path, &req[head.head_end..], &mut body);
-        write_head(&mut c.out, status, ct, body.len(), head.keep_alive);
+        if srv.log {
+            eprintln!("{method} {path} {status} {}b", body.len());
+        }
+        write_head(&mut c.out, status, ct, body.len(), head.keep_alive, &srv.extra_headers);
         if !head.head_only && !empty_status(status) {
             c.out.extend_from_slice(&body);
         }
