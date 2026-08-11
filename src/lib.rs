@@ -1,3 +1,4 @@
+pub mod epoll;
 pub mod http;
 pub mod lexer;
 pub mod parser;

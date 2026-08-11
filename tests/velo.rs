@@ -248,3 +248,19 @@ fn concurrent_creates_are_unique() {
     let (_, body, _) = call(&s, "GET", "/users/400", "");
     assert!(body.contains(r#""id":400"#), "{body}");
 }
+
+#[test]
+fn http_many_connections() {
+    let port = spawn();
+    let handles: Vec<_> = (0..100)
+        .map(|_| {
+            std::thread::spawn(move || {
+                let res = raw(port, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+                assert!(res.ends_with("ok"), "{res}");
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+}

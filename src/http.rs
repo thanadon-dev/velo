@@ -1,17 +1,21 @@
+use crate::epoll::{self, Epoll, Event};
 use crate::parser::{Ctx, Err_, Method, Program, Route};
-use crate::router::Router;
+use crate::router::{Fnv, Router};
 use crate::store::Store;
 use crate::value::{write_i64, Value};
+use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const MAX_BODY: usize = 1 << 20;
 pub const MAX_HEAD: usize = 8 << 10;
 const READ_BUF: usize = 8 << 10;
-const STACK_SIZE: usize = 128 << 10;
+const EVENTS: usize = 256;
+const SWEEP: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Ctype {
@@ -25,19 +29,20 @@ pub struct Server {
     pub store: Arc<Store>,
     pub max_conns: usize,
     pub keepalive_secs: u64,
-    conns: AtomicUsize,
+    pub workers: usize,
 }
 
 impl Server {
     pub fn new(prog: Program) -> Result<Arc<Server>, String> {
         let router = Router::build(&prog.routes)?;
+        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         Ok(Arc::new(Server {
             routes: prog.routes,
             router,
             store: prog.store,
-            max_conns: env_usize("VELO_MAX_CONNS", 4096),
+            max_conns: env_usize("VELO_MAX_CONNS", 65536),
             keepalive_secs: env_usize("VELO_KEEPALIVE", 60) as u64,
-            conns: AtomicUsize::new(0),
+            workers: env_usize("VELO_WORKERS", cpus).max(1),
         }))
     }
 
@@ -100,27 +105,18 @@ impl Server {
     }
 
     pub fn serve(self: &Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
-            if self.conns.load(Ordering::Relaxed) >= self.max_conns {
-                let _ = (&stream).write_all(
-                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                );
-                continue;
-            }
-            self.conns.fetch_add(1, Ordering::Relaxed);
-            let srv = self.clone();
-            let spawned = std::thread::Builder::new()
-                .stack_size(STACK_SIZE)
-                .spawn(move || {
-                    serve_conn(&srv, stream);
-                    srv.conns.fetch_sub(1, Ordering::Relaxed);
-                });
-            if spawned.is_err() {
-                self.conns.fetch_sub(1, Ordering::Relaxed);
-            }
+        listener.set_nonblocking(true)?;
+        let listener = Arc::new(listener);
+        let mut handles = Vec::new();
+        for _ in 1..self.workers {
+            let (srv, lst) = (self.clone(), listener.clone());
+            handles.push(std::thread::spawn(move || worker(&srv, &lst)));
         }
-        Ok(())
+        let res = worker(self, &listener);
+        for h in handles {
+            let _ = h.join();
+        }
+        res
     }
 }
 
@@ -208,13 +204,22 @@ fn parse_head(buf: &[u8]) -> Option<Head> {
         }
     }
     let head_only = m == b"HEAD";
-    if chunked {
-        return Some(Head { method, path, head_end: end, content_len: 0, keep_alive: false, head_only, error: Some(411) });
-    }
-    if content_len > MAX_BODY {
-        return Some(Head { method, path, head_end: end, content_len, keep_alive: false, head_only, error: Some(413) });
-    }
-    Some(Head { method, path, head_end: end, content_len, keep_alive, head_only, error: None })
+    let error = if chunked {
+        Some(411)
+    } else if content_len > MAX_BODY {
+        Some(413)
+    } else {
+        None
+    };
+    Some(Head {
+        method,
+        path,
+        head_end: end,
+        content_len: if error.is_some() { 0 } else { content_len },
+        keep_alive: keep_alive && error.is_none(),
+        head_only,
+        error,
+    })
 }
 
 fn bad(end: usize, code: u16) -> Head {
@@ -235,7 +240,12 @@ fn find_head_end(buf: &[u8]) -> Option<usize> {
         if buf[i] == b'\n' && buf[i + 1] == b'\n' {
             return Some(i + 2);
         }
-        if i + 3 < buf.len() && buf[i] == b'\r' && buf[i + 1] == b'\n' && buf[i + 2] == b'\r' && buf[i + 3] == b'\n' {
+        if i + 3 < buf.len()
+            && buf[i] == b'\r'
+            && buf[i + 1] == b'\n'
+            && buf[i + 2] == b'\r'
+            && buf[i + 3] == b'\n'
+        {
             return Some(i + 4);
         }
         i += 1;
@@ -290,126 +300,224 @@ fn write_head(out: &mut Vec<u8>, status: u16, ct: Ctype, len: usize, keep_alive:
     }
 }
 
-fn serve_conn(srv: &Server, mut stream: TcpStream) {
-    let _ = stream.set_nodelay(true);
-    let ka = Duration::from_secs(srv.keepalive_secs.max(1));
-    let _ = stream.set_read_timeout(Some(ka));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(15)));
+struct Conn {
+    stream: TcpStream,
+    inbuf: Vec<u8>,
+    start: usize,
+    out: Vec<u8>,
+    wpos: usize,
+    body: Vec<u8>,
+    closing: bool,
+    want_out: bool,
+    last: Instant,
+}
 
-    let mut buf: Vec<u8> = Vec::with_capacity(READ_BUF);
-    let mut out: Vec<u8> = Vec::with_capacity(READ_BUF);
-    let mut body: Vec<u8> = Vec::with_capacity(1024);
-    let mut start = 0usize;
+impl Conn {
+    fn new(stream: TcpStream) -> Conn {
+        Conn {
+            stream,
+            inbuf: Vec::with_capacity(READ_BUF),
+            start: 0,
+            out: Vec::with_capacity(READ_BUF),
+            wpos: 0,
+            body: Vec::with_capacity(512),
+            closing: false,
+            want_out: false,
+            last: Instant::now(),
+        }
+    }
 
-    loop {
-        let head = match parse_head(&buf[start..]) {
-            Some(h) => h,
-            None => {
-                if buf.len() - start > MAX_HEAD {
-                    write_head(&mut out, 431, Ctype::Json, 0, false);
-                    let _ = stream.write_all(&out);
-                    return;
+    fn compact(&mut self) {
+        if self.start == 0 {
+            return;
+        }
+        if self.start >= self.inbuf.len() {
+            self.inbuf.clear();
+        } else {
+            self.inbuf.drain(..self.start);
+        }
+        self.start = 0;
+    }
+
+    fn fill(&mut self) -> bool {
+        loop {
+            if self.inbuf.len() - self.start > MAX_HEAD + MAX_BODY {
+                return false;
+            }
+            let len = self.inbuf.len();
+            self.inbuf.resize(len + READ_BUF, 0);
+            match self.stream.read(&mut self.inbuf[len..]) {
+                Ok(0) => {
+                    self.inbuf.truncate(len);
+                    return false;
                 }
-                if !out.is_empty() {
-                    if stream.write_all(&out).is_err() {
-                        return;
+                Ok(n) => {
+                    self.inbuf.truncate(len + n);
+                    if n < READ_BUF {
+                        return true;
                     }
-                    out.clear();
                 }
-                if start > 0 {
-                    buf.drain(..start);
-                    start = 0;
-                }
-                match read_more(&mut stream, &mut buf) {
-                    Some(true) => continue,
-                    _ => return,
+                Err(e) => {
+                    self.inbuf.truncate(len);
+                    return matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted);
                 }
             }
+        }
+    }
+
+    fn flush(&mut self) -> bool {
+        while self.wpos < self.out.len() {
+            match self.stream.write(&self.out[self.wpos..]) {
+                Ok(0) => return false,
+                Ok(n) => self.wpos += n,
+                Err(e) => {
+                    return matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted)
+                }
+            }
+        }
+        self.out.clear();
+        self.wpos = 0;
+        true
+    }
+}
+
+fn process(srv: &Server, c: &mut Conn) {
+    loop {
+        let Some(head) = parse_head(&c.inbuf[c.start..]) else {
+            if c.inbuf.len() - c.start > MAX_HEAD {
+                write_head(&mut c.out, 431, Ctype::Json, 0, false);
+                c.closing = true;
+            }
+            c.compact();
+            return;
         };
         let need = head.head_end + head.content_len;
-        if buf.len() - start < need {
-            if head.content_len > MAX_BODY {
-                write_head(&mut out, 413, Ctype::Json, 0, false);
-                let _ = stream.write_all(&out);
-                return;
-            }
-            if !out.is_empty() {
-                if stream.write_all(&out).is_err() {
-                    return;
-                }
-                out.clear();
-            }
-            if start > 0 {
-                buf.drain(..start);
-                start = 0;
-            }
-            match read_more(&mut stream, &mut buf) {
-                Some(true) => continue,
-                _ => return,
-            }
-        }
-
-        let req = &buf[start..start + need];
-        let keep_alive = head.keep_alive;
-        if let Some(code) = head.error {
-            write_head(&mut out, code, Ctype::Json, 0, false);
-            let _ = stream.write_all(&out);
+        if c.inbuf.len() - c.start < need {
+            c.compact();
             return;
         }
+        if let Some(code) = head.error {
+            write_head(&mut c.out, code, Ctype::Json, 0, false);
+            c.closing = true;
+            c.start += need;
+            c.compact();
+            return;
+        }
+        let req = &c.inbuf[c.start..c.start + need];
         let method = std::str::from_utf8(&req[head.method.0..head.method.1]).unwrap_or("");
         let path = std::str::from_utf8(&req[head.path.0..head.path.1]).unwrap_or("/");
-        body.clear();
+        c.body.clear();
+        let mut body = std::mem::take(&mut c.body);
         let (status, ct) = srv.dispatch(method, path, &req[head.head_end..], &mut body);
-        write_head(&mut out, status, ct, body.len(), keep_alive);
+        write_head(&mut c.out, status, ct, body.len(), head.keep_alive);
         if !head.head_only {
-            out.extend_from_slice(&body);
+            c.out.extend_from_slice(&body);
         }
-        start += need;
-
-        if !keep_alive {
-            let _ = stream.write_all(&out);
+        c.body = body;
+        c.start += need;
+        if !head.keep_alive {
+            c.closing = true;
+            c.compact();
             return;
         }
-        if start >= buf.len() || out.len() >= READ_BUF {
-            if stream.write_all(&out).is_err() {
-                return;
-            }
-            out.clear();
-        }
-        if start >= buf.len() {
-            buf.clear();
-            start = 0;
-            match read_more(&mut stream, &mut buf) {
-                Some(true) => continue,
-                _ => return,
-            }
+        if c.start >= c.inbuf.len() {
+            c.compact();
+            return;
         }
     }
 }
 
-fn read_more(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Option<bool> {
-    let len = buf.len();
-    if buf.capacity() - len < READ_BUF {
-        buf.reserve(READ_BUF);
+type ConnMap = HashMap<u64, Conn, BuildHasherDefault<Fnv>>;
+
+fn worker(srv: &Server, listener: &TcpListener) -> std::io::Result<()> {
+    let ep = Epoll::new()?;
+    ep.add(listener, epoll::IN | epoll::EXCLUSIVE, u64::MAX)?;
+    let mut events = vec![Event::default(); EVENTS];
+    let mut conns: ConnMap = ConnMap::default();
+    let mut dead: Vec<u64> = Vec::new();
+    let mut last_sweep = Instant::now();
+    let idle = Duration::from_secs(srv.keepalive_secs.max(1));
+
+    loop {
+        let n = ep.wait(&mut events, 1000)?;
+        for ev in &events[..n] {
+            let (flags, key) = (ev.events, ev.data);
+            if key == u64::MAX {
+                accept_all(srv, listener, &ep, &mut conns);
+                continue;
+            }
+            let Some(c) = conns.get_mut(&key) else { continue };
+            c.last = Instant::now();
+            let mut alive = true;
+            if flags & (epoll::ERR | epoll::HUP) != 0 {
+                alive = false;
+            } else {
+                if flags & (epoll::IN | epoll::RDHUP) != 0 {
+                    alive = c.fill();
+                    if !c.inbuf.is_empty() {
+                        process(srv, c);
+                    }
+                }
+                if alive || !c.out.is_empty() {
+                    alive = c.flush() && alive;
+                }
+                if alive && c.closing && c.wpos >= c.out.len() {
+                    alive = false;
+                }
+                if alive {
+                    let want_out = c.wpos < c.out.len();
+                    if want_out != c.want_out {
+                        c.want_out = want_out;
+                        let mut mask = epoll::IN | epoll::RDHUP;
+                        if want_out {
+                            mask |= epoll::OUT;
+                        }
+                        if ep.modify(&c.stream, mask, key).is_err() {
+                            alive = false;
+                        }
+                    }
+                }
+            }
+            if !alive {
+                dead.push(key);
+            }
+        }
+        for key in dead.drain(..) {
+            if let Some(c) = conns.remove(&key) {
+                let _ = ep.remove(&c.stream);
+            }
+        }
+        if last_sweep.elapsed() >= SWEEP {
+            last_sweep = Instant::now();
+            conns.retain(|_, c| {
+                if c.last.elapsed() < idle {
+                    return true;
+                }
+                let _ = ep.remove(&c.stream);
+                false
+            });
+        }
     }
-    buf.resize(len + READ_BUF, 0);
-    let res = stream.read(&mut buf[len..]);
-    match res {
-        Ok(0) => {
-            buf.truncate(len);
-            None
+}
+
+fn accept_all(srv: &Server, listener: &TcpListener, ep: &Epoll, conns: &mut ConnMap) {
+    loop {
+        let Ok((stream, _)) = listener.accept() else { return };
+        if conns.len() >= srv.max_conns {
+            let _ = (&stream).write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            continue;
         }
-        Ok(n) => {
-            buf.truncate(len + n);
-            Some(true)
+        if stream.set_nonblocking(true).is_err() {
+            continue;
         }
-        Err(e) if e.kind() == ErrorKind::Interrupted => {
-            buf.truncate(len);
-            Some(true)
+        let _ = stream.set_nodelay(true);
+        let key = stream.as_raw_fd() as u64;
+        let conn = Conn::new(stream);
+        if ep.add(&conn.stream, epoll::IN | epoll::RDHUP, key).is_err() {
+            continue;
         }
-        Err(_) => {
-            buf.truncate(len);
-            None
-        }
+        conns.insert(key, conn);
     }
 }
