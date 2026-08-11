@@ -1,11 +1,12 @@
 GET  /health              => "ok"
-GET  /version             => { name: "velo", version: "0.5.0" }
+GET  /version             => { name: "velo", version: "0.6.0" }
 
 GET  /users               => db.users.all()
 GET  /users/:id           => db.users.find(id)
 POST /users               => db.users.create(body)
 PUT  /users/:id           => db.users.update(id, body)
-DELETE /users/:id         => db.users.delete(id)
+DELETE /users/:id         => db.users.delete(id) : 204
+GET  /users/page          => db.users.page(query.offset, query.limit)
 GET  /users/by/team       => db.users.where("team", query.team)
 
 GET  /posts               => db.posts.all()

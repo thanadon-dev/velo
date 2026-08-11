@@ -20,6 +20,9 @@ GET  /list            => [1, 2, "three", true, null]
 GET  /search          => db.users.where("name", query.name)
 GET  /q               => { limit: query.limit, tag: query.tag }
 GET  /raw/:v          => { v: v }
+DELETE /gone/:id      => { id: id } : 204
+POST /accepted        => "queued" : 202
+GET  /paged           => db.users.page(query.offset, query.limit)
 "#;
 
 fn server() -> Arc<Server> {
@@ -332,4 +335,28 @@ fn store_persistence_roundtrip() {
     assert!(velo::Store::new().load_file(&missing).is_ok());
     assert!(velo::Store::new().load_json(b"nope").is_err());
     std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn status_override_and_paging() {
+    let s = server();
+    assert_eq!(call(&s, "DELETE", "/gone/7", "").0, 204);
+    assert_eq!(call(&s, "POST", "/accepted", "").0, 202);
+    for i in 0..5 {
+        call(&s, "POST", "/users", &format!(r#"{{"n":{i}}}"#));
+    }
+    assert_eq!(call(&s, "GET", "/paged?offset=1&limit=2", "").1, r#"[{"id":2,"n":1},{"id":3,"n":2}]"#);
+    assert_eq!(call(&s, "GET", "/paged?offset=4&limit=10", "").1, r#"[{"id":5,"n":4}]"#);
+    assert_eq!(call(&s, "GET", "/paged?offset=99&limit=2", "").1, "[]");
+    assert_eq!(call(&s, "GET", "/paged", "").1.matches(r#""id""#).count(), 5);
+    assert!(compile("GET /a => 1 : 999", None).is_err());
+}
+
+#[test]
+fn http_204_has_no_body() {
+    let port = spawn();
+    let res = raw(port, b"DELETE /gone/1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    assert!(res.starts_with("HTTP/1.1 204 No Content"), "{res}");
+    assert!(!res.contains("Content-Length"), "{res}");
+    assert!(res.ends_with("\r\n\r\n"), "{res}");
 }

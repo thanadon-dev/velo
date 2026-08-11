@@ -72,6 +72,20 @@ impl Collection {
         Value::Arr(Arc::new(rows))
     }
 
+    pub fn page(&self, offset: usize, limit: usize) -> Value {
+        let s = self.snap.read().unwrap();
+        let end = if limit == 0 {
+            s.rows.len()
+        } else {
+            offset.saturating_add(limit).min(s.rows.len())
+        };
+        let rows = match s.rows.get(offset.min(s.rows.len())..end) {
+            Some(slice) => slice.to_vec(),
+            None => Vec::new(),
+        };
+        Value::Arr(Arc::new(rows))
+    }
+
     pub fn create(&self, v: Value) -> Value {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let row = with_id(v, id as f64);

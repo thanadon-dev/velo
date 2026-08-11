@@ -141,7 +141,9 @@ fn status_text(code: u16) -> &'static str {
     match code {
         200 => "OK",
         201 => "Created",
+        202 => "Accepted",
         204 => "No Content",
+        304 => "Not Modified",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -286,11 +288,23 @@ fn contains_ignore_case(hay: &[u8], needle: &[u8]) -> bool {
     (0..=hay.len() - needle.len()).any(|i| eq_ignore_case(&hay[i..i + needle.len()], needle))
 }
 
+fn empty_status(status: u16) -> bool {
+    status == 204 || status == 304
+}
+
 fn write_head(out: &mut Vec<u8>, status: u16, ct: Ctype, len: usize, keep_alive: bool) {
     out.extend_from_slice(b"HTTP/1.1 ");
     write_i64(out, status as i64);
     out.push(b' ');
     out.extend_from_slice(status_text(status).as_bytes());
+    if empty_status(status) {
+        if keep_alive {
+            out.extend_from_slice(b"\r\nConnection: keep-alive\r\n\r\n");
+        } else {
+            out.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+        }
+        return;
+    }
     out.extend_from_slice(match ct {
         Ctype::Json => b"\r\nContent-Type: application/json\r\nContent-Length: ".as_slice(),
         Ctype::Text => b"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ".as_slice(),
@@ -413,7 +427,7 @@ fn process(srv: &Server, c: &mut Conn) {
         let mut body = std::mem::take(&mut c.body);
         let (status, ct) = srv.dispatch(method, path, &req[head.head_end..], &mut body);
         write_head(&mut c.out, status, ct, body.len(), head.keep_alive);
-        if !head.head_only {
+        if !head.head_only && !empty_status(status) {
             c.out.extend_from_slice(&body);
         }
         c.body = body;

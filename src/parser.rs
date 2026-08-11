@@ -53,6 +53,7 @@ pub enum Op {
     Count,
     Find(Box<Expr>),
     Where(Box<Expr>, Box<Expr>),
+    Page(Box<Expr>, Box<Expr>),
     Create(Box<Expr>),
     Update(Box<Expr>, Box<Expr>),
     Delete(Box<Expr>),
@@ -84,6 +85,11 @@ impl Expr {
                 Op::All => Ok(col.all()),
                 Op::Count => Ok(Value::Num(col.count() as f64)),
                 Op::Find(k) => col.find(&k.eval(c)?.as_key()).ok_or(NOT_FOUND),
+                Op::Page(o, l) => {
+                    let offset = num_arg(&o.eval(c)?);
+                    let limit = num_arg(&l.eval(c)?);
+                    Ok(col.page(offset, limit))
+                }
                 Op::Where(f, v) => {
                     let field = f.eval(c)?.as_key();
                     let want = v.eval(c)?.as_key();
@@ -243,7 +249,15 @@ impl<'a> Parser<'a> {
         self.body = false;
         self.query = false;
         let expr = self.expr()?;
-        let status = if method == Method::Post { 201 } else { 200 };
+        let mut status = if method == Method::Post { 201 } else { 200 };
+        if self.tok.kind == Kind::Colon {
+            self.advance()?;
+            let code = self.expect(Kind::Num)?;
+            if code.num < 100.0 || code.num > 599.0 || code.num.fract() != 0.0 {
+                return Err(format!("line {}: bad status {}", code.line, code.text));
+            }
+            status = code.num as u16;
+        }
         let (konst, const_text) = if self.pure {
             match expr.eval(&Ctx::default()) {
                 Ok(Value::Str(s)) => (Some(s.as_bytes().to_vec()), true),
@@ -407,6 +421,11 @@ impl<'a> Parser<'a> {
                 want(1)?;
                 Op::Find(Box::new(args.next().unwrap()))
             }
+            "page" => {
+                want(2)?;
+                let o = Box::new(args.next().unwrap());
+                Op::Page(o, Box::new(args.next().unwrap()))
+            }
             "where" => {
                 want(2)?;
                 let f = Box::new(args.next().unwrap());
@@ -433,6 +452,14 @@ impl<'a> Parser<'a> {
             }
         };
         Ok(Expr::Db(col, op))
+    }
+}
+
+fn num_arg(v: &Value) -> usize {
+    match v {
+        Value::Num(n) if *n >= 0.0 => *n as usize,
+        Value::Str(s) => s.parse().unwrap_or(0),
+        _ => 0,
     }
 }
 

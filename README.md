@@ -1,6 +1,6 @@
 # Velo
 
-**v0.5.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.6.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -11,6 +11,7 @@ PUT    /users/:id  => db.users.update(id, body)
 DELETE /users/:id  => db.users.delete(id)
 GET    /stats      => { users: db.users.count(), ok: true }
 GET    /search     => db.users.where("team", query.team)
+DELETE /users/:id  => db.users.delete(id) : 204
 ```
 
 That file is a complete, running API server.
@@ -42,6 +43,7 @@ A program is a list of routes:
 
 ```
 METHOD /path/:param => expression
+METHOD /path        => expression : status
 ```
 
 Methods: `GET POST PUT PATCH DELETE HEAD OPTIONS`. Comments: `#` or `//`. `HEAD` falls back to the matching `GET` route.
@@ -67,11 +69,19 @@ Built-in store (`db.<collection>.<op>`):
 | `count()` | number | |
 | `find(key)` | row | 404 |
 | `where(field, value)` | array of matching rows | `[]` |
+| `page(offset, limit)` | slice of rows, `limit` 0 means "to the end" | `[]` |
 | `create(value)` | row with generated `id` | 400 if body is empty |
 | `update(key, patch)` | merged row | 404 |
 | `delete(key)` | `{"deleted":true}` | 404 |
 
-`POST` routes answer `201`, everything else `200`. Errors are `{"error":"..."}`.
+`POST` routes answer `201`, everything else `200`. Append `: <code>` to set it yourself:
+
+```velo
+DELETE /users/:id => db.users.delete(id) : 204
+POST   /jobs      => db.jobs.create(body) : 202
+```
+
+`204` and `304` are sent without a body or `Content-Length`. Errors are `{"error":"..."}`.
 
 ## Persistence
 
@@ -97,7 +107,7 @@ Env knobs: `VELO_ADDR`, `VELO_WORKERS` (default: cores), `VELO_MAX_CONNS` per wo
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.5.0:
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.6.0:
 
 | route | kind | req/s | p50 | p99 |
 | --- | --- | --- | --- | --- |
@@ -133,13 +143,15 @@ velobench -c 200 -d 10 -p 16 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-20 tests (19 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+22 tests (21 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 ## Build notes
 
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.6.0** — per-route status override (`expr : 204`, bodyless 204/304 responses) and `db.x.page(offset, limit)` for pagination.
 
 **v0.5.0** — optional persistence: `--data file.json` loads at boot and autosaves on change (atomic rename, dirty-flag gated, `VELO_SAVE_MS`). POST throughput 49.5k to 62.2k req/s on the epoll loop.
 
