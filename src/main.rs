@@ -93,10 +93,18 @@ fn run(args: &[String]) {
         Some(p) => println!("velo {VERSION} serving {n} routes on {addr}, data {}", p.display()),
         None => println!("velo {VERSION} serving {n} routes on {addr}"),
     }
+    velo::http::install_signal_handlers();
     if let Err(e) = server.listen(&addr) {
         eprintln!("velo: {e}");
         exit(1)
     }
+    if let Some(path) = &data {
+        if let Err(e) = store.save_to(path) {
+            eprintln!("velo: save {}: {e}", path.display());
+            exit(1)
+        }
+    }
+    println!("velo: stopped");
 }
 
 fn check(args: &[String]) {

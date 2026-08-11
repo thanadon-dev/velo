@@ -8,6 +8,7 @@ use std::hash::BuildHasherDefault;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -23,6 +24,22 @@ pub enum Ctype {
     Text,
 }
 
+static SIGNALLED: AtomicBool = AtomicBool::new(false);
+
+extern "C" {
+    fn signal(sig: i32, handler: usize) -> usize;
+}
+
+extern "C" fn on_signal(_sig: i32) {
+    SIGNALLED.store(true, Ordering::Relaxed);
+}
+
+pub fn install_signal_handlers() {
+    for sig in [2, 15] {
+        unsafe { signal(sig, on_signal as *const () as usize) };
+    }
+}
+
 pub struct Server {
     pub routes: Vec<Route>,
     pub router: Router,
@@ -30,6 +47,7 @@ pub struct Server {
     pub max_conns: usize,
     pub keepalive_secs: u64,
     pub workers: usize,
+    stop: AtomicBool,
 }
 
 impl Server {
@@ -43,6 +61,7 @@ impl Server {
             max_conns: env_usize("VELO_MAX_CONNS", 65536),
             keepalive_secs: env_usize("VELO_KEEPALIVE", 60) as u64,
             workers: env_usize("VELO_WORKERS", cpus).max(1),
+            stop: AtomicBool::new(false),
         }))
     }
 
@@ -101,6 +120,14 @@ impl Server {
             }
             Err(e) => err_body(e, out),
         }
+    }
+
+    pub fn shutdown(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stopping(&self) -> bool {
+        self.stop.load(Ordering::Relaxed) || SIGNALLED.load(Ordering::Relaxed)
     }
 
     pub fn listen(self: &Arc<Self>, addr: &str) -> std::io::Result<()> {
@@ -455,8 +482,8 @@ fn worker(srv: &Server, listener: &TcpListener) -> std::io::Result<()> {
     let mut last_sweep = Instant::now();
     let idle = Duration::from_secs(srv.keepalive_secs.max(1));
 
-    loop {
-        let n = ep.wait(&mut events, 1000)?;
+    while !srv.stopping() {
+        let n = ep.wait(&mut events, 250)?;
         for ev in &events[..n] {
             let (flags, key) = (ev.events, ev.data);
             if key == u64::MAX {
@@ -515,6 +542,7 @@ fn worker(srv: &Server, listener: &TcpListener) -> std::io::Result<()> {
             });
         }
     }
+    Ok(())
 }
 
 fn accept_all(srv: &Server, listener: &TcpListener, ep: &Epoll, conns: &mut ConnMap) {

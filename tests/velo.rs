@@ -375,3 +375,17 @@ fn list_cache_invalidates_on_write() {
     call(&s, "DELETE", "/users/1", "");
     assert_eq!(call(&s, "GET", "/users", "").1, r#"[{"id":2,"name":"c"}]"#);
 }
+
+#[test]
+fn serve_stops_on_shutdown() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let s = server();
+    let s2 = s.clone();
+    let h = std::thread::spawn(move || s2.serve(listener));
+    let res = raw(port, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    assert!(res.ends_with("ok"), "{res}");
+    s.shutdown();
+    h.join().unwrap().unwrap();
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err() || s.stopping());
+}
