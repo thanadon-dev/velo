@@ -1,6 +1,6 @@
 # Velo
 
-**v0.2.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by a hand-written HTTP/1.1 engine.
+**v0.2.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by a hand-written HTTP/1.1 engine.
 
 ```velo
 GET    /health     => "ok"
@@ -33,6 +33,7 @@ CLI:
 | `velo check <file>` | compile only, report errors with line numbers |
 | `velo routes <file>` | list compiled routes and which ones fold to constants |
 | `velo version` | print version |
+| `velobench [-c n] [-d secs] [-p depth] [-m method] [-b body] <url>` | built-in keep-alive load generator |
 
 ## Language
 
@@ -82,18 +83,28 @@ Env knobs: `VELO_ADDR`, `VELO_MAX_CONNS` (default 4096), `VELO_KEEPALIVE` second
 
 ## Benchmarks
 
-`ab -k -c 50 -n 30000`, 4-core box, release build (`lto = "fat"`, `codegen-units = 1`), v0.2.0:
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.2.1, `-c 50`:
 
-| route | kind | req/s |
-| --- | --- | --- |
-| `/health` | const fold | 38 800 |
-| `/users/1` | store lookup | 38 900 |
-| `/stats` | store count | 39 400 |
-| `/teams/:tid/members/:mid` | 2 params | 38 000 |
+| route | kind | req/s | p50 | p99 |
+| --- | --- | --- | --- | --- |
+| `/health` | const fold | 84 000 | 0.42 ms | 3.96 ms |
+| `/version` | const fold, object | 76 500 | 0.49 ms | 3.75 ms |
+| `/users` | store scan | 80 300 | 0.44 ms | 4.05 ms |
+| `/users/:id` | store lookup | 73 800 | 0.49 ms | 4.23 ms |
+| `/stats` | 2 store counts | 70 500 | 0.37 ms | 6.07 ms |
+| `/teams/:tid/members/:mid` | 2 params | 66 400 | 0.44 ms | 5.39 ms |
+| `POST /users` | JSON parse + insert | 49 500 | | |
 
-Resident memory while serving: **488 kB**. Binary: 594 kB, statically linked.
+With pipelining (`-p 16`): **1 040 000 req/s** on `/health`.
 
-Numbers are load-generator bound (`ab` is single-threaded); reproduce with `./bench.sh`.
+Resident memory: **488 kB** idle, ~7 MB with 50 live connections. Binary: 594 kB, statically linked.
+
+Reproduce:
+
+```sh
+./bench.sh
+velobench -c 200 -d 10 -p 16 http://127.0.0.1:8099/users/1
+```
 
 ## Tests
 
@@ -101,13 +112,15 @@ Numbers are load-generator bound (`ab` is single-threaded); reproduce with `./be
 cargo test
 ```
 
-14 tests: const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests), concurrent writes.
+15 tests (14 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests), concurrent writes.
 
 ## Build notes
 
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.2.1** — `velobench` load generator (thread per connection, pipelining, p50/p99), explicit `Connection: keep-alive` response header so standard tools reuse connections.
 
 **v0.2.0** — rewritten in Rust, zero dependencies. Hand-written HTTP/1.1 engine (keep-alive, pipelining, HEAD fallback, chunked rejection), FNV router, `Arc`-backed values, copy-on-write store, const-folded routes, 488 kB RSS.
 

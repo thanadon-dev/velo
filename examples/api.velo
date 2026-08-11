@@ -1,5 +1,5 @@
 GET  /health              => "ok"
-GET  /version             => { name: "velo", version: "0.2.0" }
+GET  /version             => { name: "velo", version: "0.2.1" }
 
 GET  /users               => db.users.all()
 GET  /users/:id           => db.users.find(id)
