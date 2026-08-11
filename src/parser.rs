@@ -101,7 +101,10 @@ impl Expr {
             Expr::Db(col, op) => match op {
                 Op::All => Ok(col.all()),
                 Op::Count => Ok(Value::Num(col.count() as f64)),
-                Op::Find(k) => col.find(&k.eval(c)?.as_key()).ok_or(NOT_FOUND),
+                Op::Find(k) => match fast_key(k, c) {
+                    Some(raw) => col.find(raw).ok_or(NOT_FOUND),
+                    None => col.find(&k.eval(c)?.as_key()).ok_or(NOT_FOUND),
+                },
                 Op::Page(o, l) => {
                     let offset = num_arg(&o.eval(c)?);
                     let limit = num_arg(&l.eval(c)?);
@@ -118,12 +121,19 @@ impl Expr {
                     val => Ok(col.create(val)),
                 },
                 Op::Update(k, v) => {
-                    let key = k.eval(c)?.as_key();
+                    let key = match fast_key(k, c) {
+                        Some(raw) => raw.to_string(),
+                        None => k.eval(c)?.as_key(),
+                    };
                     let patch = v.eval(c)?;
                     col.update(&key, patch).ok_or(NOT_FOUND)
                 }
                 Op::Delete(k) => {
-                    if col.delete(&k.eval(c)?.as_key()) {
+                    let hit = match fast_key(k, c) {
+                        Some(raw) => col.delete(raw),
+                        None => col.delete(&k.eval(c)?.as_key()),
+                    };
+                    if hit {
                         Ok(Value::obj(vec![(Arc::from("deleted"), Value::Bool(true))]))
                     } else {
                         Err(NOT_FOUND)
@@ -525,6 +535,15 @@ impl<'a> Parser<'a> {
         };
         Ok(Expr::Db(col, op))
     }
+}
+
+fn fast_key<'a>(e: &Expr, c: &Ctx<'a>) -> Option<&'a str> {
+    let Expr::Param(i) = e else { return None };
+    let raw = c.param(*i);
+    if raw.contains('%') || raw.contains('+') {
+        return None;
+    }
+    Some(raw)
 }
 
 pub fn call_builtin(f: Builtin, args: &[Value]) -> Value {

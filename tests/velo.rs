@@ -493,3 +493,19 @@ fn http_sends_date_and_rejects_duplicate_length() {
     );
     assert!(res.starts_with("HTTP/1.1 201"), "{res}");
 }
+
+#[test]
+fn sorted_cache_invalidates() {
+    let s = server();
+    call(&s, "POST", "/users", r#"{"name":"c"}"#);
+    call(&s, "POST", "/users", r#"{"name":"a"}"#);
+    assert_eq!(call(&s, "GET", "/sorted", "").1, r#"[{"id":2,"name":"a"},{"id":1,"name":"c"}]"#);
+    assert_eq!(call(&s, "GET", "/sorted", "").1, r#"[{"id":2,"name":"a"},{"id":1,"name":"c"}]"#);
+    call(&s, "POST", "/users", r#"{"name":"b"}"#);
+    assert_eq!(
+        call(&s, "GET", "/sorted", "").1,
+        r#"[{"id":2,"name":"a"},{"id":3,"name":"b"},{"id":1,"name":"c"}]"#
+    );
+    call(&s, "DELETE", "/users/3", "");
+    assert_eq!(call(&s, "GET", "/sorted", "").1, r#"[{"id":2,"name":"a"},{"id":1,"name":"c"}]"#);
+}

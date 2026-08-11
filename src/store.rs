@@ -5,10 +5,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+const SORT_CACHE_MAX: usize = 16;
+
 struct Snapshot {
     rows: Arc<Vec<Value>>,
     by_id: HashMap<String, usize>,
     all_json: OnceLock<Arc<[u8]>>,
+    sorted: Mutex<HashMap<String, Arc<[u8]>>>,
 }
 
 impl Snapshot {
@@ -24,6 +27,39 @@ impl Snapshot {
 
     fn invalidate(&mut self) {
         self.all_json = OnceLock::new();
+        self.sorted.get_mut().unwrap().clear();
+    }
+
+    fn sorted_json(&self, field: &str) -> Arc<[u8]> {
+        if let Some(hit) = self.sorted.lock().unwrap().get(field) {
+            return hit.clone();
+        }
+        let (key, desc) = match field.strip_prefix('-') {
+            Some(f) => (f, true),
+            None => (field, false),
+        };
+        let mut rows: Vec<Value> = self.rows.as_ref().clone();
+        rows.sort_by(|a, b| {
+            let (x, y) = (a.get(key), b.get(key));
+            let ord = match (&x, &y) {
+                (Value::Num(m), Value::Num(n)) => m.partial_cmp(n).unwrap_or(Ordering2::Equal),
+                _ => x.as_key().cmp(&y.as_key()),
+            };
+            if desc {
+                ord.reverse()
+            } else {
+                ord
+            }
+        });
+        let mut out = Vec::with_capacity(rows.len() * 64 + 2);
+        Value::Arr(Arc::new(rows)).write_json(&mut out);
+        let json: Arc<[u8]> = Arc::from(out.as_slice());
+        let mut cache = self.sorted.lock().unwrap();
+        if cache.len() >= SORT_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(field.to_string(), json.clone());
+        json
     }
 }
 
@@ -42,6 +78,7 @@ impl Collection {
                 rows: Arc::new(Vec::new()),
                 by_id: HashMap::new(),
                 all_json: OnceLock::new(),
+                sorted: Mutex::new(HashMap::new()),
             }),
             next_id: AtomicU64::new(0),
             dirty,
@@ -110,24 +147,7 @@ impl Collection {
     }
 
     pub fn order(&self, field: &str) -> Value {
-        let (field, desc) = match field.strip_prefix('-') {
-            Some(f) => (f, true),
-            None => (field, false),
-        };
-        let mut rows: Vec<Value> = self.snap.read().unwrap().rows.as_ref().clone();
-        rows.sort_by(|a, b| {
-            let (x, y) = (a.get(field), b.get(field));
-            let ord = match (&x, &y) {
-                (Value::Num(m), Value::Num(n)) => m.partial_cmp(n).unwrap_or(Ordering2::Equal),
-                _ => x.as_key().cmp(&y.as_key()),
-            };
-            if desc {
-                ord.reverse()
-            } else {
-                ord
-            }
-        });
-        Value::Arr(Arc::new(rows))
+        Value::Raw(self.snap.read().unwrap().sorted_json(field))
     }
 
     pub fn create(&self, v: Value) -> Value {

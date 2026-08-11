@@ -1,6 +1,6 @@
 # Velo
 
-**v0.11.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.12.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -113,7 +113,8 @@ Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothin
 - **Const folding.** Routes whose expression touches no param, body, or store are evaluated at compile time and stored as ready-to-send bytes. `GET /health => "ok"` costs one `memcpy` per request.
 - **Router.** Per-method exact map (FNV-hashed) for static paths, a segment tree for `:param` paths. Params are borrowed slices of the request line, never copied.
 - **Values.** `Value` is an enum with `Arc` payloads, so returning a whole collection is a refcount bump, not a deep copy. JSON is written straight into the connection's output buffer.
-- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list; both are rebuilt only when the collection is written to. `GET /users` is then a `memcpy`, not a serialization pass. The cost is holding rows twice in memory.
+- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and of up to 16 sort orders; all of it is rebuilt only when the collection is written to. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. The cost is holding rows twice in memory.
+- **No allocation for key lookups.** `db.users.find(id)` on a plain path param hashes the slice of the request line directly; nothing is copied unless the param is percent-encoded.
 - **Store.** Copy-on-write snapshot behind an `RwLock`; readers clone an `Arc<Vec<Value>>` and release the lock immediately.
 - **HTTP.** Hand-written HTTP/1.1: keep-alive by default, request pipelining, per-connection read/write/body buffers reused across requests, batched writes. `Date` is formatted once per second per worker, not per response. Chunked bodies are refused with 411, conflicting `Content-Length` headers with 400, oversized bodies with 413, oversized headers with 431.
 - **Event loop.** One epoll instance per worker thread (default: one per core), all sharing the listener with `EPOLLEXCLUSIVE`. Connections are non-blocking and cost a few kB each instead of a thread and a stack: 1 000 live connections fit in under 1 MB of RSS. `epoll` is called through three `extern "C"` declarations, still no crates.
@@ -134,21 +135,33 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.11.0:
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.12.0. The `users` collection holds 200 rows.
 
-| route | kind | req/s | p50 | p99 |
-| --- | --- | --- | --- | --- |
-| `/health` | const fold | 97 000 | 0.44 ms | 2.19 ms |
-| `/users` (200 rows, 9 kB) | cached list | 53 900 | | |
-| `/users/:id` | store lookup | 84 800 | 0.49 ms | 2.31 ms |
-| `/users/page` (20 of 200) | slice + render | 56 700 | | |
-| `/stats` | 2 store counts | 70 500 | 0.37 ms | 6.07 ms |
-| `/teams/:tid/members/:mid` | 2 params | 66 400 | 0.44 ms | 5.39 ms |
-| `POST /users` | JSON parse + insert | 62 200 | 0.63 ms | 3.33 ms |
+`-c 50`, one request in flight per connection — this is client-bound, both processes fight for the same 4 cores:
 
-`-c 50` unless noted. With pipelining (`-p 16`): **1 027 000 req/s** on `/health`.
+| route | kind | req/s |
+| --- | --- | --- |
+| `/version` | const fold, object | 89 400 |
+| `/users/:id` | store lookup | 88 800 |
+| `/stats` | 2 store counts | 87 600 |
+| `/health` | const fold | 85 300 |
+| `/teams/:tid/members/:mid` | 2 params | 74 000 |
+| `POST /users` | JSON parse + insert | 57 700 |
+| `/users` (200 rows, 9 kB) | cached list | 56 000 |
+| `/users/page` (20 of 200) | slice + render | 54 500 |
+| `/users/sorted` | cached sort | 49 900 |
 
-Connection scaling (`/health`, then `/users/:id`), server RSS measured while serving:
+`-c 8 -p 32`, pipelined — this is what the server itself can do:
+
+| route | req/s |
+| --- | --- |
+| `/health` | 1 111 000 |
+| `/users/:id` | 1 037 000 |
+| `/stats` | 393 000 |
+| `/users` (200 rows) | 141 000 (1.2 GB/s) |
+| `/users/sorted` | 120 000 |
+
+Connection scaling (`/health`), server RSS while serving:
 
 | conns | req/s | p50 | RSS |
 | --- | --- | --- | --- |
@@ -156,13 +169,13 @@ Connection scaling (`/health`, then `/users/:id`), server RSS measured while ser
 | 500 | 78 000 | 2.77 ms | 764 kB |
 | 1 000 | 68 700 | 10.8 ms | 896 kB |
 
-The load generator (one thread per connection) is the bottleneck at high connection counts, not the server. Binary: 594 kB, statically linked.
+Binary: 594 kB, statically linked.
 
 Reproduce:
 
 ```sh
 ./bench.sh
-velobench -c 200 -d 10 -p 16 http://127.0.0.1:8099/users/1
+velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 ```
 
 ## Tests
@@ -171,13 +184,15 @@ velobench -c 200 -d 10 -p 16 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-31 tests (29 integration + 2 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+32 tests (30 integration + 2 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache invalidation, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 ## Build notes
 
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.12.0** — `order(...)` results are cached per sort key and invalidated on write (6k to 120k req/s pipelined), and `find`/`update`/`delete` on a plain path param no longer allocate a key (`/users/:id` 562k to 1 037k req/s pipelined).
 
 **v0.11.0** — spec and hardening pass: `Date` response header (computed once per second per worker), 400 on conflicting `Content-Length` headers, backoff instead of a spin loop when `accept` fails with no file descriptors left.
 
