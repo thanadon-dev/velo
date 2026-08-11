@@ -1,6 +1,7 @@
 use crate::value::{Obj, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 struct Snapshot {
@@ -12,15 +13,39 @@ pub struct Collection {
     pub name: String,
     snap: RwLock<Snapshot>,
     next_id: AtomicU64,
+    dirty: Arc<AtomicBool>,
 }
 
 impl Collection {
-    fn new(name: &str) -> Collection {
+    fn new(name: &str, dirty: Arc<AtomicBool>) -> Collection {
         Collection {
             name: name.to_string(),
             snap: RwLock::new(Snapshot { rows: Arc::new(Vec::new()), by_id: HashMap::new() }),
             next_id: AtomicU64::new(0),
+            dirty,
         }
+    }
+
+    fn touch(&self) {
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    pub fn rows(&self) -> Arc<Vec<Value>> {
+        self.snap.read().unwrap().rows.clone()
+    }
+
+    pub fn next_id(&self) -> u64 {
+        self.next_id.load(Ordering::Relaxed)
+    }
+
+    pub fn load(&self, rows: Vec<Value>, next_id: u64) {
+        let mut s = self.snap.write().unwrap();
+        s.by_id.clear();
+        for (i, r) in rows.iter().enumerate() {
+            s.by_id.insert(r.get("id").as_key(), i);
+        }
+        s.rows = Arc::new(rows);
+        self.next_id.store(next_id, Ordering::Relaxed);
     }
 
     pub fn all(&self) -> Value {
@@ -55,6 +80,7 @@ impl Collection {
         rows.push(row.clone());
         let idx = rows.len() - 1;
         s.by_id.insert(id.to_string(), idx);
+        self.touch();
         row
     }
 
@@ -63,6 +89,7 @@ impl Collection {
         let i = *s.by_id.get(id)?;
         let merged = merge(&s.rows[i], &patch);
         Arc::make_mut(&mut s.rows)[i] = merged.clone();
+        self.touch();
         Some(merged)
     }
 
@@ -75,6 +102,7 @@ impl Collection {
                 *v -= 1;
             }
         }
+        self.touch();
         true
     }
 
@@ -83,12 +111,14 @@ impl Collection {
         s.rows = Arc::new(Vec::new());
         s.by_id.clear();
         self.next_id.store(0, Ordering::Relaxed);
+        self.touch();
     }
 }
 
 #[derive(Default)]
 pub struct Store {
     cols: Mutex<HashMap<String, Arc<Collection>>>,
+    dirty: Arc<AtomicBool>,
 }
 
 impl Store {
@@ -101,7 +131,7 @@ impl Store {
         if let Some(c) = cols.get(name) {
             return c.clone();
         }
-        let c = Arc::new(Collection::new(name));
+        let c = Arc::new(Collection::new(name, self.dirty.clone()));
         cols.insert(name.to_string(), c.clone());
         c
     }
@@ -110,6 +140,76 @@ impl Store {
         let mut out: Vec<String> = self.cols.lock().unwrap().keys().cloned().collect();
         out.sort();
         out
+    }
+
+    pub fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn snapshot_json(&self) -> Vec<u8> {
+        let mut names = self.names();
+        names.sort();
+        let mut out = Vec::with_capacity(1 << 12);
+        out.push(b'{');
+        for (i, name) in names.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            let col = self.collection(name);
+            crate::value::write_string(&mut out, name);
+            out.extend_from_slice(b":{\"next_id\":");
+            crate::value::write_i64(&mut out, col.next_id() as i64);
+            out.extend_from_slice(b",\"rows\":");
+            Value::Arr(col.rows()).write_json(&mut out);
+            out.push(b'}');
+        }
+        out.push(b'}');
+        out
+    }
+
+    pub fn load_json(&self, raw: &[u8]) -> Result<(), String> {
+        let Ok(Value::Obj(cols)) = crate::value::parse_json(raw) else {
+            return Err("invalid store file".to_string());
+        };
+        for (name, entry) in cols.iter() {
+            let rows = match entry.get("rows") {
+                Value::Arr(rows) => rows.as_ref().clone(),
+                _ => Vec::new(),
+            };
+            let next_id = match entry.get("next_id") {
+                Value::Num(n) => n as u64,
+                _ => rows.len() as u64,
+            };
+            self.collection(name).load(rows, next_id);
+        }
+        self.dirty.store(false, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, self.snapshot_json())?;
+        std::fs::rename(&tmp, path)
+    }
+
+    pub fn load_file(&self, path: &std::path::Path) -> Result<(), String> {
+        match std::fs::read(path) {
+            Ok(raw) => self.load_json(&raw),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub fn autosave(self: &Arc<Self>, path: std::path::PathBuf, every: std::time::Duration) {
+        let store = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(every);
+            if store.take_dirty() {
+                if let Err(e) = store.save_to(&path) {
+                    eprintln!("velo: save {}: {e}", path.display());
+                }
+            }
+        });
     }
 }
 

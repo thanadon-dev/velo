@@ -303,3 +303,33 @@ fn where_filter() {
     );
     assert_eq!(call(&s, "GET", "/search?name=zz", "").1, "[]");
 }
+
+#[test]
+fn store_persistence_roundtrip() {
+    let store = velo::Store::new();
+    let prog = compile(SRC, Some(store.clone())).unwrap();
+    let s = Server::new(prog).unwrap();
+    call(&s, "POST", "/users", r#"{"name":"a"}"#);
+    call(&s, "POST", "/users", r#"{"name":"b"}"#);
+    call(&s, "DELETE", "/users/1", "");
+    assert!(store.take_dirty());
+    assert!(!store.take_dirty());
+
+    let path = std::env::temp_dir().join(format!("velo-test-{}.json", std::process::id()));
+    store.save_to(&path).unwrap();
+
+    let store2 = velo::Store::new();
+    let prog2 = compile(SRC, Some(store2.clone())).unwrap();
+    let s2 = Server::new(prog2).unwrap();
+    store2.load_file(&path).unwrap();
+    assert_eq!(call(&s2, "GET", "/users", "").1, r#"[{"id":2,"name":"b"}]"#);
+    assert_eq!(call(&s2, "GET", "/users/2", "").1, r#"{"id":2,"name":"b"}"#);
+    assert_eq!(call(&s2, "GET", "/users/1", "").0, 404);
+    let (_, body, _) = call(&s2, "POST", "/users", r#"{"name":"c"}"#);
+    assert_eq!(body, r#"{"id":3,"name":"c"}"#);
+
+    let missing = std::env::temp_dir().join("velo-test-does-not-exist.json");
+    assert!(velo::Store::new().load_file(&missing).is_ok());
+    assert!(velo::Store::new().load_json(b"nope").is_err());
+    std::fs::remove_file(&path).unwrap();
+}

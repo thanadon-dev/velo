@@ -1,5 +1,7 @@
+use std::path::PathBuf;
 use std::process::exit;
-use velo::{compile, Server, VERSION};
+use std::time::Duration;
+use velo::{compile, Server, Store, VERSION};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -22,12 +24,18 @@ fn usage(code: i32) -> ! {
         "velo {VERSION}\n\
          \n\
          usage:\n\
-         \x20 velo run <file.velo> [addr]   start the server (default :8080, env VELO_ADDR)\n\
+         \x20 velo run <file.velo> [addr] [--data file.json]\n\
+         \x20                               start the server (default :8080, env VELO_ADDR)\n\
          \x20 velo check <file.velo>        compile only, report errors\n\
          \x20 velo routes <file.velo>       list compiled routes\n\
          \x20 velo version                  print version"
     );
     exit(code)
+}
+
+fn flag(args: &[String], name: &str) -> Option<String> {
+    let i = args.iter().position(|a| a == name)?;
+    args.get(i + 1).cloned()
 }
 
 fn src(args: &[String]) -> String {
@@ -43,8 +51,10 @@ fn src(args: &[String]) -> String {
 
 fn run(args: &[String]) {
     let source = src(args);
+    let data = flag(args, "--data").or_else(|| std::env::var("VELO_DATA").ok()).map(PathBuf::from);
     let addr = args
         .get(3)
+        .filter(|a| !a.starts_with("--"))
         .cloned()
         .or_else(|| std::env::var("VELO_ADDR").ok())
         .unwrap_or_else(|| ":8080".to_string());
@@ -53,13 +63,24 @@ fn run(args: &[String]) {
     } else {
         addr
     };
-    let prog = match compile(&source, None) {
+    let store = Store::new();
+    let prog = match compile(&source, Some(store.clone())) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("velo: {e}");
             exit(1)
         }
     };
+    if let Some(path) = &data {
+        if let Err(e) = store.load_file(path) {
+            eprintln!("velo: {}: {e}", path.display());
+            exit(1)
+        }
+        let every = Duration::from_millis(
+            std::env::var("VELO_SAVE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200),
+        );
+        store.autosave(path.clone(), every);
+    }
     let n = prog.routes.len();
     let server = match Server::new(prog) {
         Ok(s) => s,
@@ -68,7 +89,10 @@ fn run(args: &[String]) {
             exit(1)
         }
     };
-    println!("velo {VERSION} serving {n} routes on {addr}");
+    match &data {
+        Some(p) => println!("velo {VERSION} serving {n} routes on {addr}, data {}", p.display()),
+        None => println!("velo {VERSION} serving {n} routes on {addr}"),
+    }
     if let Err(e) = server.listen(&addr) {
         eprintln!("velo: {e}");
         exit(1)

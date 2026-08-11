@@ -1,6 +1,6 @@
 # Velo
 
-**v0.4.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.5.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -30,7 +30,7 @@ CLI:
 
 | command | what it does |
 | --- | --- |
-| `velo run <file> [addr]` | start the server (default `:8080`, env `VELO_ADDR`) |
+| `velo run <file> [addr] [--data f.json]` | start the server (default `:8080`, env `VELO_ADDR`, `VELO_DATA`) |
 | `velo check <file>` | compile only, report errors with line numbers |
 | `velo routes <file>` | list compiled routes and which ones fold to constants |
 | `velo version` | print version |
@@ -73,6 +73,16 @@ Built-in store (`db.<collection>.<op>`):
 
 `POST` routes answer `201`, everything else `200`. Errors are `{"error":"..."}`.
 
+## Persistence
+
+The store is in memory. Pass `--data file.json` (or set `VELO_DATA`) and velo loads that file at boot and writes it back whenever the data changed, at most once every `VELO_SAVE_MS` milliseconds (default 200):
+
+```sh
+velo run examples/api.velo :8080 --data data.json
+```
+
+Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothing was written, so a read-only workload never touches the disk. A crash can lose at most the last save interval.
+
 ## Design
 
 - **Const folding.** Routes whose expression touches no param, body, or store are evaluated at compile time and stored as ready-to-send bytes. `GET /health => "ok"` costs one `memcpy` per request.
@@ -83,20 +93,20 @@ Built-in store (`db.<collection>.<op>`):
 - **Event loop.** One epoll instance per worker thread (default: one per core), all sharing the listener with `EPOLLEXCLUSIVE`. Connections are non-blocking and cost a few kB each instead of a thread and a stack: 1 000 live connections fit in under 1 MB of RSS. `epoll` is called through three `extern "C"` declarations, still no crates.
 - **No dependencies.** `[dependencies]` is empty. std only.
 
-Env knobs: `VELO_ADDR`, `VELO_WORKERS` (default: cores), `VELO_MAX_CONNS` per worker (default 65536), `VELO_KEEPALIVE` idle seconds (default 60).
+Env knobs: `VELO_ADDR`, `VELO_WORKERS` (default: cores), `VELO_MAX_CONNS` per worker (default 65536), `VELO_KEEPALIVE` idle seconds (default 60), `VELO_DATA`, `VELO_SAVE_MS`.
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.4.0:
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.5.0:
 
 | route | kind | req/s | p50 | p99 |
 | --- | --- | --- | --- | --- |
-| `/health` | const fold | 89 700 | 0.44 ms | 2.19 ms |
+| `/health` | const fold | 93 100 | 0.44 ms | 2.19 ms |
 | `/users` | store scan | 80 300 | 0.44 ms | 4.05 ms |
 | `/users/:id` | store lookup | 81 800 | 0.49 ms | 2.31 ms |
 | `/stats` | 2 store counts | 70 500 | 0.37 ms | 6.07 ms |
 | `/teams/:tid/members/:mid` | 2 params | 66 400 | 0.44 ms | 5.39 ms |
-| `POST /users` | JSON parse + insert | 49 500 | | |
+| `POST /users` | JSON parse + insert | 62 200 | 0.63 ms | 3.33 ms |
 
 `-c 50` unless noted. With pipelining (`-p 16`): **1 027 000 req/s** on `/health`.
 
@@ -123,13 +133,15 @@ velobench -c 200 -d 10 -p 16 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-19 tests (18 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+20 tests (19 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 ## Build notes
 
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.5.0** — optional persistence: `--data file.json` loads at boot and autosaves on change (atomic rename, dirty-flag gated, `VELO_SAVE_MS`). POST throughput 49.5k to 62.2k req/s on the epoll loop.
 
 **v0.4.0** — query strings (`query.name`), percent-decoding for path params and query values, `db.x.where(field, value)` filters. Query parsing happens only for routes that mention `query`.
 
