@@ -13,6 +13,7 @@ pub struct Err_ {
 
 pub const NOT_FOUND: Err_ = Err_ { status: 404, msg: "not found" };
 pub const BAD_BODY: Err_ = Err_ { status: 400, msg: "invalid body" };
+pub const CONFLICT: Err_ = Err_ { status: 409, msg: "already exists" };
 
 pub struct Ctx<'a> {
     pub params: [&'a str; MAX_PARAMS],
@@ -71,6 +72,7 @@ pub enum Op {
     Count,
     Find(Box<Expr>),
     Where(Box<Expr>, Box<Expr>),
+    First(Box<Expr>, Box<Expr>),
     Order(Box<Expr>),
     Page(Box<Expr>, Box<Expr>),
     Create(Box<Expr>),
@@ -125,6 +127,11 @@ impl Expr {
                     Ok(col.page(offset, limit))
                 }
                 Op::Order(f) => Ok(col.order(&f.eval(c)?.as_key())),
+                Op::First(f, v) => {
+                    let field = f.eval(c)?.as_key();
+                    let want = v.eval(c)?.as_key();
+                    col.first(&field, &want).ok_or(NOT_FOUND)
+                }
                 Op::Where(f, v) => {
                     let field = f.eval(c)?.as_key();
                     let want = v.eval(c)?.as_key();
@@ -132,7 +139,7 @@ impl Expr {
                 }
                 Op::Create(v) => match v.eval(c)? {
                     Value::Null => Err(BAD_BODY),
-                    val => Ok(col.create(val)),
+                    val => col.create(val).ok_or(CONFLICT),
                 },
                 Op::Update(k, v) => {
                     let key = match fast_key(k, c) {
@@ -539,6 +546,11 @@ impl<'a> Parser<'a> {
             "order" => {
                 want(1)?;
                 Op::Order(Box::new(args.next().unwrap()))
+            }
+            "first" => {
+                want(2)?;
+                let f = Box::new(args.next().unwrap());
+                Op::First(f, Box::new(args.next().unwrap()))
             }
             "where" => {
                 want(2)?;

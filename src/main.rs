@@ -10,6 +10,7 @@ fn main() {
         "run" => run(&args),
         "check" => check(&args),
         "routes" => routes(&args),
+        "new" => new(&args),
         "version" | "--version" | "-v" => println!("velo {VERSION}"),
         "help" | "--help" | "-h" | "" => usage(0),
         other => {
@@ -28,6 +29,7 @@ fn usage(code: i32) -> ! {
          \x20                               start the server (default :8080, env VELO_ADDR)\n\
          \x20 velo check <file.velo>        compile only, report errors\n\
          \x20 velo routes <file.velo>       list compiled routes\n\
+         \x20 velo new <file.velo>          write a starter file\n\
          \x20 velo version                  print version"
     );
     exit(code)
@@ -102,6 +104,26 @@ fn run(args: &[String]) {
         }
     }
     println!("velo: stopped");
+}
+
+const STARTER: &str = "GET    /health      => \"ok\"\n\
+GET    /items       => db.items.all()\n\
+GET    /items/:id   => db.items.find(id)\n\
+POST   /items       => db.items.create(body)\n\
+PUT    /items/:id   => db.items.update(id, body)\n\
+DELETE /items/:id   => db.items.delete(id) : 204\n";
+
+fn new(args: &[String]) {
+    let Some(path) = args.get(2) else { usage(2) };
+    if std::path::Path::new(path).exists() {
+        eprintln!("velo: {path} already exists");
+        exit(1)
+    }
+    if let Err(e) = std::fs::write(path, STARTER) {
+        eprintln!("velo: {path}: {e}");
+        exit(1)
+    }
+    println!("wrote {path}, run it with: velo run {path} :8080");
 }
 
 fn check(args: &[String]) {

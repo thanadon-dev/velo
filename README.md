@@ -1,6 +1,6 @@
 # Velo
 
-**v0.14.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.15.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -34,6 +34,7 @@ CLI:
 | `velo run <file> [addr] [--data f.json]` | start the server (default `:8080`, env `VELO_ADDR`, `VELO_DATA`) |
 | `velo check <file>` | compile only, report errors with the offending source line |
 | `velo routes <file>` | list compiled routes and which ones fold to constants |
+| `velo new <file>` | write a starter file |
 | `velo version` | print version |
 | `velobench [-c n] [-d secs] [-p depth] [-m method] [-b body] <url>` | built-in keep-alive load generator |
 
@@ -71,10 +72,11 @@ Built-in store (`db.<collection>.<op>`):
 | `all()` | array of rows | |
 | `count()` | number | |
 | `find(key)` | row | 404 |
+| `first(field, value)` | first matching row | 404 |
 | `where(field, value)` | array of matching rows | `[]` |
 | `page(offset, limit)` | slice of rows, `limit` 0 means "to the end" | `[]` |
 | `order(field)` | rows sorted by `field`, `"-field"` for descending | `[]` |
-| `create(value)` | row with generated `id` | 400 if body is empty |
+| `create(value)` | the stored row; `id` is generated unless the value carries one | 400 on an empty body, 409 on a duplicate `id` |
 | `update(key, patch)` | merged row | 404 |
 | `delete(key)` | `{"deleted":true}` | 404 |
 
@@ -113,6 +115,8 @@ DELETE /users/:id   => db.users.delete(id) : 204 when header.x_key != "readonly"
 
 A condition is one expression, optionally compared with `==` or `!=`. On its own an expression is truthy unless it is `null`, `false`, `0`, or an empty string. Guarded routes are never const-folded.
 
+`examples/todo.velo` is a complete todo API using uuid keys, timestamps, sorting, and filters.
+
 ## Persistence
 
 The store is in memory. Pass `--data file.json` (or set `VELO_DATA`) and velo loads that file at boot and writes it back whenever the data changed, at most once every `VELO_SAVE_MS` milliseconds (default 200):
@@ -150,7 +154,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.14.1. The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.15.0. The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — this is client-bound, both processes fight for the same 4 cores:
 
@@ -199,9 +203,30 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-40 tests (34 integration + 4 fuzz + 2 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache invalidation, request headers, guards, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+41 tests (35 integration + 4 fuzz + 2 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache invalidation, request headers, guards, client-supplied ids, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 `tests/fuzz.rs` adds four deterministic robustness tests: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, and oversized header and body requests. They assert the process never panics and that the server still answers a normal request afterwards.
+
+## Deployment
+
+Velo is one static binary and one text file. A systemd user unit is enough:
+
+```ini
+[Unit]
+Description=velo api
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/velo run /srv/api/app.velo 127.0.0.1:8080 --data /srv/api/data.json
+Environment=VELO_WORKERS=4
+Restart=always
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target
+```
+
+`SIGTERM` is the clean stop: the event loop unwinds and the final snapshot is written before exit. Put a TLS terminator in front of it; velo speaks plain HTTP/1.1 only.
 
 ## CI
 
@@ -212,6 +237,8 @@ cargo test
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.15.0** — `db.x.first(field, value)`, `create` honours an `id` supplied in the body (409 on duplicates), `velo new` writes a starter file, `examples/todo.velo`, and deployment notes.
 
 **v0.14.1** — repository hygiene: `rustfmt.toml`, formatted tree, zero clippy warnings, and a GitHub Actions workflow running fmt, clippy, tests, release build, and a boot smoke test.
 

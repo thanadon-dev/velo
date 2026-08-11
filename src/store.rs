@@ -128,6 +128,11 @@ impl Collection {
         Value::Arr(Arc::new(rows))
     }
 
+    pub fn first(&self, field: &str, want: &str) -> Option<Value> {
+        let s = self.snap.read().unwrap();
+        s.rows.iter().find(|r| r.get(field).as_key() == want).cloned()
+    }
+
     pub fn page(&self, offset: usize, limit: usize) -> Value {
         let s = self.snap.read().unwrap();
         let end =
@@ -143,17 +148,29 @@ impl Collection {
         Value::Raw(self.snap.read().unwrap().sorted_json(field))
     }
 
-    pub fn create(&self, v: Value) -> Value {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let row = with_id(v, id as f64);
+    pub fn create(&self, v: Value) -> Option<Value> {
+        let given = match v.get("id") {
+            Value::Null => None,
+            id => Some(id.as_key()),
+        };
+        let (key, row) = match given {
+            Some(key) => (key, as_row(v)),
+            None => {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+                (id.to_string(), with_id(v, id as f64))
+            }
+        };
         let mut s = self.snap.write().unwrap();
+        if s.by_id.contains_key(&key) {
+            return None;
+        }
         let rows = Arc::make_mut(&mut s.rows);
         rows.push(row.clone());
         let idx = rows.len() - 1;
-        s.by_id.insert(id.to_string(), idx);
+        s.by_id.insert(key, idx);
         s.invalidate();
         self.touch();
-        row
+        Some(row)
     }
 
     pub fn update(&self, id: &str, patch: Value) -> Option<Value> {

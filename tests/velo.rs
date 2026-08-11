@@ -23,6 +23,9 @@ GET  /raw/:v          => { v: v }
 DELETE /gone/:id      => { id: id } : 204
 POST /accepted        => "queued" : 202
 GET  /paged           => db.users.page(query.offset, query.limit)
+GET  /byname/:n       => db.users.first("name", n)
+POST /keyed           => db.keyed.create(body)
+GET  /keyed/:id       => db.keyed.find(id)
 GET  /time            => { at: now() }
 GET  /id              => uuid()
 GET  /sizes           => { s: len("abc"), a: len([1,2]), n: len(null) }
@@ -585,4 +588,19 @@ fn guarded_routes_are_not_const_folded() {
     let health = prog.routes.iter().find(|r| r.pattern == "/health").unwrap();
     assert!(health.guard.is_none());
     assert!(health.konst.is_some());
+}
+
+#[test]
+fn first_and_client_ids() {
+    let s = server();
+    call(&s, "POST", "/users", r#"{"name":"a"}"#);
+    call(&s, "POST", "/users", r#"{"name":"b"}"#);
+    assert_eq!(call(&s, "GET", "/byname/b", "").1, r#"{"id":2,"name":"b"}"#);
+    assert_eq!(call(&s, "GET", "/byname/zz", "").0, 404);
+
+    let (status, body, _) = call(&s, "POST", "/keyed", r#"{"id":"u-1","name":"x"}"#);
+    assert_eq!((status, body), (201, r#"{"id":"u-1","name":"x"}"#.to_string()));
+    assert_eq!(call(&s, "GET", "/keyed/u-1", "").1, r#"{"id":"u-1","name":"x"}"#);
+    assert_eq!(call(&s, "POST", "/keyed", r#"{"id":"u-1","name":"dup"}"#).0, 409);
+    assert_eq!(call(&s, "POST", "/keyed", r#"{"name":"auto"}"#).1, r#"{"id":1,"name":"auto"}"#);
 }
