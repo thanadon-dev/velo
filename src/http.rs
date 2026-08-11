@@ -227,6 +227,7 @@ fn parse_head(buf: &[u8]) -> Option<Head> {
     let http11 = v.starts_with(b"HTTP/1.1");
     let mut keep_alive = http11;
     let mut content_len = 0usize;
+    let mut seen_len = false;
     let mut chunked = false;
     let mut pos = line_end + 1;
     while pos < end {
@@ -241,8 +242,11 @@ fn parse_head(buf: &[u8]) -> Option<Head> {
         let val = trim(&h[colon + 1..]);
         if eq_ignore_case(name, b"content-length") {
             match std::str::from_utf8(val).ok().and_then(|s| s.parse::<usize>().ok()) {
-                Some(n) => content_len = n,
-                None => return Some(bad(end, 400)),
+                Some(n) if !seen_len || n == content_len => {
+                    content_len = n;
+                    seen_len = true;
+                }
+                _ => return Some(bad(end, 400)),
             }
         } else if eq_ignore_case(name, b"connection") {
             if contains_ignore_case(val, b"close") {
@@ -457,11 +461,11 @@ impl Conn {
     }
 }
 
-fn process(srv: &Server, c: &mut Conn) {
+fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
     loop {
         let Some(head) = parse_head(&c.inbuf[c.start..]) else {
             if c.inbuf.len() - c.start > MAX_HEAD {
-                write_head(&mut c.out, 431, Ctype::Json, 0, false, &[]);
+                write_head(&mut c.out, 431, Ctype::Json, 0, false, headers);
                 c.closing = true;
             }
             c.compact();
@@ -473,7 +477,7 @@ fn process(srv: &Server, c: &mut Conn) {
             return;
         }
         if let Some(code) = head.error {
-            write_head(&mut c.out, code, Ctype::Json, 0, false, &[]);
+            write_head(&mut c.out, code, Ctype::Json, 0, false, headers);
             c.closing = true;
             c.start += need;
             c.compact();
@@ -488,7 +492,7 @@ fn process(srv: &Server, c: &mut Conn) {
         if srv.log {
             eprintln!("{method} {path} {status} {}b", body.len());
         }
-        write_head(&mut c.out, status, ct, body.len(), head.keep_alive, &srv.extra_headers);
+        write_head(&mut c.out, status, ct, body.len(), head.keep_alive, headers);
         if !head.head_only && !empty_status(status) {
             c.out.extend_from_slice(&body);
         }
@@ -516,9 +520,15 @@ fn worker(srv: &Server, listener: &TcpListener) -> std::io::Result<()> {
     let mut dead: Vec<u64> = Vec::new();
     let mut last_sweep = Instant::now();
     let idle = Duration::from_secs(srv.keepalive_secs.max(1));
+    let mut headers = response_headers(srv);
+    let mut header_age = Instant::now();
 
     while !srv.stopping() {
         let n = ep.wait(&mut events, 250)?;
+        if header_age.elapsed() >= Duration::from_secs(1) {
+            headers = response_headers(srv);
+            header_age = Instant::now();
+        }
         for ev in &events[..n] {
             let (flags, key) = (ev.events, ev.data);
             if key == u64::MAX {
@@ -534,7 +544,7 @@ fn worker(srv: &Server, listener: &TcpListener) -> std::io::Result<()> {
                 if flags & (epoll::IN | epoll::RDHUP) != 0 {
                     alive = c.fill();
                     if !c.inbuf.is_empty() {
-                        process(srv, c);
+                        process(srv, c, &headers);
                     }
                 }
                 if alive || !c.out.is_empty() {
@@ -580,9 +590,23 @@ fn worker(srv: &Server, listener: &TcpListener) -> std::io::Result<()> {
     Ok(())
 }
 
+fn response_headers(srv: &Server) -> Vec<u8> {
+    let mut h = crate::date::header(std::time::SystemTime::now());
+    h.extend_from_slice(&srv.extra_headers);
+    h
+}
+
 fn accept_all(srv: &Server, listener: &TcpListener, ep: &Epoll, conns: &mut ConnMap) {
     loop {
-        let Ok((stream, _)) = listener.accept() else { return };
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => return,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(10));
+                return;
+            }
+        };
         if conns.len() >= srv.max_conns {
             let _ = (&stream).write_all(
                 b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",

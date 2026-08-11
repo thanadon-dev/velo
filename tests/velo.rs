@@ -473,3 +473,23 @@ fn compile_error_shows_source_line() {
     assert!(err.starts_with("line 2: unknown identifier"), "{err}");
     assert!(err.contains("2 | GET /users => user.all()"), "{err}");
 }
+
+#[test]
+fn http_sends_date_and_rejects_duplicate_length() {
+    let port = spawn();
+    let res = raw(port, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    assert!(res.contains("Date: "), "{res}");
+    assert!(res.contains(" GMT\r\n"), "{res}");
+
+    let res = raw(
+        port,
+        b"POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nContent-Length: 9\r\n\r\n{}",
+    );
+    assert!(res.starts_with("HTTP/1.1 400"), "{res}");
+
+    let res = raw(
+        port,
+        b"POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"name\":\"a\"}",
+    );
+    assert!(res.starts_with("HTTP/1.1 201"), "{res}");
+}
