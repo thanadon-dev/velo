@@ -2,11 +2,28 @@ use crate::value::{Obj, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 struct Snapshot {
     rows: Arc<Vec<Value>>,
     by_id: HashMap<String, usize>,
+    all_json: OnceLock<Arc<[u8]>>,
+}
+
+impl Snapshot {
+    fn json(&self) -> Arc<[u8]> {
+        self.all_json
+            .get_or_init(|| {
+                let mut out = Vec::with_capacity(self.rows.len() * 64 + 2);
+                Value::Arr(self.rows.clone()).write_json(&mut out);
+                Arc::from(out.as_slice())
+            })
+            .clone()
+    }
+
+    fn invalidate(&mut self) {
+        self.all_json = OnceLock::new();
+    }
 }
 
 pub struct Collection {
@@ -20,7 +37,11 @@ impl Collection {
     fn new(name: &str, dirty: Arc<AtomicBool>) -> Collection {
         Collection {
             name: name.to_string(),
-            snap: RwLock::new(Snapshot { rows: Arc::new(Vec::new()), by_id: HashMap::new() }),
+            snap: RwLock::new(Snapshot {
+                rows: Arc::new(Vec::new()),
+                by_id: HashMap::new(),
+                all_json: OnceLock::new(),
+            }),
             next_id: AtomicU64::new(0),
             dirty,
         }
@@ -44,12 +65,13 @@ impl Collection {
         for (i, r) in rows.iter().enumerate() {
             s.by_id.insert(r.get("id").as_key(), i);
         }
-        s.rows = Arc::new(rows);
+        s.rows = Arc::new(rows.into_iter().map(as_row).collect());
+        s.invalidate();
         self.next_id.store(next_id, Ordering::Relaxed);
     }
 
     pub fn all(&self) -> Value {
-        Value::Arr(self.snap.read().unwrap().rows.clone())
+        Value::Raw(self.snap.read().unwrap().json())
     }
 
     pub fn count(&self) -> usize {
@@ -94,6 +116,7 @@ impl Collection {
         rows.push(row.clone());
         let idx = rows.len() - 1;
         s.by_id.insert(id.to_string(), idx);
+        s.invalidate();
         self.touch();
         row
     }
@@ -101,8 +124,9 @@ impl Collection {
     pub fn update(&self, id: &str, patch: Value) -> Option<Value> {
         let mut s = self.snap.write().unwrap();
         let i = *s.by_id.get(id)?;
-        let merged = merge(&s.rows[i], &patch);
+        let merged = as_row(merge(&s.rows[i], &patch));
         Arc::make_mut(&mut s.rows)[i] = merged.clone();
+        s.invalidate();
         self.touch();
         Some(merged)
     }
@@ -111,6 +135,7 @@ impl Collection {
         let mut s = self.snap.write().unwrap();
         let Some(i) = s.by_id.remove(id) else { return false };
         Arc::make_mut(&mut s.rows).remove(i);
+        s.invalidate();
         for v in s.by_id.values_mut() {
             if *v > i {
                 *v -= 1;
@@ -124,6 +149,7 @@ impl Collection {
         let mut s = self.snap.write().unwrap();
         s.rows = Arc::new(Vec::new());
         s.by_id.clear();
+        s.invalidate();
         self.next_id.store(0, Ordering::Relaxed);
         self.touch();
     }
@@ -227,9 +253,17 @@ impl Store {
     }
 }
 
+fn as_row(v: Value) -> Value {
+    match v {
+        Value::Row(..) => v,
+        Value::Obj(o) => Value::row(o.as_ref().clone()),
+        other => other,
+    }
+}
+
 fn with_id(v: Value, id: f64) -> Value {
     match v {
-        Value::Obj(o) => {
+        Value::Obj(o) | Value::Row(o, _) => {
             let mut row: Obj = Vec::with_capacity(o.len() + 1);
             row.push((Arc::from("id"), Value::Num(id)));
             for (k, val) in o.iter() {
@@ -237,9 +271,9 @@ fn with_id(v: Value, id: f64) -> Value {
                     row.push((k.clone(), val.clone()));
                 }
             }
-            Value::obj(row)
+            Value::row(row)
         }
-        other => Value::obj(vec![
+        other => Value::row(vec![
             (Arc::from("id"), Value::Num(id)),
             (Arc::from("value"), other),
         ]),
@@ -247,10 +281,10 @@ fn with_id(v: Value, id: f64) -> Value {
 }
 
 fn merge(base: &Value, patch: &Value) -> Value {
-    let (Value::Obj(b), Value::Obj(p)) = (base, patch) else {
-        return match base {
-            Value::Obj(_) => base.clone(),
-            _ => patch.clone(),
+    let (Some(b), Some(p)) = (obj_of(base), obj_of(patch)) else {
+        return match obj_of(base) {
+            Some(_) => base.clone(),
+            None => patch.clone(),
         };
     };
     let mut out: Obj = b.as_ref().clone();
@@ -263,5 +297,12 @@ fn merge(base: &Value, patch: &Value) -> Value {
             None => out.push((k.clone(), v.clone())),
         }
     }
-    Value::obj(out)
+    Value::row(out)
+}
+
+fn obj_of(v: &Value) -> Option<&Arc<Vec<(Arc<str>, Value)>>> {
+    match v {
+        Value::Obj(o) | Value::Row(o, _) => Some(o),
+        _ => None,
+    }
 }

@@ -360,3 +360,18 @@ fn http_204_has_no_body() {
     assert!(!res.contains("Content-Length"), "{res}");
     assert!(res.ends_with("\r\n\r\n"), "{res}");
 }
+
+#[test]
+fn list_cache_invalidates_on_write() {
+    let s = server();
+    assert_eq!(call(&s, "GET", "/users", "").1, "[]");
+    call(&s, "POST", "/users", r#"{"name":"a"}"#);
+    assert_eq!(call(&s, "GET", "/users", "").1, r#"[{"id":1,"name":"a"}]"#);
+    assert_eq!(call(&s, "GET", "/users", "").1, r#"[{"id":1,"name":"a"}]"#);
+    call(&s, "PUT", "/users/1", r#"{"name":"b"}"#);
+    assert_eq!(call(&s, "GET", "/users", "").1, r#"[{"id":1,"name":"b"}]"#);
+    call(&s, "POST", "/users", r#"{"name":"c"}"#);
+    assert_eq!(call(&s, "GET", "/users", "").1, r#"[{"id":1,"name":"b"},{"id":2,"name":"c"}]"#);
+    call(&s, "DELETE", "/users/1", "");
+    assert_eq!(call(&s, "GET", "/users", "").1, r#"[{"id":2,"name":"c"}]"#);
+}

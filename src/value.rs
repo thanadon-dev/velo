@@ -11,6 +11,8 @@ pub enum Value {
     Str(Arc<str>),
     Arr(Arc<Vec<Value>>),
     Obj(Arc<Obj>),
+    Row(Arc<Obj>, Arc<[u8]>),
+    Raw(Arc<[u8]>),
 }
 
 impl Value {
@@ -22,9 +24,16 @@ impl Value {
         Value::Obj(Arc::new(fields))
     }
 
+    pub fn row(fields: Obj) -> Value {
+        let obj = Arc::new(fields);
+        let mut json = Vec::with_capacity(64);
+        Value::Obj(obj.clone()).write_json(&mut json);
+        Value::Row(obj, Arc::from(json.as_slice()))
+    }
+
     pub fn get(&self, key: &str) -> Value {
         match self {
-            Value::Obj(o) => o
+            Value::Obj(o) | Value::Row(o, _) => o
                 .iter()
                 .find(|(k, _)| &**k == key)
                 .map(|(_, v)| v.clone())
@@ -67,6 +76,7 @@ impl Value {
                 }
                 out.push(b']');
             }
+            Value::Row(_, json) | Value::Raw(json) => out.extend_from_slice(json),
             Value::Obj(fields) => {
                 out.push(b'{');
                 for (i, (k, v)) in fields.iter().enumerate() {
