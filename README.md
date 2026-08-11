@@ -1,6 +1,6 @@
 # Velo
 
-**v0.9.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.10.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -32,7 +32,7 @@ CLI:
 | command | what it does |
 | --- | --- |
 | `velo run <file> [addr] [--data f.json]` | start the server (default `:8080`, env `VELO_ADDR`, `VELO_DATA`) |
-| `velo check <file>` | compile only, report errors with line numbers |
+| `velo check <file>` | compile only, report errors with the offending source line |
 | `velo routes <file>` | list compiled routes and which ones fold to constants |
 | `velo version` | print version |
 | `velobench [-c n] [-d secs] [-p depth] [-m method] [-b body] <url>` | built-in keep-alive load generator |
@@ -71,6 +71,7 @@ Built-in store (`db.<collection>.<op>`):
 | `find(key)` | row | 404 |
 | `where(field, value)` | array of matching rows | `[]` |
 | `page(offset, limit)` | slice of rows, `limit` 0 means "to the end" | `[]` |
+| `order(field)` | rows sorted by `field`, `"-field"` for descending | `[]` |
 | `create(value)` | row with generated `id` | 400 if body is empty |
 | `update(key, patch)` | merged row | 404 |
 | `delete(key)` | `{"deleted":true}` | 404 |
@@ -133,7 +134,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.9.0:
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.10.0:
 
 | route | kind | req/s | p50 | p99 |
 | --- | --- | --- | --- | --- |
@@ -170,13 +171,15 @@ velobench -c 200 -d 10 -p 16 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-27 tests (26 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+29 tests (28 integration + 1 in velobench): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 ## Build notes
 
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.10.0** — `db.x.order(field)` sorting (`"-field"` descending, numbers compare numerically) and compile errors that print the offending source line.
 
 **v0.9.0** — `VELO_CORS` adds the allow-origin headers and answers `OPTIONS` preflight with a bodyless 204; `VELO_LOG` prints one line per request.
 

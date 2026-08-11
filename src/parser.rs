@@ -62,6 +62,7 @@ pub enum Op {
     Count,
     Find(Box<Expr>),
     Where(Box<Expr>, Box<Expr>),
+    Order(Box<Expr>),
     Page(Box<Expr>, Box<Expr>),
     Create(Box<Expr>),
     Update(Box<Expr>, Box<Expr>),
@@ -106,6 +107,7 @@ impl Expr {
                     let limit = num_arg(&l.eval(c)?);
                     Ok(col.page(offset, limit))
                 }
+                Op::Order(f) => Ok(col.order(&f.eval(c)?.as_key())),
                 Op::Where(f, v) => {
                     let field = f.eval(c)?.as_key();
                     let want = v.eval(c)?.as_key();
@@ -205,15 +207,29 @@ pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> 
         body: false,
         query: false,
     };
-    p.advance()?;
+    p.advance().map_err(|e| with_source(src, e))?;
     let mut routes = Vec::new();
     while p.tok.kind != Kind::Eof {
-        routes.push(p.route()?);
+        routes.push(p.route().map_err(|e| with_source(src, e))?);
     }
     if routes.is_empty() {
         return Err("no routes defined".to_string());
     }
     Ok(Program { routes, store })
+}
+
+fn with_source(src: &str, err: String) -> String {
+    let Some(rest) = err.strip_prefix("line ") else { return err };
+    let Some(num) = rest.split(':').next().and_then(|n| n.parse::<usize>().ok()) else {
+        return err;
+    };
+    let Some(text) = src.lines().nth(num.saturating_sub(1)) else { return err };
+    let gutter = num.to_string();
+    format!(
+        "{err}\n  {gutter} | {}\n  {} |",
+        text.trim_end(),
+        " ".repeat(gutter.len())
+    )
 }
 
 struct Parser<'a> {
@@ -477,6 +493,10 @@ impl<'a> Parser<'a> {
                 want(2)?;
                 let o = Box::new(args.next().unwrap());
                 Op::Page(o, Box::new(args.next().unwrap()))
+            }
+            "order" => {
+                want(1)?;
+                Op::Order(Box::new(args.next().unwrap()))
             }
             "where" => {
                 want(2)?;

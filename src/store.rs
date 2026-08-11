@@ -1,4 +1,5 @@
 use crate::value::{Obj, Value};
+use std::cmp::Ordering as Ordering2;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::atomic::AtomicBool;
@@ -105,6 +106,27 @@ impl Collection {
             Some(slice) => slice.to_vec(),
             None => Vec::new(),
         };
+        Value::Arr(Arc::new(rows))
+    }
+
+    pub fn order(&self, field: &str) -> Value {
+        let (field, desc) = match field.strip_prefix('-') {
+            Some(f) => (f, true),
+            None => (field, false),
+        };
+        let mut rows: Vec<Value> = self.snap.read().unwrap().rows.as_ref().clone();
+        rows.sort_by(|a, b| {
+            let (x, y) = (a.get(field), b.get(field));
+            let ord = match (&x, &y) {
+                (Value::Num(m), Value::Num(n)) => m.partial_cmp(n).unwrap_or(Ordering2::Equal),
+                _ => x.as_key().cmp(&y.as_key()),
+            };
+            if desc {
+                ord.reverse()
+            } else {
+                ord
+            }
+        });
         Value::Arr(Arc::new(rows))
     }
 

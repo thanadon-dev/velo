@@ -27,6 +27,8 @@ GET  /time            => { at: now() }
 GET  /id              => uuid()
 GET  /sizes           => { s: len("abc"), a: len([1,2]), n: len(null) }
 GET  /home            => env("VELO_TEST_ENV")
+GET  /sorted          => db.users.order("name")
+GET  /rsorted         => db.users.order("-id")
 POST /events          => db.events.create({ at: now(), id: uuid(), data: body })
 "#;
 
@@ -444,4 +446,30 @@ fn cors_preflight_and_headers() {
     assert!(pre.contains("Access-Control-Allow-Origin: *"), "{pre}");
     assert!(!pre.contains("Content-Length"), "{pre}");
     s.shutdown();
+}
+
+#[test]
+fn order_sorts_rows() {
+    let s = server();
+    call(&s, "POST", "/users", r#"{"name":"c"}"#);
+    call(&s, "POST", "/users", r#"{"name":"a"}"#);
+    call(&s, "POST", "/users", r#"{"name":"b"}"#);
+    assert_eq!(
+        call(&s, "GET", "/sorted", "").1,
+        r#"[{"id":2,"name":"a"},{"id":3,"name":"b"},{"id":1,"name":"c"}]"#
+    );
+    assert_eq!(
+        call(&s, "GET", "/rsorted", "").1,
+        r#"[{"id":3,"name":"b"},{"id":2,"name":"a"},{"id":1,"name":"c"}]"#
+    );
+}
+
+#[test]
+fn compile_error_shows_source_line() {
+    let err = match compile("GET /a => \"ok\"\nGET /users => user.all()", None) {
+        Err(e) => e,
+        Ok(_) => panic!("expected a compile error"),
+    };
+    assert!(err.starts_with("line 2: unknown identifier"), "{err}");
+    assert!(err.contains("2 | GET /users => user.all()"), "{err}");
 }
