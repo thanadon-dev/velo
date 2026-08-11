@@ -29,6 +29,8 @@ GET  /sizes           => { s: len("abc"), a: len([1,2]), n: len(null) }
 GET  /home            => env("VELO_TEST_ENV")
 GET  /sorted          => db.users.order("name")
 GET  /rsorted         => db.users.order("-id")
+GET  /whoami          => { agent: header.user_agent, auth: header.authorization }
+GET  /tenant          => db.users.where("team", header.x_team)
 POST /events          => db.events.create({ at: now(), id: uuid(), data: body })
 "#;
 
@@ -508,4 +510,38 @@ fn sorted_cache_invalidates() {
     );
     call(&s, "DELETE", "/users/3", "");
     assert_eq!(call(&s, "GET", "/sorted", "").1, r#"[{"id":2,"name":"a"},{"id":1,"name":"c"}]"#);
+}
+
+#[test]
+fn request_headers() {
+    let s = server();
+    let mut out = Vec::new();
+    let raw = b"GET /whoami HTTP/1.1\r\nHost: x\r\nUser-Agent: velo/1\r\nAuthorization: Bearer t\r\n\r\n";
+    let (status, _) = s.handle("GET", "/whoami", b"", raw, &mut out);
+    assert_eq!(status, 200);
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        r#"{"agent":"velo/1","auth":"Bearer t"}"#
+    );
+
+    let mut out = Vec::new();
+    s.handle("GET", "/whoami", b"", b"GET /whoami HTTP/1.1\r\n\r\n", &mut out);
+    assert_eq!(String::from_utf8(out).unwrap(), r#"{"agent":null,"auth":null}"#);
+}
+
+#[test]
+fn http_header_routing_end_to_end() {
+    let s = server();
+    call(&s, "POST", "/users", r#"{"name":"a","team":"red"}"#);
+    call(&s, "POST", "/users", r#"{"name":"b","team":"blue"}"#);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bg = s.clone();
+    std::thread::spawn(move || bg.serve(listener));
+    let res = raw(
+        port,
+        b"GET /tenant HTTP/1.1\r\nHost: x\r\nX-Team: blue\r\nConnection: close\r\n\r\n",
+    );
+    assert!(res.ends_with(r#"[{"id":2,"name":"b","team":"blue"}]"#), "{res}");
+    s.shutdown();
 }

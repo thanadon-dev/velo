@@ -1,6 +1,6 @@
 # Velo
 
-**v0.12.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.13.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -59,6 +59,7 @@ Expressions:
 | path param | `id` | resolved to a slot index at compile time |
 | request body | `body`, `body.name` | parsed only if the route mentions it |
 | query string | `query.limit` | parsed only if the route mentions it, percent-decoded |
+| request header | `header.x_team` | lowercased, `-` written as `_`, parsed only if the route mentions it |
 | store call | `db.users.find(id)` | see below |
 | function call | `now()`, `uuid()`, `len(x)`, `env("PORT")` | see below |
 
@@ -86,7 +87,8 @@ Built-in functions:
 | `env("NAME")` | environment variable, or `null`; folded at compile time |
 
 ```velo
-POST /events => db.events.create({ id: uuid(), at: now(), data: body })
+POST /events     => db.events.create({ id: uuid(), at: now(), data: body })
+GET  /users/mine => db.users.where("team", header.x_team)
 ```
 
 `POST` routes answer `201`, everything else `200`. Append `: <code>` to set it yourself:
@@ -135,7 +137,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.12.1. The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.13.0. The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — this is client-bound, both processes fight for the same 4 cores:
 
@@ -184,7 +186,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-36 tests (30 integration + 4 fuzz + 2 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache invalidation, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+38 tests (32 integration + 4 fuzz + 2 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache invalidation, request headers, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 `tests/fuzz.rs` adds four deterministic robustness tests: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, and oversized header and body requests. They assert the process never panics and that the server still answers a normal request afterwards.
 
@@ -193,6 +195,8 @@ cargo test
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.13.0** — request headers in expressions: `header.x_team` (lowercased, hyphens as underscores), parsed only for routes that mention `header`.
 
 **v0.12.1** — deterministic fuzz suite for the compiler and the HTTP parser. No panics or hangs found; kept as a regression net.
 

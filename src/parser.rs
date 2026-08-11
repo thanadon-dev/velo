@@ -19,11 +19,18 @@ pub struct Ctx<'a> {
     pub nparams: usize,
     pub body: Value,
     pub query: Value,
+    pub header: Value,
 }
 
 impl<'a> Default for Ctx<'a> {
     fn default() -> Self {
-        Ctx { params: [""; MAX_PARAMS], nparams: 0, body: Value::Null, query: Value::Null }
+        Ctx {
+            params: [""; MAX_PARAMS],
+            nparams: 0,
+            body: Value::Null,
+            query: Value::Null,
+            header: Value::Null,
+        }
     }
 }
 
@@ -42,6 +49,7 @@ pub enum Expr {
     Param(usize),
     Body,
     Query,
+    Header,
     Field(Box<Expr>, Arc<str>),
     Object(Vec<(Arc<str>, Expr)>),
     Array(Vec<Expr>),
@@ -76,6 +84,7 @@ impl Expr {
             Expr::Param(i) => Ok(decode_param(c.param(*i))),
             Expr::Body => Ok(c.body.clone()),
             Expr::Query => Ok(c.query.clone()),
+            Expr::Header => Ok(c.header.clone()),
             Expr::Field(base, key) => Ok(base.eval(c)?.get(key)),
             Expr::Object(fields) => {
                 let mut out = Vec::with_capacity(fields.len());
@@ -154,6 +163,7 @@ pub struct Route {
     pub status: u16,
     pub uses_body: bool,
     pub uses_query: bool,
+    pub uses_header: bool,
     pub line: usize,
 }
 
@@ -216,6 +226,7 @@ pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> 
         pure: true,
         body: false,
         query: false,
+        header: false,
     };
     p.advance().map_err(|e| with_source(src, e))?;
     let mut routes = Vec::new();
@@ -250,6 +261,7 @@ struct Parser<'a> {
     pure: bool,
     body: bool,
     query: bool,
+    header: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -290,6 +302,7 @@ impl<'a> Parser<'a> {
         self.pure = true;
         self.body = false;
         self.query = false;
+        self.header = false;
         let expr = self.expr()?;
         let mut status = if method == Method::Post { 201 } else { 200 };
         if self.tok.kind == Kind::Colon {
@@ -319,6 +332,7 @@ impl<'a> Parser<'a> {
             status,
             uses_body: self.body,
             uses_query: self.query,
+            uses_header: self.header,
             line,
         })
     }
@@ -401,6 +415,11 @@ impl<'a> Parser<'a> {
                 self.pure = false;
                 self.query = true;
                 return self.fields(Expr::Query);
+            }
+            "header" => {
+                self.pure = false;
+                self.header = true;
+                return self.fields(Expr::Header);
             }
             _ => {}
         }

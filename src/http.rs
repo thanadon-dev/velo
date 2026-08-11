@@ -79,6 +79,17 @@ impl Server {
         raw_body: &[u8],
         out: &mut Vec<u8>,
     ) -> (u16, Ctype) {
+        self.handle(method, path, raw_body, &[], out)
+    }
+
+    pub fn handle(
+        &self,
+        method: &str,
+        path: &str,
+        raw_body: &[u8],
+        raw_headers: &[u8],
+        out: &mut Vec<u8>,
+    ) -> (u16, Ctype) {
         let (path, query) = match path.find('?') {
             Some(i) => (&path[..i], &path[i + 1..]),
             None => (path, ""),
@@ -108,6 +119,9 @@ impl Server {
         let rt = &self.routes[idx];
         if rt.uses_query {
             ctx.query = crate::parser::parse_query(query);
+        }
+        if rt.uses_header {
+            ctx.header = parse_headers(raw_headers);
         }
         if rt.uses_body && !raw_body.is_empty() {
             match crate::value::parse_json(raw_body) {
@@ -158,6 +172,33 @@ impl Server {
         }
         res
     }
+}
+
+pub fn parse_headers(raw: &[u8]) -> Value {
+    let mut fields: Vec<(Arc<str>, Value)> = Vec::new();
+    let mut pos = match raw.iter().position(|&c| c == b'\n') {
+        Some(i) => i + 1,
+        None => return Value::obj(fields),
+    };
+    while pos < raw.len() {
+        let nl = match raw[pos..].iter().position(|&c| c == b'\n') {
+            Some(j) => pos + j,
+            None => raw.len(),
+        };
+        let line = strip_cr(&raw[pos..nl]);
+        pos = nl + 1;
+        let Some(colon) = line.iter().position(|&c| c == b':') else { continue };
+        let name = std::str::from_utf8(&line[..colon])
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .replace('-', "_");
+        if name.is_empty() {
+            continue;
+        }
+        let value = std::str::from_utf8(trim(&line[colon + 1..])).unwrap_or("");
+        fields.push((Arc::from(name.as_str()), Value::str(value)));
+    }
+    Value::obj(fields)
 }
 
 fn cors_headers(origin: &Option<String>) -> Vec<u8> {
@@ -488,7 +529,8 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         let path = std::str::from_utf8(&req[head.path.0..head.path.1]).unwrap_or("/");
         c.body.clear();
         let mut body = std::mem::take(&mut c.body);
-        let (status, ct) = srv.dispatch(method, path, &req[head.head_end..], &mut body);
+        let (status, ct) =
+            srv.handle(method, path, &req[head.head_end..], &req[..head.head_end], &mut body);
         if srv.log {
             eprintln!("{method} {path} {status} {}b", body.len());
         }
