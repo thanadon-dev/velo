@@ -1,0 +1,15 @@
+GET  /health              => "ok"
+GET  /version             => { name: "velo", version: "0.1.0" }
+
+GET  /users               => db.users.all()
+GET  /users/:id           => db.users.find(id)
+POST /users               => db.users.create(body)
+PUT  /users/:id           => db.users.update(id, body)
+DELETE /users/:id         => db.users.delete(id)
+
+GET  /posts               => db.posts.all()
+POST /posts               => db.posts.create(body)
+GET  /posts/:id           => db.posts.find(id)
+
+GET  /stats               => { users: db.users.count(), posts: db.posts.count() }
+GET  /teams/:tid/members/:mid => { team: tid, member: mid }
