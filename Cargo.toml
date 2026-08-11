@@ -1,0 +1,24 @@
+[package]
+name = "velo"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.75"
+description = "A tiny language for HTTP APIs"
+license = "MIT"
+
+[dependencies]
+
+[lib]
+name = "velo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "velo"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

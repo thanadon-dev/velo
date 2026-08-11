@@ -1,6 +1,6 @@
 # Velo
 
-**v0.1.0** — a tiny language for HTTP APIs. One line per endpoint, compiled to closures, served by a zero-allocation router.
+**v0.2.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by a hand-written HTTP/1.1 engine.
 
 ```velo
 GET    /health     => "ok"
@@ -17,8 +17,8 @@ That file is a complete, running API server.
 ## Quick start
 
 ```sh
-go build -o bin/velo ./cmd/velo
-./bin/velo run examples/api.velo :8080
+cargo build --release
+./target/x86_64-unknown-linux-musl/release/velo run examples/api.velo :8080
 
 curl localhost:8080/health
 curl -XPOST localhost:8080/users -d '{"name":"mark"}'
@@ -42,7 +42,7 @@ A program is a list of routes:
 METHOD /path/:param => expression
 ```
 
-Methods: `GET POST PUT PATCH DELETE HEAD OPTIONS`. Comments: `#` or `//`.
+Methods: `GET POST PUT PATCH DELETE HEAD OPTIONS`. Comments: `#` or `//`. `HEAD` falls back to the matching `GET` route.
 
 Expressions:
 
@@ -58,84 +58,57 @@ Expressions:
 
 Built-in store (`db.<collection>.<op>`):
 
-| op | returns | status |
+| op | returns | on miss |
 | --- | --- | --- |
-| `all()` | every row | 200 |
-| `find(id)` | one row | 200, or 404 |
-| `create(value)` | the created row with its `id` | 201 |
-| `update(id, patch)` | merged row | 200, or 404 |
-| `delete(id)` | `{"deleted":true}` | 200, or 404 |
-| `count()` | number of rows | 200 |
+| `all()` | array of rows | |
+| `count()` | number | |
+| `find(key)` | row | 404 |
+| `create(value)` | row with generated `id` | 400 if body is empty |
+| `update(key, patch)` | merged row | 404 |
+| `delete(key)` | `{"deleted":true}` | 404 |
 
-`POST` routes answer `201` by default, everything else `200`. Unknown path is `404`, known path with the wrong method is `405`, malformed JSON body is `400`, body over 1 MB is `413`.
+`POST` routes answer `201`, everything else `200`. Errors are `{"error":"..."}`.
 
 ## Design
 
-- **Compile to closures.** Parsing produces a tree of `func(*Ctx) (Value, *Err)` closures, not an AST that gets walked per request. No type switches on the hot path.
-- **Compile-time resolution.** Path parameters become slot indexes, collections become pointers. Nothing is looked up by name at request time.
-- **Constant folding.** A route whose expression touches no request state (`GET /health => "ok"`) is serialized once at compile time and the bytes are written straight to the socket.
-- **Zero-allocation router.** Static paths hit a per-method map, dynamic paths walk a segment trie, parameters land in a fixed array inside a pooled `Ctx`.
-- **Hand-written JSON.** No reflection, no `encoding/json`. Encoding appends into pooled buffers; objects are ordered key/value slices, so output is deterministic and small records stay cache-friendly.
-- **Copy-on-write store.** Readers load an immutable snapshot pointer with no lock at all; writers copy under a mutex and swap. API traffic is read-heavy, so reads pay nothing.
+- **Const folding.** Routes whose expression touches no param, body, or store are evaluated at compile time and stored as ready-to-send bytes. `GET /health => "ok"` costs one `memcpy` per request.
+- **Router.** Per-method exact map (FNV-hashed) for static paths, a segment tree for `:param` paths. Params are borrowed slices of the request line, never copied.
+- **Values.** `Value` is an enum with `Arc` payloads, so returning a whole collection is a refcount bump, not a deep copy. JSON is written straight into the connection's output buffer.
+- **Store.** Copy-on-write snapshot behind an `RwLock`; readers clone an `Arc<Vec<Value>>` and release the lock immediately.
+- **HTTP.** Hand-written HTTP/1.1: keep-alive by default, request pipelining, per-connection read/write/body buffers reused across requests, one `write_all` per batch. Thread per connection with a 128 KB stack, capped by `VELO_MAX_CONNS`.
+- **No dependencies.** `[dependencies]` is empty. std only.
+
+Env knobs: `VELO_ADDR`, `VELO_MAX_CONNS` (default 4096), `VELO_KEEPALIVE` seconds (default 60).
 
 ## Benchmarks
 
-`go test -bench . -benchmem` (Xeon Gold 6140, 4 cores, Go 1.26):
+`ab -k -c 50 -n 30000`, 4-core box, release build (`lto = "fat"`, `codegen-units = 1`), v0.2.0:
 
-| benchmark | ns/op | allocs/op |
+| route | kind | req/s |
 | --- | --- | --- |
-| `RouterStatic` | 26.7 | 0 |
-| `RouterParam` | 93.8 | 0 |
-| `JSONEncodeRow` | 142 | 0 |
-| `JSONParseRow` | 1078 | 17 |
-| `Compile` (12 routes) | 9878 | 84 |
+| `/health` | const fold | 38 800 |
+| `/users/1` | store lookup | 38 900 |
+| `/stats` | store count | 39 400 |
+| `/teams/:tid/members/:mid` | 2 params | 38 000 |
 
-End-to-end over TCP with the bundled load generator, server and generator sharing the same 4 cores:
+Resident memory while serving: **488 kB**. Binary: 594 kB, statically linked.
 
-```sh
-go build -o bin/velobench ./cmd/velobench
-./bin/velobench -c 64 -d 5s http://127.0.0.1:8080/health
-```
+Numbers are load-generator bound (`ab` is single-threaded); reproduce with `./bench.sh`.
 
-| route | rps | p50 | p99 |
-| --- | --- | --- | --- |
-| `/health` (const) | 29.8k | 1.12 ms | 13.7 ms |
-| `/users/:id` (store find) | 28.0k | 1.16 ms | 14.7 ms |
-| `/users` (list) | 28.9k | 1.16 ms | 14.2 ms |
-
-Resident memory under load: **10 MB**. Numbers are CPU-bound on a shared 4-core box; the generator competes with the server for cores.
-
-## Testing
+## Tests
 
 ```sh
-go test ./...
-go test -bench . -benchmem
+cargo test
 ```
 
-Covers routing, all store operations, JSON round-trips, error statuses, concurrent readers and writers, and compile-error cases.
+14 tests: const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests), concurrent writes.
 
-## Known limits (v0.1.0)
+## Build notes
 
-- Store is in-memory only, nothing is persisted across restarts.
-- `delete` rebuilds the id index, so it is O(n) in collection size.
-- No query-string access, no filtering, no operators or arithmetic in expressions.
-- No middleware, auth, or CORS.
-- `-race` is unavailable on the dev box (no cgo toolchain); concurrency is covered by a stress test instead.
-
-## Roadmap
-
-- v0.2: query parameters, filtering and pagination, response status control
-- v0.3: persistence, faster HTTP write path, connection-level tuning
-- v0.4: middleware, validation, standard library functions
+`.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
 
-### v0.1.0
-- Lexer, parser and closure compiler for the route DSL
-- Zero-allocation router with static map plus dynamic segment trie
-- In-memory copy-on-write store with `all/find/create/update/delete/count`
-- Hand-written JSON encoder and parser
-- Constant folding for request-independent routes
-- CLI: `run`, `check`, `routes`, `version`
-- `velobench` load generator with latency percentiles
-- Test suite and micro-benchmarks
+**v0.2.0** — rewritten in Rust, zero dependencies. Hand-written HTTP/1.1 engine (keep-alive, pipelining, HEAD fallback, chunked rejection), FNV router, `Arc`-backed values, copy-on-write store, const-folded routes, 488 kB RSS.
+
+**v0.1.0** — first version (Go): language, closure compiler, router, in-memory store.
