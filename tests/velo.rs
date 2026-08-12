@@ -873,3 +873,31 @@ fn openapi_builtin_serves_the_document() {
     assert!(matches!(v.get("paths").get("/users/{id}"), Value::Obj(_)), "{body}");
     assert!(matches!(v.get("paths").get("/docs"), Value::Obj(_)), "{body}");
 }
+
+#[test]
+fn deep_pipelining_returns_every_response() {
+    let s = server();
+    for i in 0..60 {
+        call(&s, "POST", "/users", &format!(r#"{{"name":"user-{i}"}}"#));
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bg = s.clone();
+    std::thread::spawn(move || bg.serve(listener));
+
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut batch = String::new();
+    for _ in 0..99 {
+        batch.push_str("GET /users HTTP/1.1\r\nHost: x\r\n\r\n");
+    }
+    batch.push_str("GET /users HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    c.write_all(batch.as_bytes()).unwrap();
+
+    let mut out = Vec::new();
+    c.read_to_end(&mut out).unwrap();
+    let text = String::from_utf8_lossy(&out);
+    assert_eq!(text.matches("HTTP/1.1 200 OK").count(), 100, "{} bytes", out.len());
+    assert_eq!(text.matches("user-59").count(), 100);
+    s.shutdown();
+}

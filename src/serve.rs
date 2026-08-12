@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 const READ_BUF: usize = 8 << 10;
 const EVENTS: usize = 256;
 const SWEEP: Duration = Duration::from_secs(1);
+const MAX_PENDING: usize = 256 << 10;
 
 struct Head {
     method: (usize, usize),
@@ -329,8 +330,16 @@ impl Conn {
     }
 }
 
+fn pending(c: &Conn) -> usize {
+    c.out.len() - c.wpos
+}
+
 fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
     loop {
+        if pending(c) >= MAX_PENDING {
+            c.compact();
+            return;
+        }
         let Some(head) = parse_head(&c.inbuf[c.start..]) else {
             if c.inbuf.len() - c.start > MAX_HEAD {
                 write_head(&mut c.out, 431, Ctype::Json, 0, false, headers);
@@ -445,12 +454,19 @@ pub(crate) fn worker(srv: &Server, listener: &TcpListener) -> std::io::Result<()
             } else {
                 if flags & (epoll::IN | epoll::RDHUP) != 0 {
                     alive = c.fill();
-                    if !c.inbuf.is_empty() {
+                }
+                loop {
+                    if !c.inbuf.is_empty() && pending(c) < MAX_PENDING && !c.closing {
                         process(srv, c, &headers);
                     }
-                }
-                if alive || !c.out.is_empty() {
-                    alive = c.flush() && alive;
+                    if pending(c) == 0 {
+                        break;
+                    }
+                    let flushed = c.flush();
+                    alive = flushed && alive;
+                    if !flushed || pending(c) > 0 || c.inbuf.is_empty() || c.closing {
+                        break;
+                    }
                 }
                 if alive && c.closing && c.wpos >= c.out.len() {
                     alive = false;
