@@ -34,6 +34,7 @@ fn cache_budget() -> usize {
 
 struct Snapshot {
     rows: Arc<Vec<Value>>,
+    holes: usize,
     by_id: HashMap<String, usize>,
     all_json: Option<Arc<[u8]>>,
     list_used: bool,
@@ -42,13 +43,45 @@ struct Snapshot {
     misses: AtomicU64,
 }
 
+fn is_live(v: &Value) -> bool {
+    !matches!(v, Value::Null)
+}
+
 impl Snapshot {
+    fn live(&self) -> impl Iterator<Item = &Value> {
+        self.rows.iter().filter(|r| is_live(r))
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len() - self.holes
+    }
+
+    fn compact(&mut self) {
+        if self.holes == 0 {
+            return;
+        }
+        let rows = Arc::make_mut(&mut self.rows);
+        rows.retain(is_live);
+        self.holes = 0;
+        self.by_id.clear();
+        for (i, row) in rows.iter().enumerate() {
+            self.by_id.insert(row.get("id").as_key(), i);
+        }
+    }
+
     fn json(&self) -> Arc<[u8]> {
         if let Some(json) = &self.all_json {
             return json.clone();
         }
-        let mut out = Vec::with_capacity(self.rows.len() * 64 + 2);
-        Value::Arr(self.rows.clone()).write_json(&mut out);
+        let mut out = Vec::with_capacity(self.len() * 64 + 2);
+        out.push(b'[');
+        for (n, row) in self.live().enumerate() {
+            if n > 0 {
+                out.push(b',');
+            }
+            row.write_json(&mut out);
+        }
+        out.push(b']');
         Arc::from(out.as_slice())
     }
 
@@ -107,7 +140,7 @@ impl Snapshot {
         }
         let mut out = Vec::with_capacity(256);
         out.push(b'[');
-        for (n, row) in self.rows.iter().filter(|r| field_eq(r, field, want)).enumerate() {
+        for (n, row) in self.live().filter(|r| field_eq(r, field, want)).enumerate() {
             if n > 0 {
                 out.push(b',');
             }
@@ -124,7 +157,7 @@ impl Snapshot {
         let lower = needle.to_lowercase();
         let mut out = Vec::with_capacity(256);
         out.push(b'[');
-        for (n, row) in self.rows.iter().filter(|r| field_has(r, field, &lower)).enumerate() {
+        for (n, row) in self.live().filter(|r| field_has(r, field, &lower)).enumerate() {
             if n > 0 {
                 out.push(b',');
             }
@@ -140,7 +173,7 @@ impl Snapshot {
         }
         let mut acc: Option<f64> = None;
         let mut n = 0u64;
-        for row in self.rows.iter() {
+        for row in self.live() {
             let Some(Value::Num(v)) = row.get_ref(field) else { continue };
             n += 1;
             acc = Some(match (acc, op) {
@@ -169,7 +202,7 @@ impl Snapshot {
             None => (field, false),
         };
         let mut keyed: Vec<(SortKey, &Value)> =
-            self.rows.iter().map(|r| (sort_key(r.get_ref(sort_field)), r)).collect();
+            self.live().map(|r| (sort_key(r.get_ref(sort_field)), r)).collect();
         keyed.sort_by(|(a, _), (b, _)| {
             let ord = match (a, b) {
                 (SortKey::Num(m), SortKey::Num(n)) => m.partial_cmp(n).unwrap_or(Ordering2::Equal),
@@ -183,7 +216,7 @@ impl Snapshot {
                 ord
             }
         });
-        let mut out = Vec::with_capacity(self.rows.len() * 64 + 2);
+        let mut out = Vec::with_capacity(self.len() * 64 + 2);
         out.push(b'[');
         for (i, (_, row)) in keyed.iter().enumerate() {
             if i > 0 {
@@ -227,6 +260,7 @@ impl Collection {
             version: AtomicU64::new(0),
             snap: RwLock::new(Snapshot {
                 rows: Arc::new(Vec::new()),
+                holes: 0,
                 by_id: HashMap::new(),
                 all_json: None,
                 list_used: false,
@@ -292,7 +326,9 @@ impl Collection {
     }
 
     pub fn rows(&self) -> Arc<Vec<Value>> {
-        self.snap.read().unwrap().rows.clone()
+        let mut s = self.snap.write().unwrap();
+        s.compact();
+        s.rows.clone()
     }
 
     pub fn next_id(&self) -> u64 {
@@ -306,6 +342,7 @@ impl Collection {
             s.by_id.insert(r.get("id").as_key(), i);
         }
         s.rows = Arc::new(rows.into_iter().map(as_row).collect());
+        s.holes = 0;
         s.invalidate();
         self.bump();
         self.next_id.store(next_id, Ordering::Relaxed);
@@ -337,7 +374,7 @@ impl Collection {
     }
 
     pub fn count(&self) -> usize {
-        self.snap.read().unwrap().rows.len()
+        self.snap.read().unwrap().len()
     }
 
     pub fn find(&self, id: &str) -> Option<Value> {
@@ -351,17 +388,14 @@ impl Collection {
 
     pub fn first(&self, field: &str, want: &str) -> Option<Value> {
         let s = self.snap.read().unwrap();
-        s.rows.iter().find(|r| field_eq(r, field, want)).cloned()
+        let found = s.live().find(|r| field_eq(r, field, want)).cloned();
+        found
     }
 
     pub fn page(&self, offset: usize, limit: usize) -> Value {
         let s = self.snap.read().unwrap();
-        let end =
-            if limit == 0 { s.rows.len() } else { offset.saturating_add(limit).min(s.rows.len()) };
-        let rows = match s.rows.get(offset.min(s.rows.len())..end) {
-            Some(slice) => slice.to_vec(),
-            None => Vec::new(),
-        };
+        let take = if limit == 0 { usize::MAX } else { limit };
+        let rows: Vec<Value> = s.live().skip(offset).take(take).cloned().collect();
         Value::Arr(Arc::new(rows))
     }
 
@@ -432,14 +466,13 @@ impl Collection {
     pub fn delete(&self, id: &str) -> bool {
         let mut s = self.snap.write().unwrap();
         let Some(i) = s.by_id.remove(id) else { return false };
-        Arc::make_mut(&mut s.rows).remove(i);
+        Arc::make_mut(&mut s.rows)[i] = Value::Null;
+        s.holes += 1;
+        if s.holes * 2 > s.rows.len() {
+            s.compact();
+        }
         s.invalidate();
         self.bump();
-        for v in s.by_id.values_mut() {
-            if *v > i {
-                *v -= 1;
-            }
-        }
         self.touch();
         true
     }
@@ -447,6 +480,7 @@ impl Collection {
     pub fn reset(&self) {
         let mut s = self.snap.write().unwrap();
         s.rows = Arc::new(Vec::new());
+        s.holes = 0;
         s.by_id.clear();
         s.invalidate();
         self.bump();

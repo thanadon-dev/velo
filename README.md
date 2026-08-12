@@ -1,6 +1,6 @@
 # Velo
 
-**v0.27.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.28.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -237,7 +237,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.27.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.28.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -270,10 +270,12 @@ In-process, no sockets, one thread (`velomicro <rows>`):
 | `create` | 2.3 us | 3.5 us |
 | `order` (cached) | 5.0 us | 50 us |
 | `all` (cached) | 5.7 us | 51 us |
-| `create` + `delete` | 6.8 us | 52 us |
+| `create` + `delete` | 3.1 us | 3.4 us |
 | `create` then read the whole list | 196 us | 1 381 us |
 
-`find`, `create`, and cached filters stay flat. Anything that hands back the whole collection is bound by the bytes it copies, and `delete` is linear in the collection size because it keeps insertion order and reindexes.
+`find`, `create`, `delete`, and cached filters stay flat. Anything that hands back the whole collection is bound by the bytes it copies.
+
+Deleting a row leaves a tombstone in place so the surviving rows keep their positions and insertion order; the collection is compacted once tombstones pass half the rows.
 
 Run read benchmarks before write benchmarks, or restart in between: a `POST` run at 50k req/s adds a hundred thousand rows and every later list measurement is then measuring a much bigger response.
 
@@ -300,7 +302,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-69 tests (54 integration + 6 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+70 tests (55 integration + 6 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -335,6 +337,8 @@ cargo test
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.28.0** — deleting is now constant time: rows are tombstoned instead of shifted, and the collection compacts when tombstones exceed half the rows. A create/delete cycle on 20 000 rows went from 52 us to 3.4 us.
 
 **v0.27.1** — measured the store at 20 000 rows and published the numbers: `find` and `create` stay flat, list-shaped operations are bound by the bytes they copy, `delete` is linear because insertion order is preserved.
 

@@ -1108,3 +1108,43 @@ fn write_heavy_bursts_do_not_rebuild_the_list() {
     call(&s, "GET", "/users", "");
     assert_eq!(users.cache_stats().1, misses, "list reads must not touch the shared cache");
 }
+
+#[test]
+fn deletes_keep_order_and_indexes_valid() {
+    let s = server();
+    for i in 0..12 {
+        call(&s, "POST", "/users", &format!(r#"{{"name":"n{i}","team":"t{}"}}"#, i % 2));
+    }
+    for id in [2, 4, 6, 8] {
+        assert_eq!(call(&s, "DELETE", &format!("/users/{id}"), "").1, r#"{"deleted":true}"#);
+    }
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":8}"#);
+
+    let listed = call(&s, "GET", "/users", "").1;
+    let ids: Vec<&str> = listed.matches(r#""id":"#).map(|_| "").collect();
+    assert_eq!(ids.len(), 8, "{listed}");
+    assert!(listed.starts_with(r#"[{"id":1,"name":"n0""#), "{listed}");
+    assert!(!listed.contains(r#""id":4"#), "{listed}");
+
+    assert_eq!(call(&s, "GET", "/users/9", "").1, r#"{"id":9,"name":"n8","team":"t0"}"#);
+    assert_eq!(call(&s, "GET", "/users/4", "").0, 404);
+    assert_eq!(
+        call(&s, "PUT", "/users/9", r#"{"name":"moved"}"#).1,
+        r#"{"id":9,"name":"moved","team":"t0"}"#
+    );
+    assert_eq!(call(&s, "GET", "/users/9", "").1, r#"{"id":9,"name":"moved","team":"t0"}"#);
+
+    assert_eq!(call(&s, "GET", "/paged?offset=0&limit=3", "").1.matches(r#""id""#).count(), 3);
+    assert_eq!(call(&s, "GET", "/paged?offset=6&limit=5", "").1.matches(r#""id""#).count(), 2);
+    assert_eq!(call(&s, "GET", "/sorted", "").1.matches(r#""id""#).count(), 8);
+    assert_eq!(call(&s, "GET", "/search?name=n0", "").1, r#"[{"id":1,"name":"n0","team":"t0"}]"#);
+
+    for id in [1, 3, 5, 7, 9, 10, 11, 12] {
+        call(&s, "DELETE", &format!("/users/{id}"), "");
+    }
+    assert_eq!(call(&s, "GET", "/users", "").1, "[]");
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":0}"#);
+    let (_, body, _) = call(&s, "POST", "/users", r#"{"name":"fresh"}"#);
+    assert_eq!(body, r#"{"id":13,"name":"fresh"}"#);
+    assert_eq!(call(&s, "GET", "/users/13", "").1, body);
+}
