@@ -472,17 +472,6 @@ impl Collection {
         self.touch();
         true
     }
-
-    pub fn reset(&self) {
-        let mut s = self.snap.write().unwrap();
-        s.rows = Arc::new(Vec::new());
-        s.holes = 0;
-        s.by_id.clear();
-        s.invalidate();
-        self.bump();
-        self.next_id.store(0, Ordering::Relaxed);
-        self.touch();
-    }
 }
 
 #[derive(Default)]

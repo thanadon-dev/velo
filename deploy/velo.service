@@ -10,7 +10,7 @@ Environment=VELO_WORKERS=4
 Environment=VELO_METRICS=/_metrics
 Environment=VELO_REAL_IP_HEADER=CF-Connecting-IP
 Environment=VELO_RATE=100
-Environment=VELO_HEADERS=X-Content-Type-Options: nosniff
+Environment="VELO_HEADERS=X-Content-Type-Options: nosniff"
 Restart=always
 RestartSec=1
 KillSignal=SIGTERM

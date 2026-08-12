@@ -212,6 +212,18 @@ fn routes(args: &[String]) {
             Some(_) => format!("guard {}", r.guard_status),
             None => String::new(),
         };
-        println!("{:<7} {:<28} {:<8} {:<4} {}", r.method.name(), r.pattern, kind, r.status, guard);
+        let origin = match &r.source {
+            Some(file) => format!("{file}:{}", r.line),
+            None => String::new(),
+        };
+        println!(
+            "{:<7} {:<26} {:<8} {:<4} {:<10} {}",
+            r.method.name(),
+            r.pattern,
+            kind,
+            r.status,
+            guard,
+            origin
+        );
     }
 }

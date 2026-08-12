@@ -24,6 +24,7 @@ pub struct Route {
     pub guard: Option<Expr>,
     pub guard_status: u16,
     pub line: usize,
+    pub source: Option<Arc<str>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -265,6 +266,7 @@ impl<'a> Parser<'a> {
             uses_body: self.body,
             uses_query: self.query,
             uses_header: self.header,
+            source: None,
             query_fields: std::mem::take(&mut self.query_fields),
             header_fields: std::mem::take(&mut self.header_fields),
             guard,

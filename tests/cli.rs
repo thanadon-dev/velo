@@ -243,6 +243,8 @@ fn includes_merge_files_and_ignore_cycles() {
     for path in ["/health", "/users", "/posts"] {
         assert!(text.contains(path), "{text}");
     }
+    assert!(text.contains("parts/users.velo:1"), "route origins missing in {text}");
+    assert!(text.contains("app.velo:4"), "route origins missing in {text}");
 
     let port = free_port();
     let mut child = Command::new(BIN)

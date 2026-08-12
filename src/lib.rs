@@ -56,10 +56,14 @@ fn load_into(
         return Err(format!("{}: include nesting too deep", path.display()));
     }
     let src = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let dir = full.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
     let part = compile_in(&src, Some(store.clone()), &dir)
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    prog.routes.extend(part.routes);
+    let label: std::sync::Arc<str> = std::sync::Arc::from(path.display().to_string().as_str());
+    prog.routes.extend(part.routes.into_iter().map(|mut r| {
+        r.source = Some(label.clone());
+        r
+    }));
     for include in part.includes {
         load_into(prog, &dir.join(include), store, seen)?;
     }

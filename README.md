@@ -1,6 +1,6 @@
 # Velo
 
-**v0.36.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.36.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -36,7 +36,7 @@ CLI:
 | --- | --- |
 | `velo run <file> [addr] [--data f.json] [--watch]` | start the server (default `:8080`, env `VELO_ADDR`, `VELO_DATA`) |
 | `velo check <file>` | compile only, report errors with the offending source line |
-| `velo routes <file>` | list compiled routes, their kind, status, and guard |
+| `velo routes <file>` | list compiled routes with their kind, status, guard, and source file and line |
 | `velo openapi <file>` | print an OpenAPI 3.0 document for the routes |
 | `velo new <file>` | write a starter file |
 | `velo version` | print version |
@@ -280,7 +280,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.36.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.36.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -393,6 +393,8 @@ cargo test
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.36.1** — `velo routes` prints where each route came from, which matters once files include each other; dropped an unused store method and fixed the quoting in the systemd template.
 
 **v0.36.0** — `deploy/` templates: a hardened systemd unit, a Caddy reverse-proxy block that forwards the client IP, and a cloudflared ingress entry.
 
