@@ -1,6 +1,6 @@
 # Velo
 
-**v0.45.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.46.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -189,7 +189,7 @@ Restarts go through `SIGTERM`, so a `--data` snapshot is flushed first. A file t
 
 ## Persistence
 
-The store is in memory. Pass `--data file.json` (or set `VELO_DATA`) and velo loads that file at boot and writes it back whenever the data changed, at most once every `VELO_SAVE_MS` milliseconds (default 200):
+The store is in memory, so a collection is bounded by RAM and a snapshot is the whole dataset. One process owns a data file; pointing two servers at the same file will lose writes. Pass `--data file.json` (or set `VELO_DATA`) and velo loads that file at boot and writes it back whenever the data changed, at most once every `VELO_SAVE_MS` milliseconds (default 200):
 
 ```sh
 velo run examples/api.velo :8080 --data data.json
@@ -306,11 +306,11 @@ Env knobs:
 | `VELO_LOCAL_CACHE_BYTES` | 1 MB | per-worker budget for its thread-local view of those results |
 | `VELO_RATE` | off | requests per second allowed per client; over it answers 429 |
 | `VELO_REAL_IP_HEADER` | off | header holding the client IP behind a proxy, e.g. `CF-Connecting-IP`; without it the socket address is used |
-| `VELO_ETAG` | off | send `ETag` on 200 `GET`/`HEAD` responses and answer 304 to a matching `If-None-Match` |
+| `VELO_ETAG` | off | send `ETag` on 200 `GET`/`HEAD` responses and answer 304 to a matching `If-None-Match`; constant routes carry a tag computed at compile time |
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.45.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.46.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -448,6 +448,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.46.0** — constant routes (including `file()` and `openapi()`) carry an `ETag` computed at compile time instead of hashing the body on every request, and `velo new` writes a starter that shows search, validation, upsert, and a served OpenAPI document.
 
 **v0.45.0** — bulk deletes: `db.x.delete_where(field, value)` and `db.x.clear()`, both answering with how many rows went away.
 

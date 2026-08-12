@@ -393,8 +393,8 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         let mut body = std::mem::take(&mut c.body);
         let timed = srv.metrics_path.is_some() || srv.log;
         let started = timed.then(Instant::now);
-        let (status, ct) =
-            srv.handle(method, path, &req[head.head_end..], &req[..head.head_end], &mut body);
+        let (status, ct, const_etag) =
+            srv.handle_full(method, path, &req[head.head_end..], &req[..head.head_end], &mut body);
         let micros = started.map(|t0| t0.elapsed().as_micros() as u64).unwrap_or(0);
         if srv.metrics_path.is_some() {
             srv.record(micros, body.len());
@@ -404,7 +404,7 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         }
         let keep_alive = head.keep_alive && !srv.stopping();
         let tag = if srv.etag && status == 200 && (method == "GET" || method == "HEAD") {
-            Some(crate::http::etag_of(&body))
+            const_etag.or_else(|| Some(crate::http::etag_of(&body)))
         } else {
             None
         };

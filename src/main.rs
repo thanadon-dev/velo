@@ -157,12 +157,17 @@ fn run(args: &[String]) {
     println!("velo: stopped");
 }
 
-const STARTER: &str = "GET    /health      => \"ok\"\n\
-GET    /items       => db.items.all()\n\
-GET    /items/:id   => db.items.find(id)\n\
-POST   /items       => db.items.create(body)\n\
-PUT    /items/:id   => db.items.update(id, body)\n\
-DELETE /items/:id   => db.items.delete(id) : 204\n";
+const STARTER: &str = "GET    /health       => \"ok\"\n\
+GET    /openapi.json => openapi()\n\
+\n\
+GET    /items        => db.items.all()\n\
+GET    /items/:id    => db.items.find(id)\n\
+GET    /items/search => db.items.search(\"name\", query.q)\n\
+POST   /items        => db.items.create(body) when body.name else 400\n\
+PUT    /items/:id    => db.items.upsert(id, body)\n\
+DELETE /items/:id    => db.items.delete(id) : 204\n\
+\n\
+GET    /stats        => { items: db.items.count() }\n";
 
 fn new(args: &[String]) {
     let Some(path) = args.get(2) else { usage(2) };

@@ -138,6 +138,18 @@ impl Server {
         raw_headers: &[u8],
         out: &mut Vec<u8>,
     ) -> (u16, Ctype) {
+        let (status, ctype, _) = self.handle_full(method, path, raw_body, raw_headers, out);
+        (status, ctype)
+    }
+
+    pub fn handle_full(
+        &self,
+        method: &str,
+        path: &str,
+        raw_body: &[u8],
+        raw_headers: &[u8],
+        out: &mut Vec<u8>,
+    ) -> (u16, Ctype, Option<u64>) {
         let (path, query) = match path.find('?') {
             Some(i) => (&path[..i], &path[i + 1..]),
             None => (path, ""),
@@ -145,7 +157,7 @@ impl Server {
         self.requests.fetch_add(1, Ordering::Relaxed);
         if self.metrics_path.as_deref() == Some(path) {
             self.write_metrics(out);
-            return (200, JSON);
+            return (200, JSON, None);
         }
         let Some(m) = Method::parse(method) else {
             return self.fail(Err_ { status: 405, msg: "method not allowed" }, out);
@@ -160,7 +172,7 @@ impl Server {
         });
         let Some(idx) = found else {
             if self.cors && m == Method::Options {
-                return (204, JSON);
+                return (204, JSON, None);
             }
             let e = if self.router.allows(path) {
                 Err_ { status: 405, msg: "method not allowed" }
@@ -197,12 +209,12 @@ impl Server {
         }
         if let Some(k) = &rt.konst {
             out.extend_from_slice(k);
-            return (rt.status, rt.const_ctype);
+            return (rt.status, rt.const_ctype, rt.const_etag);
         }
         if rt.expr.renders_json() {
             let mark = out.len();
             return match rt.expr.write_json(&ctx, out) {
-                Ok(()) => (rt.status, JSON),
+                Ok(()) => (rt.status, JSON, None),
                 Err(e) => {
                     out.truncate(mark);
                     self.fail(e, out)
@@ -212,11 +224,11 @@ impl Server {
         match rt.expr.eval(&ctx) {
             Ok(Value::Str(s)) => {
                 out.extend_from_slice(s.as_bytes());
-                (rt.status, TEXT)
+                (rt.status, TEXT, None)
             }
             Ok(v) => {
                 v.write_json(out);
-                (rt.status, JSON)
+                (rt.status, JSON, None)
             }
             Err(e) => self.fail(e, out),
         }
@@ -424,9 +436,10 @@ fn env_usize(key: &str, default: usize) -> usize {
 }
 
 impl Server {
-    fn fail(&self, e: Err_, out: &mut Vec<u8>) -> (u16, Ctype) {
+    fn fail(&self, e: Err_, out: &mut Vec<u8>) -> (u16, Ctype, Option<u64>) {
         self.failures.fetch_add(1, Ordering::Relaxed);
-        err_body(e, out)
+        let (status, ctype) = err_body(e, out);
+        (status, ctype, None)
     }
 }
 

@@ -15,6 +15,7 @@ pub struct Route {
     pub expr: Expr,
     pub konst: Option<Vec<u8>>,
     pub const_ctype: crate::http::Ctype,
+    pub const_etag: Option<u64>,
     pub status: u16,
     pub uses_body: bool,
     pub uses_query: bool,
@@ -131,6 +132,7 @@ pub fn bake_openapi(prog: &mut Program) {
     let doc = crate::openapi::document(prog, &title, crate::VERSION);
     for r in prog.routes.iter_mut() {
         if matches!(&r.expr, Expr::Call(Builtin::Openapi, _)) {
+            r.const_etag = Some(crate::http::etag_of(&doc));
             r.konst = Some(doc.clone());
             r.const_ctype = crate::http::JSON;
         }
@@ -259,6 +261,7 @@ impl<'a> Parser<'a> {
             pattern: path.text,
             params,
             expr,
+            const_etag: konst.as_ref().map(|k| crate::http::etag_of(k)),
             konst,
             const_ctype,
             status,
