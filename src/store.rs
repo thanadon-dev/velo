@@ -36,9 +36,9 @@ struct Snapshot {
     rows: Arc<Vec<Value>>,
     holes: usize,
     by_id: HashMap<String, usize>,
-    all_json: Option<Arc<[u8]>>,
-    list_used: bool,
-    cache: RwLock<HashMap<String, Arc<[u8]>>>,
+    all_json: Option<Arc<Vec<u8>>>,
+    list_used: AtomicBool,
+    cache: RwLock<HashMap<String, Arc<Vec<u8>>>>,
     hits: AtomicU64,
     misses: AtomicU64,
 }
@@ -69,7 +69,7 @@ impl Snapshot {
         }
     }
 
-    fn json(&self) -> Arc<[u8]> {
+    fn json(&self) -> Arc<Vec<u8>> {
         if let Some(json) = &self.all_json {
             return json.clone();
         }
@@ -82,45 +82,55 @@ impl Snapshot {
             row.write_json(&mut out);
         }
         out.push(b']');
-        Arc::from(out.as_slice())
+        Arc::new(out)
     }
 
-    fn json_cached(&mut self) -> Arc<[u8]> {
+    fn json_cached(&mut self) -> Arc<Vec<u8>> {
         let json = self.json();
         self.all_json = Some(json.clone());
-        self.list_used = true;
+        self.list_used.store(true, Ordering::Relaxed);
         json
     }
 
     fn append_json(&mut self, row: &Value) {
-        let Some(old) = self.all_json.take() else { return };
+        let Some(mut old) = self.all_json.take() else { return };
         if old.len() < 2 {
             return;
         }
-        let mut out = Vec::with_capacity(old.len() + 96);
+        if let Some(list) = Arc::get_mut(&mut old) {
+            list.pop();
+            if list.len() > 1 {
+                list.push(b',');
+            }
+            row.write_json(list);
+            list.push(b']');
+            self.all_json = Some(old);
+            return;
+        }
+        let mut out = Vec::with_capacity(old.len() * 2);
         out.extend_from_slice(&old[..old.len() - 1]);
         if old.len() > 2 {
             out.push(b',');
         }
         row.write_json(&mut out);
         out.push(b']');
-        self.all_json = Some(Arc::from(out.as_slice()));
+        self.all_json = Some(Arc::new(out));
     }
 
     fn invalidate(&mut self) {
         self.all_json = None;
-        self.list_used = false;
+        self.list_used.store(false, Ordering::Relaxed);
         self.cache.get_mut().unwrap().clear();
     }
 
-    fn cached(&self, key: &str) -> Option<Arc<[u8]>> {
+    fn cached(&self, key: &str) -> Option<Arc<Vec<u8>>> {
         let hit = self.cache.read().unwrap().get(key).cloned();
         let counter = if hit.is_some() { &self.hits } else { &self.misses };
         counter.fetch_add(1, Ordering::Relaxed);
         hit
     }
 
-    fn store_cached(&self, key: &str, json: Arc<[u8]>) -> Arc<[u8]> {
+    fn store_cached(&self, key: &str, json: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
         let budget = cache_budget();
         if json.len() > budget {
             return json;
@@ -134,7 +144,7 @@ impl Snapshot {
         json
     }
 
-    fn filtered_json(&self, field: &str, want: &str) -> Arc<[u8]> {
+    fn filtered_json(&self, field: &str, want: &str) -> Arc<Vec<u8>> {
         if let Some(hit) = with_key("w", field, want, |k| self.cached(k)) {
             return hit;
         }
@@ -147,10 +157,10 @@ impl Snapshot {
             row.write_json(&mut out);
         }
         out.push(b']');
-        with_key("w", field, want, |k| self.store_cached(k, Arc::from(out.as_slice())))
+        with_key("w", field, want, |k| self.store_cached(k, Arc::new(out)))
     }
 
-    fn searched_json(&self, field: &str, needle: &str) -> Arc<[u8]> {
+    fn searched_json(&self, field: &str, needle: &str) -> Arc<Vec<u8>> {
         if let Some(hit) = with_key("s", field, needle, |k| self.cached(k)) {
             return hit;
         }
@@ -164,10 +174,10 @@ impl Snapshot {
             row.write_json(&mut out);
         }
         out.push(b']');
-        with_key("s", field, needle, |k| self.store_cached(k, Arc::from(out.as_slice())))
+        with_key("s", field, needle, |k| self.store_cached(k, Arc::new(out)))
     }
 
-    fn aggregate_json(&self, op: Agg, field: &str) -> Arc<[u8]> {
+    fn aggregate_json(&self, op: Agg, field: &str) -> Arc<Vec<u8>> {
         if let Some(hit) = with_key("a", op.name(), field, |k| self.cached(k)) {
             return hit;
         }
@@ -190,10 +200,10 @@ impl Snapshot {
             (None, Agg::Sum) => out.extend_from_slice(b"0"),
             (None, _) => out.extend_from_slice(b"null"),
         }
-        with_key("a", op.name(), field, |k| self.store_cached(k, Arc::from(out.as_slice())))
+        with_key("a", op.name(), field, |k| self.store_cached(k, Arc::new(out)))
     }
 
-    fn sorted_json(&self, field: &str) -> Arc<[u8]> {
+    fn sorted_json(&self, field: &str) -> Arc<Vec<u8>> {
         if let Some(hit) = with_key("o", field, "", |k| self.cached(k)) {
             return hit;
         }
@@ -225,13 +235,13 @@ impl Snapshot {
             row.write_json(&mut out);
         }
         out.push(b']');
-        with_key("o", field, "", |k| self.store_cached(k, Arc::from(out.as_slice())))
+        with_key("o", field, "", |k| self.store_cached(k, Arc::new(out)))
     }
 }
 
 static NEXT_COLLECTION_ID: AtomicU64 = AtomicU64::new(0);
 
-type LocalCache = std::cell::RefCell<HashMap<String, (u64, Arc<[u8]>)>>;
+type LocalCache = std::cell::RefCell<HashMap<String, (u64, Arc<Vec<u8>>)>>;
 
 thread_local! {
     static LOCAL_CACHE: LocalCache = std::cell::RefCell::new(HashMap::new());
@@ -263,7 +273,7 @@ impl Collection {
                 holes: 0,
                 by_id: HashMap::new(),
                 all_json: None,
-                list_used: false,
+                list_used: AtomicBool::new(false),
                 cache: RwLock::new(HashMap::new()),
                 hits: AtomicU64::new(0),
                 misses: AtomicU64::new(0),
@@ -298,7 +308,7 @@ impl Collection {
         kind: &str,
         a: &str,
         b: &str,
-        build: impl FnOnce(&Snapshot) -> Arc<[u8]>,
+        build: impl FnOnce(&Snapshot) -> Arc<Vec<u8>>,
     ) -> Value {
         let version = self.version.load(Ordering::Acquire);
         let tag = self.tag();
@@ -349,28 +359,14 @@ impl Collection {
     }
 
     pub fn all(&self) -> Value {
-        let version = self.version.load(Ordering::Acquire);
-        let key_hit = with_key4(&self.tag(), "l", "", "", |key| {
-            LOCAL_CACHE
-                .with(|c| c.borrow().get(key).and_then(|(v, j)| (*v == version).then(|| j.clone())))
-        });
-        if let Some(json) = key_hit {
-            return Value::Raw(json);
+        {
+            let s = self.snap.read().unwrap();
+            if let Some(json) = s.all_json.clone() {
+                s.list_used.store(true, Ordering::Relaxed);
+                return Value::Raw(json);
+            }
         }
-        let json = self.snap.write().unwrap().json_cached();
-        with_key4(&self.tag(), "l", "", "", |key| {
-            LOCAL_CACHE.with(|c| {
-                let mut c = c.borrow_mut();
-                let used: usize = c.values().map(|(_, v)| v.len()).sum();
-                if c.len() >= LOCAL_CACHE_MAX || used + json.len() > local_budget() {
-                    c.clear();
-                }
-                if json.len() <= local_budget() {
-                    c.insert(key.to_string(), (version, json.clone()));
-                }
-            })
-        });
-        Value::Raw(json)
+        Value::Raw(self.snap.write().unwrap().json_cached())
     }
 
     pub fn count(&self) -> usize {
@@ -442,11 +438,11 @@ impl Collection {
         rows.push(row.clone());
         let idx = rows.len() - 1;
         s.by_id.insert(key, idx);
-        let reuse = s.list_used.then(|| s.all_json.take()).flatten();
+        let reuse = s.list_used.load(Ordering::Relaxed).then(|| s.all_json.take()).flatten();
         s.invalidate();
         s.all_json = reuse;
         s.append_json(&row);
-        s.list_used = false;
+        s.list_used.store(false, Ordering::Relaxed);
         self.bump();
         self.touch();
         Some(row)

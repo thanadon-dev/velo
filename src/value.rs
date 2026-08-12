@@ -12,7 +12,7 @@ pub enum Value {
     Arr(Arc<Vec<Value>>),
     Obj(Arc<Obj>),
     Row(Arc<Obj>, Arc<[u8]>),
-    Raw(Arc<[u8]>),
+    Raw(Arc<Vec<u8>>),
 }
 
 impl Value {
@@ -98,7 +98,8 @@ impl Value {
                 }
                 out.push(b']');
             }
-            Value::Row(_, json) | Value::Raw(json) => out.extend_from_slice(json),
+            Value::Row(_, json) => out.extend_from_slice(json),
+            Value::Raw(json) => out.extend_from_slice(json),
             Value::Obj(fields) => {
                 out.push(b'{');
                 for (i, (k, v)) in fields.iter().enumerate() {

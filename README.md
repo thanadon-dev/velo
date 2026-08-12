@@ -1,6 +1,6 @@
 # Velo
 
-**v0.30.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.31.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -225,7 +225,7 @@ WantedBy=default.target
 - **Router.** Per-method exact map (FNV-hashed) for static paths, a segment tree for `:param` paths. Params are borrowed slices of the request line, never copied.
 - **Values.** `Value` is an enum with `Arc` payloads, so returning a whole collection is a refcount bump, not a deep copy. JSON is written straight into the connection's output buffer.
 - **Object routes render straight into the socket buffer.** A route whose body is an object or array literal is written directly as JSON bytes; no intermediate `Value` tree is built per request.
-- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and up to 32 sort orders and filters, inside a byte budget; all of it is rebuilt only when the collection is written to. Each worker also keeps a thread-local map of the results it has already seen, tagged with a collection version, so a cache hit costs an atomic load and a local lookup instead of a lock shared by every worker. The thread-local view holds pointers to the same bytes, and is bounded by both an entry count and `VELO_LOCAL_CACHE_BYTES` so superseded results cannot pile up. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. Inserting a row appends to the cached list JSON instead of dropping it, but only when the list was actually read since the last write, so a write-only burst stays O(1) per insert while an alternating write/read workload avoids re-rendering the whole list. The cost is holding rows twice in memory.
+- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and up to 32 sort orders and filters, inside a byte budget; all of it is rebuilt only when the collection is written to. Each worker also keeps a thread-local map of the results it has already seen, tagged with a collection version, so a cache hit costs an atomic load and a local lookup instead of a lock shared by every worker. The thread-local view holds pointers to the same bytes, and is bounded by both an entry count and `VELO_LOCAL_CACHE_BYTES` so superseded results cannot pile up. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. Inserting a row appends to the cached list JSON in place when nothing else is holding it, and only when the list was actually read since the last write. A write-only burst therefore keeps its O(1) insert, and an alternating write/read workload neither re-renders nor recopies the list. The cost is holding rows twice in memory.
 - **No allocation for key lookups.** `db.users.find(id)` on a plain path param hashes the slice of the request line directly; nothing is copied unless the param is percent-encoded.
 - **Store.** Copy-on-write snapshot behind an `RwLock`; readers clone an `Arc<Vec<Value>>` and release the lock immediately.
 - **HTTP.** Hand-written HTTP/1.1: keep-alive by default, request pipelining, per-connection read/write/body buffers reused across requests, batched writes. A connection stops rendering further pipelined requests once 256 kB of response bytes are waiting, so a client cannot make the server buffer an unbounded amount by pipelining requests for large lists; it resumes as soon as the socket drains. `Date` is formatted once per second per worker, not per response. `Expect: 100-continue` gets its interim response as soon as the headers arrive. The scan for the end of the headers resumes where it stopped, so a client feeding headers one byte at a time costs linear work, not quadratic. Chunked bodies are refused with 411, conflicting `Content-Length` headers with 400, oversized bodies with 413, oversized headers with 431.
@@ -256,7 +256,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.30.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.31.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -290,7 +290,7 @@ In-process, no sockets, one thread (`velomicro <rows>`):
 | `order` (cached) | 5.0 us | 50 us |
 | `all` (cached) | 5.7 us | 51 us |
 | `create` + `delete` | 3.1 us | 3.4 us |
-| `create` then read the whole list | 196 us | 1 381 us |
+| `create` then read the whole list | 8.9 us | 62 us |
 
 `find`, `create`, `delete`, and cached filters stay flat. Anything that hands back the whole collection is bound by the bytes it copies.
 
@@ -356,6 +356,8 @@ cargo test
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.31.0** — rendered bytes are held as `Arc<Vec<u8>>`, so building a cache entry no longer copies it and an insert can extend the cached list in place. A create-then-list cycle dropped from 1 381 us to 62 us on 20 000 rows and from 222 us to 8.9 us on 500; `/users` pipelined went 243k to 308k req/s.
 
 **v0.30.1** — the header terminator scan resumes from where it left off instead of restarting on every read, so drip-fed headers cost linear work.
 
