@@ -97,7 +97,24 @@ pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> 
     if routes.is_empty() {
         return Err("no routes defined".to_string());
     }
-    Ok(Program { routes, store })
+    let mut prog = Program { routes, store };
+    bake_openapi(&mut prog);
+    Ok(prog)
+}
+
+fn bake_openapi(prog: &mut Program) {
+    let is_doc = |r: &Route| matches!(&r.expr, Expr::Call(Builtin::Openapi, _));
+    if !prog.routes.iter().any(is_doc) {
+        return;
+    }
+    let title = std::env::var("VELO_TITLE").unwrap_or_else(|_| "velo api".to_string());
+    let doc = crate::openapi::document(prog, &title, crate::VERSION);
+    for r in prog.routes.iter_mut() {
+        if matches!(&r.expr, Expr::Call(Builtin::Openapi, _)) {
+            r.konst = Some(doc.clone());
+            r.const_text = false;
+        }
+    }
 }
 
 fn remember(list: &mut Vec<String>, name: &str) {
@@ -328,6 +345,7 @@ impl<'a> Parser<'a> {
         }
         if self.tok.kind == Kind::LParen {
             let f = match head.text.as_str() {
+                "openapi" => Builtin::Openapi,
                 "now" => Builtin::Now,
                 "uuid" => Builtin::Uuid,
                 "len" => Builtin::Len,
@@ -344,7 +362,7 @@ impl<'a> Parser<'a> {
             }
             self.advance()?;
             let arity = match f {
-                Builtin::Now | Builtin::Uuid => 0,
+                Builtin::Openapi | Builtin::Now | Builtin::Uuid => 0,
                 Builtin::Len | Builtin::Env => 1,
             };
             if args.len() != arity {

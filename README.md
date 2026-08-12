@@ -1,6 +1,6 @@
 # Velo
 
-**v0.20.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.21.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -91,6 +91,7 @@ Built-in functions:
 | `uuid()` | random v4 UUID string |
 | `len(x)` | length of a string, array, or object (`null` is 0) |
 | `env("NAME")` | environment variable, or `null`; folded at compile time |
+| `openapi()` | this API's OpenAPI 3.0 document, rendered once at compile time |
 
 ```velo
 POST /events     => db.events.create({ id: uuid(), at: now(), data: body })
@@ -134,6 +135,14 @@ GET  /root  => db.audit.all() when header.x_key == env("ROOT_KEY") or 403
 ```sh
 velo openapi examples/todo.velo > openapi.json
 ```
+
+The same document can be served by the API itself. `openapi()` is folded to constant bytes at compile time, so the route costs a `memcpy` like any other constant (84k req/s in the same benchmark as `/health`):
+
+```velo
+GET /openapi.json => openapi()
+```
+
+`VELO_TITLE` sets the document title.
 
 ## Persistence
 
@@ -190,6 +199,7 @@ Env knobs:
 | `VELO_CORS` | off | value for `Access-Control-Allow-Origin`; also answers `OPTIONS` preflight with 204 |
 | `VELO_LOG` | off | one line per request on stderr; costs about 75% of throughput, so keep it for development |
 | `VELO_METRICS` | off | path that answers a metrics JSON, e.g. `/_metrics` |
+| `VELO_TITLE` | `velo api` | title used by `openapi()` |
 | `VELO_CACHE_BYTES` | 8 MB | budget for rendered list, sort, and filter caches; exceeding it clears them |
 | `VELO_RATE` | off | requests per second allowed per client; over it answers 429 |
 | `VELO_REAL_IP_HEADER` | off | header holding the client IP behind a proxy, e.g. `CF-Connecting-IP`; without it the socket address is used |
@@ -197,7 +207,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.20.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.21.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -250,7 +260,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-53 tests (45 integration + 5 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+54 tests (46 integration + 5 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 `tests/fuzz.rs` adds four deterministic robustness tests: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, and oversized header and body requests. They also cover slow drip-feeding clients. They assert the process never panics and that the server still answers a normal request afterwards.
 
@@ -300,6 +310,8 @@ WantedBy=default.target
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.21.0** — `openapi()` built-in: a route can serve this API's own OpenAPI document, folded to constant bytes at compile time.
 
 **v0.20.0** — per-client rate limiting: `VELO_RATE` requests per second, keyed on the socket address or on `VELO_REAL_IP_HEADER` behind a proxy, answered with 429.
 

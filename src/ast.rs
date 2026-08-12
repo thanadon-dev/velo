@@ -60,6 +60,7 @@ pub enum Expr {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Builtin {
+    Openapi,
     Now,
     Uuid,
     Len,
@@ -185,6 +186,7 @@ fn fast_key<'a>(e: &Expr, c: &Ctx<'a>) -> Option<&'a str> {
 
 pub fn call_builtin(f: Builtin, args: &[Value]) -> Value {
     match f {
+        Builtin::Openapi => Value::Null,
         Builtin::Now => Value::Num(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

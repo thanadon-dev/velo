@@ -855,3 +855,21 @@ fn rate_limit_counts_per_client() {
     assert!(open.allow("1.2.3.4"));
     s.shutdown();
 }
+
+#[test]
+fn openapi_builtin_serves_the_document() {
+    let src =
+        "GET /health => \"ok\"\nGET /docs => openapi()\nGET /users/:id => db.users.find(id)\n";
+    let prog = compile(src, None).unwrap();
+    let docs = prog.routes.iter().find(|r| r.pattern == "/docs").unwrap();
+    assert!(docs.konst.is_some());
+    assert!(!docs.const_text);
+
+    let s = Server::new(prog).unwrap();
+    let (status, body, ct) = call(&s, "GET", "/docs", "");
+    assert_eq!((status, ct), (200, Ctype::Json));
+    let v = velo::value::parse_json(body.as_bytes()).expect(&body);
+    assert_eq!(v.get("openapi").as_key(), "3.0.3");
+    assert!(matches!(v.get("paths").get("/users/{id}"), Value::Obj(_)), "{body}");
+    assert!(matches!(v.get("paths").get("/docs"), Value::Obj(_)), "{body}");
+}
