@@ -50,13 +50,11 @@ impl Snapshot {
         }
         let mut out = Vec::with_capacity(256);
         out.push(b'[');
-        let mut n = 0;
-        for row in self.rows.iter().filter(|r| field_eq(r, field, want)) {
+        for (n, row) in self.rows.iter().filter(|r| field_eq(r, field, want)).enumerate() {
             if n > 0 {
                 out.push(b',');
             }
             row.write_json(&mut out);
-            n += 1;
         }
         out.push(b']');
         self.store_cached(key, Arc::from(out.as_slice()))
