@@ -241,10 +241,9 @@ impl Collection {
         Value::Raw(json)
     }
 
-    pub fn rows(&self) -> Arc<Vec<Value>> {
-        let mut s = self.snap.write().unwrap();
-        s.compact();
-        s.rows.clone()
+    pub fn live_rows(&self) -> Vec<Value> {
+        let s = self.snap.read().unwrap();
+        s.live().cloned().collect()
     }
 
     pub fn next_id(&self) -> u64 {
@@ -509,7 +508,7 @@ impl Store {
             out.extend_from_slice(b":{\"next_id\":");
             crate::value::write_i64(&mut out, col.next_id() as i64);
             out.extend_from_slice(b",\"rows\":");
-            Value::Arr(col.rows()).write_json(&mut out);
+            Value::Arr(Arc::new(col.live_rows())).write_json(&mut out);
             out.push(b'}');
         }
         out.push(b'}');

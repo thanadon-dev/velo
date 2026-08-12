@@ -1,6 +1,6 @@
 # Velo
 
-**v0.51.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.51.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -197,7 +197,7 @@ The store is in memory, so a collection is bounded by RAM and a snapshot is the 
 velo run examples/api.velo :8080 --data data.json
 ```
 
-Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothing was written, so a read-only workload never touches the disk. The gap between snapshots adapts: velo measures how long the last save took and waits until that save has cost at most `VELO_SAVE_DUTY` percent of wall time, so a 5 MB dataset under sustained writes is not rewritten five times a second. `SIGINT` and `SIGTERM` stop the event loop and write a final snapshot before exiting, so an orderly shutdown loses nothing. Shutdown drains: velo stops accepting, answers whatever is already in flight with `Connection: close`, and exits once the last connection is gone or `VELO_DRAIN_MS` passes. A client benchmarking through a `SIGTERM` sees zero errors. a hard kill can lose at most the last save interval.
+Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothing was written, so a read-only workload never touches the disk. A save takes only a read lock and skips tombstoned rows as it writes, so it neither compacts nor blocks writers: inserting at 41 000 req/s into a 200 000-row collection continues while snapshots of 16 MB are being written. The gap between snapshots adapts: velo measures how long the last save took and waits until that save has cost at most `VELO_SAVE_DUTY` percent of wall time, so a 5 MB dataset under sustained writes is not rewritten five times a second. `SIGINT` and `SIGTERM` stop the event loop and write a final snapshot before exiting, so an orderly shutdown loses nothing. Shutdown drains: velo stops accepting, answers whatever is already in flight with `Connection: close`, and exits once the last connection is gone or `VELO_DRAIN_MS` passes. A client benchmarking through a `SIGTERM` sees zero errors. a hard kill can lose at most the last save interval.
 
 ## Rate limiting
 
@@ -315,7 +315,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.51.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.51.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -349,7 +349,7 @@ In-process, no sockets, one thread (`velomicro <rows>`). `bench/baseline.json` r
 | `where` (cached) | 1.1 us | 1.2 us |
 | `create` | 2.2 us | 2.3 us |
 | `create` + `delete` | 2.9 us | 3.0 us |
-| `all` (cached) | 4.9 us | 50 us |
+| `all` (cached) | 6.3 us | 50 us |
 | `order` (cached) | 6.6 us | 53 us |
 | `create` then read the whole list | 7.8 us | 62 us |
 
@@ -465,6 +465,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.51.1** — snapshots are written from a read lock and skip tombstones directly, so autosave no longer compacts the collection or holds a row reference while it writes. `bench/baseline.json` refreshed against the current build.
 
 **v0.51.0** — readers copy the row handles they need under a brief lock instead of holding an `Arc` for the whole render, so an insert never triggers a copy-on-write of a large row list: writes under a heavy reader went from 15 500-21 600 to 32 900-33 500 req/s and the worst insert from 1 150 ms to 49 ms.
 
