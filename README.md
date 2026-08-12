@@ -1,6 +1,6 @@
 # Velo
 
-**v0.41.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.41.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -40,7 +40,7 @@ CLI:
 | `velo openapi <file>` | print an OpenAPI 3.0 document for the routes |
 | `velo new <file>` | write a starter file |
 | `velo version` | print version |
-| `velobench [-c n] [-d secs] [-p depth] [-m method] [-b body] <url>` | built-in keep-alive load generator |
+| `velobench [-c n] [-d secs] [-p depth] [-m method] [-b body] <url>` | built-in keep-alive load generator; `unix:/sock//path` targets a Unix socket |
 | `velomicro [rows] [--json] [--check <baseline>]` | microbenchmark of the dispatch path; `--check` fails when an operation is far slower than `bench/baseline.json` |
 
 ## Language
@@ -295,7 +295,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.41.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.41.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -349,6 +349,16 @@ For scale, the same client and box against a Go 1.26 `net/http` server serving e
 | binary | 8.6 MB | 0.6 MB |
 
 Read that as a sanity check, not a verdict: `net/http` is a general server with middleware, HTTP/2, and dynamic handlers, while velo compiles a fixed route set and precomputes most of what it sends. The pipelining gap is mostly that `net/http` answers pipelined requests one at a time.
+
+Over a Unix socket instead of loopback TCP, same server and client:
+
+| route | TCP | Unix socket |
+| --- | --- | --- |
+| `/health`, `-c 50` | 86 900 req/s | 124 400 req/s |
+| `/users/:id`, `-c 50` | 89 000 req/s | 113 800 req/s |
+| `/health`, `-c 8 -p 32` | 812 000 req/s | 845 000 req/s |
+
+Skipping the loopback TCP stack is worth about 30% when the proxy sits on the same host.
 
 Connection scaling (`/health`), server RSS while serving:
 
@@ -421,6 +431,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.41.1** — `velobench` can drive a Unix socket, which measured the gain: 86.9k to 124.4k req/s on `/health` compared with loopback TCP.
 
 **v0.41.0** — `velo run app.velo unix:/run/velo.sock` listens on a Unix socket: stale files are replaced, permissions come from `VELO_SOCKET_MODE`, and the socket is removed on shutdown.
 

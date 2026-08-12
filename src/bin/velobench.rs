@@ -1,8 +1,8 @@
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use velo::socket::Stream;
 
 struct Args {
     host: String,
@@ -11,6 +11,7 @@ struct Args {
     method: String,
     body: String,
     conns: usize,
+    unix: Option<String>,
     secs: u64,
     pipeline: usize,
 }
@@ -23,6 +24,7 @@ fn parse_args() -> Args {
         method: "GET".into(),
         body: String::new(),
         conns: 50,
+        unix: None,
         secs: 5,
         pipeline: 1,
     };
@@ -41,8 +43,13 @@ fn parse_args() -> Args {
             "-m" => a.method = next().to_uppercase(),
             "-b" => a.body = next(),
             "-h" | "--help" => {
-                eprintln!("usage: velobench [-c conns] [-d secs] [-p depth] [-m method] [-b body] http://host:port/path");
+                eprintln!("usage: velobench [-c conns] [-d secs] [-p depth] [-m method] [-b body] <http://host:port/path | unix:/sock//path>");
                 std::process::exit(0);
+            }
+            url if url.starts_with("unix:") => {
+                let (sock, path) = url.split_once("//").unwrap_or((url, "/"));
+                a.unix = Some(sock.trim_end_matches('/').to_string());
+                a.path = format!("/{}", path.trim_start_matches('/'));
             }
             url => {
                 let rest = url.strip_prefix("http://").unwrap_or(url);
@@ -112,7 +119,8 @@ fn main() {
         lat[((lat.len() as f64 * q) as usize).min(lat.len() - 1)] as f64 / 1000.0
     };
     let total = done.load(Ordering::Relaxed);
-    println!("{} {} -> {} conns, {:.1}s", a.method, a.path, a.conns, elapsed);
+    let where_ = a.unix.clone().unwrap_or_else(|| format!("{}:{}", a.host, a.port));
+    println!("{} {} on {where_} -> {} conns, {:.1}s", a.method, a.path, a.conns, elapsed);
     println!("requests    {total}");
     println!("errors      {}", errors.load(Ordering::Relaxed));
     println!("throughput  {:.0} req/s", total as f64 / elapsed);
@@ -134,11 +142,15 @@ fn worker(
     bytes: Arc<AtomicU64>,
 ) -> Vec<u64> {
     let mut lat = Vec::with_capacity(1 << 16);
-    let Ok(mut s) = TcpStream::connect((a.host.as_str(), a.port)) else {
+    let target = match &a.unix {
+        Some(path) => path.clone(),
+        None => format!("{}:{}", a.host, a.port),
+    };
+    let Ok(mut s) = Stream::connect(&target) else {
         errors.fetch_add(1, Ordering::Relaxed);
         return lat;
     };
-    let _ = s.set_nodelay(true);
+    s.set_nodelay();
     let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
     let mut batch = Vec::with_capacity(req.len() * a.pipeline);
     for _ in 0..a.pipeline {

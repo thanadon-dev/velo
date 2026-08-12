@@ -83,6 +83,20 @@ pub enum Stream {
 }
 
 impl Stream {
+    pub fn connect(target: &str) -> io::Result<Stream> {
+        match target.strip_prefix("unix:") {
+            Some(path) => Ok(Stream::Unix(UnixStream::connect(path)?)),
+            None => Ok(Stream::Tcp(TcpStream::connect(target)?)),
+        }
+    }
+
+    pub fn set_read_timeout(&self, dur: Option<std::time::Duration>) -> io::Result<()> {
+        match self {
+            Stream::Tcp(s) => s.set_read_timeout(dur),
+            Stream::Unix(s) => s.set_read_timeout(dur),
+        }
+    }
+
     pub fn set_nonblocking(&self, on: bool) -> io::Result<()> {
         match self {
             Stream::Tcp(s) => s.set_nonblocking(on),
