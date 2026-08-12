@@ -1680,3 +1680,63 @@ fn query_fields_are_read_without_building_an_object() {
     s.handle("GET", "/mixed?a=k", b"", raw, &mut out);
     assert_eq!(String::from_utf8(out).unwrap(), r#"{"t":"red","a":"k","both":true}"#);
 }
+
+const LIB_SRC: &str = r#"
+POST /users   => db.users.create({ name: trim(body.name), email: lower(trim(body.email)) })
+GET  /users   => db.users.page(default(query.offset, 0), default(query.limit, 20))
+GET  /shout   => upper(query.q)
+GET  /pick    => { a: default(query.a, "fallback"), n: default(query.n, 7), z: default(query.z, null) }
+GET  /folded  => { up: upper("velo"), pad: trim("  x  "), miss: default(null, "yes") }
+GET  /count   => db.users.where("email", lower(query.mail)).count()
+"#;
+
+#[test]
+fn text_and_default_builtins() {
+    let s = Server::new(compile(LIB_SRC, None).unwrap()).unwrap();
+    assert_eq!(call(&s, "GET", "/shout?q=hi+there", "").1, "HI THERE");
+    assert_eq!(call(&s, "GET", "/shout", "").1, "null");
+    assert_eq!(
+        call(&s, "GET", "/pick", "").1,
+        r#"{"a":"fallback","n":7,"z":null}"#,
+        "a missing field falls back"
+    );
+    assert_eq!(
+        call(&s, "GET", "/pick?a=&n=0&z=kept", "").1,
+        r#"{"a":"fallback","n":"0","z":"kept"}"#,
+        "empty falls back, a real 0 does not"
+    );
+}
+
+#[test]
+fn pure_builtins_fold_at_compile_time() {
+    let prog = compile(LIB_SRC, None).unwrap();
+    let folded = prog.routes.iter().find(|r| r.pattern == "/folded").unwrap();
+    assert_eq!(
+        folded.konst.as_deref(),
+        Some(br#"{"up":"VELO","pad":"x","miss":"yes"}"#.as_slice())
+    );
+}
+
+#[test]
+fn defaults_drive_paging_and_normalised_writes() {
+    let s = Server::new(compile(LIB_SRC, None).unwrap()).unwrap();
+    for i in 0..25 {
+        let body = format!(r#"{{"name":"  n{i}  ","email":"  N{i}@Example.COM "}}"#);
+        assert_eq!(call(&s, "POST", "/users", &body).0, 201);
+    }
+    assert_eq!(names(&call(&s, "GET", "/users", "").1).len(), 20, "default limit applies");
+    assert_eq!(names(&call(&s, "GET", "/users?limit=5", "").1).len(), 5);
+    assert_eq!(
+        names(&call(&s, "GET", "/users?offset=20", "").1),
+        ["n20", "n21", "n22", "n23", "n24"]
+    );
+    assert_eq!(call(&s, "GET", "/count?mail=N3@EXAMPLE.com", "").1, "1");
+}
+
+#[test]
+fn builtin_arity_is_checked() {
+    assert!(compile(r#"GET /a => default(query.x)"#, None).is_err());
+    assert!(compile(r#"GET /a => lower("A", "B")"#, None).is_err());
+    assert!(compile(r#"GET /a => trim()"#, None).is_err());
+    assert!(compile(r#"GET /a => upper(query.x)"#, None).is_ok());
+}

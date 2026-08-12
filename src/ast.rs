@@ -87,6 +87,10 @@ pub enum Builtin {
     Uuid,
     Len,
     Env,
+    Default,
+    Lower,
+    Upper,
+    Trim,
 }
 
 pub enum Stage {
@@ -407,6 +411,22 @@ pub fn call_builtin(f: Builtin, args: &[Value]) -> Value {
             Ok(v) => Value::Str(Arc::from(v.as_str())),
             Err(_) => Value::Null,
         },
+        Builtin::Default => match &args[0] {
+            Value::Null => args[1].clone(),
+            Value::Str(s) if s.is_empty() => args[1].clone(),
+            given => given.clone(),
+        },
+        Builtin::Lower => text_of(&args[0], |t| t.to_lowercase()),
+        Builtin::Upper => text_of(&args[0], |t| t.to_uppercase()),
+        Builtin::Trim => text_of(&args[0], |t| t.trim().to_string()),
+    }
+}
+
+fn text_of(v: &Value, f: impl FnOnce(&str) -> String) -> Value {
+    match v {
+        Value::Null => Value::Null,
+        Value::Str(s) => Value::Str(Arc::from(f(s).as_str())),
+        other => Value::Str(Arc::from(f(&other.as_key()).as_str())),
     }
 }
 

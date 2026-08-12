@@ -1,6 +1,6 @@
 # Velo
 
-**v1.3.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.4.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -148,11 +148,18 @@ Built-in functions:
 | `date(ms)` | that instant as `YYYY-MM-DDTHH:MM:SSZ`, or `null` if it is not a number |
 | `uuid()` | random v4 UUID string |
 | `len(x)` | length of a string, array, or object (`null` is 0) |
-| `env("NAME")` | environment variable, or `null`; folded at compile time |
+| `env("NAME")` | environment variable, or `null` |
+| `default(x, fallback)` | `x`, unless it is `null` or an empty string |
+| `lower(x)` / `upper(x)` | text in one case, `null` stays `null` |
+| `trim(x)` | text without surrounding whitespace |
 | `openapi()` | this API's OpenAPI 3.0 document, rendered once at compile time |
 | `file("page.html")` | the file's contents, read at compile time, served with a content type from its extension |
 
+Everything but `now()`, `uuid()`, `date()` and `openapi()` is folded at compile time when its arguments are constant, so `upper("velo")` costs nothing at runtime.
+
 ```velo
+GET  /users      => db.users.page(default(query.offset, 0), default(query.limit, 20))
+POST /users      => db.users.create({ name: trim(body.name), email: lower(trim(body.email)) })
 GET  /scores     => { total: db.orders.sum("amount"), avg: db.orders.avg("amount") }
 POST /todos      => db.todos.create({ id: uuid(), at: date(now()), text: body.text })
 POST /events     => db.events.create({ id: uuid(), at: now(), data: body })
@@ -371,7 +378,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v1.3.0. The `users` collection holds 500 rows (21 kB as JSON).
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v1.4.0. The `users` collection holds 500 rows (21 kB as JSON).
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -484,7 +491,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-101 tests (77 integration + 14 CLI + 6 fuzz + 4 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+105 tests (81 integration + 14 CLI + 6 fuzz + 4 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -533,6 +540,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.4.0** — four builtins for the things every API does at its edges: `default(x, fallback)` for a missing or empty query parameter, and `lower`, `upper` and `trim` for normalising what a client sends. `db.users.page(default(query.offset, 0), default(query.limit, 20))` is now the whole of paging with sane defaults, and `create({ email: lower(trim(body.email)) })` normalises on the way in. All four fold at compile time when their arguments are constant.
 
 **v1.3.0** — `query.x` and `header.x` no longer parse what they do not read. A route naming a field compiles to a direct lookup that scans the raw request for that one name and decodes only its value, instead of building an object out of every query pair and every header first. Pipelined throughput on a header-guarded route went from 234 000 to 644 000 req/s, on a two-field query route from 120 000 to 554 000, and a cached `where` driven by a query parameter fell from 1.21 us to 0.65 us. Routes that use `query` or `header` as a whole object still get one, unchanged.
 

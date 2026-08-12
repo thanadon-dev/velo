@@ -515,6 +515,7 @@ DELETE /a13/:id => db.x.delete(id)\n\
 DELETE /a14 => db.x.delete_where(\"k\", \"v\")\n\
 DELETE /a15 => db.x.clear()\n\
 GET /b1 => { now: now(), id: uuid(), n: len(\"abc\"), home: env(\"HOME\"), at: date(now()) }\n\
+GET /b3 => { d: default(query.q, \"x\"), l: lower(\"A\"), u: upper(\"a\"), t: trim(\" a \") }\n\
 GET /b2 => openapi()\n\
 GET /c1 => { m: 1 + 2 * 3, d: 10 / 4, cmp: 2 < 3, both: 1 == 1 and 2 != 3 }\n\
 GET /c2/:id => { id: id, q: query.z, h: header.x_test, doubled: id * 2 } : 200\n\
@@ -529,7 +530,7 @@ GET /d5 => db.x.where(\"n\", \">=\", 10).where(\"n\", \"<\", 100).count()\n";
     write(&path, program);
     let out = Command::new(BIN).arg("check").arg(&path).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("25 routes"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("26 routes"));
     let _ = std::fs::remove_file(&path);
 }
 

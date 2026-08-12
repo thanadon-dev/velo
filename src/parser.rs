@@ -506,6 +506,10 @@ impl<'a> Parser<'a> {
                 "uuid" => Builtin::Uuid,
                 "len" => Builtin::Len,
                 "env" => Builtin::Env,
+                "default" => Builtin::Default,
+                "lower" => Builtin::Lower,
+                "upper" => Builtin::Upper,
+                "trim" => Builtin::Trim,
                 other => {
                     return Err(format!(
                         "line {}:{}: unknown function {other}()",
@@ -524,7 +528,8 @@ impl<'a> Parser<'a> {
             self.advance()?;
             let arity = match f {
                 Builtin::Openapi | Builtin::Now | Builtin::Uuid => 0,
-                Builtin::Len | Builtin::Env | Builtin::Date => 1,
+                Builtin::Default => 2,
+                _ => 1,
             };
             if args.len() != arity {
                 return Err(format!(
@@ -535,7 +540,7 @@ impl<'a> Parser<'a> {
                     args.len()
                 ));
             }
-            if f != Builtin::Env {
+            if matches!(f, Builtin::Openapi | Builtin::Now | Builtin::Uuid | Builtin::Date) {
                 self.pure = false;
             }
             return self.fields(Expr::Call(f, args));
