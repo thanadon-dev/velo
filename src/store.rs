@@ -85,13 +85,6 @@ impl Snapshot {
         Arc::new(out)
     }
 
-    fn json_cached(&mut self) -> Arc<Vec<u8>> {
-        let json = self.json();
-        self.all_json = Some(json.clone());
-        self.list_used.store(true, Ordering::Relaxed);
-        json
-    }
-
     fn append_json(&mut self, row: &Value) {
         let Some(mut old) = self.all_json.take() else { return };
         if old.len() < 2 {
@@ -249,6 +242,10 @@ thread_local! {
 
 const LOCAL_CACHE_MAX: usize = 64;
 
+fn append_max() -> usize {
+    std::env::var("VELO_APPEND_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(512 << 10)
+}
+
 fn local_budget() -> usize {
     std::env::var("VELO_LOCAL_CACHE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(1 << 20)
 }
@@ -359,6 +356,7 @@ impl Collection {
     }
 
     pub fn all(&self) -> Value {
+        let version = self.version.load(Ordering::Acquire);
         {
             let s = self.snap.read().unwrap();
             if let Some(json) = s.all_json.clone() {
@@ -366,7 +364,13 @@ impl Collection {
                 return Value::Raw(json);
             }
         }
-        Value::Raw(self.snap.write().unwrap().json_cached())
+        let json = self.snap.read().unwrap().json();
+        let mut s = self.snap.write().unwrap();
+        if self.version.load(Ordering::Acquire) == version && s.all_json.is_none() {
+            s.all_json = Some(json.clone());
+        }
+        s.list_used.store(true, Ordering::Relaxed);
+        Value::Raw(json)
     }
 
     pub fn count(&self) -> usize {
@@ -438,7 +442,9 @@ impl Collection {
         rows.push(row.clone());
         let idx = rows.len() - 1;
         s.by_id.insert(key, idx);
-        let reuse = s.list_used.load(Ordering::Relaxed).then(|| s.all_json.take()).flatten();
+        let appendable = s.list_used.load(Ordering::Relaxed)
+            && s.all_json.as_ref().is_some_and(|j| j.len() <= append_max());
+        let reuse = appendable.then(|| s.all_json.take()).flatten();
         s.invalidate();
         s.all_json = reuse;
         s.append_json(&row);
