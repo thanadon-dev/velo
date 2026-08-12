@@ -923,3 +923,53 @@ fn search_matches_substrings() {
     call(&s, "POST", "/users", r#"{"name":"dave smith"}"#);
     assert!(call(&s, "GET", "/find?q=smith", "").1.contains("dave smith"));
 }
+
+#[test]
+fn concurrent_reads_and_writes_stay_consistent() {
+    let s = server();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let readers: Vec<_> = ["/users", "/sorted", "/search?name=a", "/find?q=a", "/stats"]
+        .iter()
+        .map(|path| {
+            let (s, stop, path) = (s.clone(), stop.clone(), path.to_string());
+            std::thread::spawn(move || {
+                let mut seen = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let mut out = Vec::new();
+                    let (status, _) = s.dispatch("GET", &path, b"", &mut out);
+                    assert_eq!(status, 200, "{path}");
+                    assert!(velo::value::parse_json(&out).is_ok(), "{path}");
+                    seen += 1;
+                }
+                seen
+            })
+        })
+        .collect();
+
+    let writers: Vec<_> = (0..4)
+        .map(|w| {
+            let s = s.clone();
+            std::thread::spawn(move || {
+                for i in 0..200 {
+                    let mut out = Vec::new();
+                    let body = format!(r#"{{"name":"a","w":{w},"i":{i}}}"#);
+                    let (status, _) = s.dispatch("POST", "/users", body.as_bytes(), &mut out);
+                    assert_eq!(status, 201);
+                }
+            })
+        })
+        .collect();
+
+    for w in writers {
+        w.join().unwrap();
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let reads: u64 = readers.into_iter().map(|r| r.join().unwrap()).sum();
+    assert!(reads > 0);
+
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":800}"#);
+    let all = call(&s, "GET", "/users", "").1;
+    assert_eq!(all.matches(r#""name":"a""#).count(), 800);
+    assert_eq!(call(&s, "GET", "/search?name=a", "").1, all);
+    assert_eq!(call(&s, "GET", "/sorted", "").1.matches(r#""id""#).count(), 800);
+}
