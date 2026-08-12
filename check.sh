@@ -7,6 +7,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release
+cargo run --release --quiet --example embed >/dev/null
 
 "$BIN/velo" check examples/api.velo
 "$BIN/velo" check examples/todo.velo

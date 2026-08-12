@@ -1,6 +1,6 @@
 # Velo
 
-**v0.52.2** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.53.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -17,7 +17,7 @@ That file is a complete, running API server.
 
 Linux only: the event loop is epoll, and the build stops with a clear message anywhere else.
 
-[Scope](#scope) · [Quick start](#quick-start) · [Language](#language) · [Guards](#guards) · [OpenAPI](#openapi) · [Persistence](#persistence) · [Rate limiting](#rate-limiting) · [Metrics](#metrics) · [Deployment](#deployment) · [Design](#design) · [Benchmarks](#benchmarks) · [Tests](#tests) · [CI](#ci) · [Layout](#layout) · [Build notes](#build-notes) · [Changelog](#changelog)
+[Scope](#scope) · [Quick start](#quick-start) · [Language](#language) · [Guards](#guards) · [OpenAPI](#openapi) · [Embedding](#embedding) · [Persistence](#persistence) · [Rate limiting](#rate-limiting) · [Metrics](#metrics) · [Deployment](#deployment) · [Design](#design) · [Benchmarks](#benchmarks) · [Tests](#tests) · [CI](#ci) · [Layout](#layout) · [Build notes](#build-notes) · [Changelog](#changelog)
 
 ## Scope
 
@@ -197,6 +197,23 @@ velo run examples/shop/app.velo :8080 --watch
 
 Restarts go through `SIGTERM`, so a `--data` snapshot is flushed first. A file that fails to compile leaves the supervisor running: it prints the error, keeps watching, and starts again on the next save.
 
+## Embedding
+
+Velo is a library as well as a binary. `examples/embed.rs` compiles a route file against a store you own, seeds it, answers a request in-process, and can then serve:
+
+```rust
+let store = Store::new();
+let program = compile_file(Path::new("examples/todo.velo"), Some(store.clone()))?;
+store.collection("todos").create(Value::object(&[("text", Value::str("ship it"))]));
+
+let server = Server::new(program)?;
+let mut out = Vec::new();
+server.dispatch("GET", "/todos", b"", &mut out);          // no socket involved
+server.serve(Listener::bind("127.0.0.1:8080")?)?;         // or take connections
+```
+
+`cargo run --example embed` runs it. Dispatching without a socket is also how the tests and `velomicro` measure the engine.
+
 ## Persistence
 
 The store is in memory, so a collection is bounded by RAM and a snapshot is the whole dataset. Budget roughly 600 bytes of RAM per row for a small row: the parsed fields, the rendered JSON kept beside them, and the id index. 270 000 rows of four fields load from a 14 MB snapshot in about 0.9 s and occupy 168 MB. One process owns a data file; pointing two servers at the same file will lose writes. Pass `--data file.json` (or set `VELO_DATA`) and velo loads that file at boot and writes it back whenever the data changed, at most once every `VELO_SAVE_MS` milliseconds (default 200):
@@ -323,7 +340,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.52.2. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.53.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -463,6 +480,7 @@ velo: app.velo: line 2:15: unknown identifier "user"
 | `src/date.rs` | `Date` header formatting |
 | `src/openapi.rs` | OpenAPI 3.0 document generation |
 | `src/main.rs` | CLI |
+| `examples/embed.rs` | using velo as a library |
 | `src/bin/velobench.rs` | load generator |
 | `src/bin/velomicro.rs` | in-process dispatch microbenchmark, `velomicro [rows]` |
 
@@ -473,6 +491,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.53.0** — `examples/embed.rs` shows velo used as a library: compile against your own store, seed it, dispatch without a socket, then serve. `Value::object(&[("k", v)])` makes building rows from Rust readable, and `check.sh` runs the example.
 
 **v0.52.2** — incremental compilation disabled in `.cargo/config.toml`; its cache had grown to 7.6 GB over the project's rebuild history.
 

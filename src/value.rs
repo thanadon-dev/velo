@@ -24,6 +24,10 @@ impl Value {
         Value::Obj(Arc::new(fields))
     }
 
+    pub fn object(fields: &[(&str, Value)]) -> Value {
+        Value::obj(fields.iter().map(|(k, v)| (intern(k), v.clone())).collect())
+    }
+
     pub fn row(fields: Obj) -> Value {
         let obj = Arc::new(fields);
         let mut json = Vec::with_capacity(64);
