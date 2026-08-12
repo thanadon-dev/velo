@@ -1,6 +1,6 @@
 # Velo
 
-**v0.33.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.34.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -196,6 +196,23 @@ Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothin
 
 The check costs a lock and a hash per request. In a loopback benchmark, where every request shares one key and all workers contend on the same shard, `/health` drops from 90.6k to 71.9k req/s; real traffic spread over many client IPs spreads over the shards.
 
+## Logging
+
+`VELO_LOG=1` writes one line per request to stderr:
+
+```
+GET /users?x=1 200 2b 7us
+POST /users 201 19b 21us
+```
+
+`VELO_LOG=json` writes the same fields as one JSON object per line, ready for a log shipper:
+
+```json
+{"method":"POST","path":"/users","status":201,"bytes":19,"micros":21}
+```
+
+Logging writes to stderr on the worker thread and includes a clock read per request, so it costs throughput; leave it off in production or point stderr at a file.
+
 ## Metrics
 
 Set `VELO_METRICS=/_metrics` and that path answers:
@@ -254,7 +271,7 @@ Env knobs:
 | `VELO_SAVE_MS` | 200 | minimum gap between snapshots |
 | `VELO_SAVE_DUTY` | 10 | percent of wall time a snapshot may cost; the gap grows with the file so big datasets are not rewritten every 200 ms |
 | `VELO_CORS` | off | value for `Access-Control-Allow-Origin`; also answers `OPTIONS` preflight with 204 |
-| `VELO_LOG` | off | one line per request on stderr; costs about 75% of throughput, so keep it for development |
+| `VELO_LOG` | off | one line per request on stderr: `1` for text, `json` for one JSON object per line |
 | `VELO_METRICS` | off | path that answers a metrics JSON, e.g. `/_metrics` |
 | `VELO_TITLE` | `velo api` | title used by `openapi()` |
 | `VELO_CACHE_BYTES` | 8 MB | budget for the shared rendered-result cache; exceeding it clears it |
@@ -265,7 +282,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.33.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.34.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -330,7 +347,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-76 tests (57 integration + 10 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+77 tests (57 integration + 11 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, `--watch` restarting on a change and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -365,6 +382,8 @@ cargo test
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.34.0** — request logs now carry the response size and duration, and `VELO_LOG=json` emits one JSON object per line.
 
 **v0.33.0** — `file("page.html")` folds a file into a route at compile time and serves it with a content type derived from its extension; response content types are now plain strings throughout. `examples/shop` gained a `/docs` page listing the API from its own OpenAPI document.
 

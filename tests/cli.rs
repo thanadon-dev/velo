@@ -378,3 +378,45 @@ fn file_builtin_serves_a_page_with_its_type() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn logs_carry_status_bytes_and_duration() {
+    let app = tmp("log.velo");
+    write(&app, "GET /health => \"ok\"\nGET /list => [1,2,3]\n");
+
+    for (mode, check) in [("1", "text"), ("json", "json")] {
+        let port = free_port();
+        let log = tmp(&format!("log-{mode}.txt"));
+        let file = std::fs::File::create(&log).unwrap();
+        let mut child = Command::new(BIN)
+            .arg("run")
+            .arg(&app)
+            .arg(format!("127.0.0.1:{port}"))
+            .env("VELO_LOG", mode)
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(file))
+            .spawn()
+            .unwrap();
+
+        assert!(get(port, "/list").ends_with("[1,2,3]"));
+        assert_eq!(get(port, "/missing").lines().next().unwrap(), "HTTP/1.1 404 Not Found");
+        std::thread::sleep(Duration::from_millis(200));
+        stop(&mut child, "-TERM");
+
+        let text = std::fs::read_to_string(&log).unwrap();
+        if check == "json" {
+            let line = text.lines().find(|l| l.contains("\"/list\"")).unwrap_or_default();
+            let v = velo::value::parse_json(line.as_bytes()).expect(&text);
+            assert_eq!(v.get("method").as_key(), "GET");
+            assert_eq!(v.get("status").as_key(), "200");
+            assert_eq!(v.get("bytes").as_key(), "7");
+            assert!(matches!(v.get("micros"), velo::Value::Num(n) if n >= 0.0), "{text}");
+            assert!(text.lines().any(|l| l.contains("\"status\":404")), "{text}");
+        } else {
+            assert!(text.lines().any(|l| l.starts_with("GET /list 200 7b ")), "{text}");
+            assert!(text.lines().any(|l| l.contains("GET /missing 404 ")), "{text}");
+        }
+        let _ = std::fs::remove_file(&log);
+    }
+    let _ = std::fs::remove_file(&app);
+}

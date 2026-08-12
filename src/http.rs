@@ -62,6 +62,7 @@ pub struct Server {
     pub extra_headers: Vec<u8>,
     pub cors: bool,
     pub log: bool,
+    pub log_json: bool,
     pub metrics_path: Option<String>,
     pub etag: bool,
     pub rate: u32,
@@ -93,6 +94,7 @@ impl Server {
             extra_headers: cors_headers(&cors),
             cors: cors.is_some(),
             log: std::env::var("VELO_LOG").map(|v| v != "0").unwrap_or(false),
+            log_json: std::env::var("VELO_LOG").map(|v| v == "json").unwrap_or(false),
             metrics_path: std::env::var("VELO_METRICS").ok().filter(|v| v.starts_with('/')),
             etag: std::env::var("VELO_ETAG").map(|v| v != "0").unwrap_or(false),
             rate: env_usize("VELO_RATE", 0) as u32,
@@ -233,6 +235,36 @@ impl Server {
         f(out, ",\"routes\":", self.routes.len() as u64);
         f(out, ",\"workers\":", self.workers as u64);
         out.push(b'}');
+    }
+
+    pub fn log_line(&self, method: &str, path: &str, status: u16, bytes: usize, micros: u64) {
+        let mut out = Vec::with_capacity(96);
+        if self.log_json {
+            out.extend_from_slice(b"{\"method\":");
+            crate::value::write_string(&mut out, method);
+            out.extend_from_slice(b",\"path\":");
+            crate::value::write_string(&mut out, path);
+            out.extend_from_slice(b",\"status\":");
+            write_i64(&mut out, status as i64);
+            out.extend_from_slice(b",\"bytes\":");
+            write_i64(&mut out, bytes as i64);
+            out.extend_from_slice(b",\"micros\":");
+            write_i64(&mut out, micros as i64);
+            out.push(b'}');
+        } else {
+            out.extend_from_slice(method.as_bytes());
+            out.push(b' ');
+            out.extend_from_slice(path.as_bytes());
+            out.push(b' ');
+            write_i64(&mut out, status as i64);
+            out.push(b' ');
+            write_i64(&mut out, bytes as i64);
+            out.extend_from_slice(b"b ");
+            write_i64(&mut out, micros as i64);
+            out.extend_from_slice(b"us");
+        }
+        out.push(b'\n');
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), &out);
     }
 
     pub fn record(&self, micros: u64, bytes: usize) {

@@ -391,14 +391,16 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         }
         c.body.clear();
         let mut body = std::mem::take(&mut c.body);
-        let started = srv.metrics_path.as_ref().map(|_| Instant::now());
+        let timed = srv.metrics_path.is_some() || srv.log;
+        let started = timed.then(Instant::now);
         let (status, ct) =
             srv.handle(method, path, &req[head.head_end..], &req[..head.head_end], &mut body);
-        if let Some(t0) = started {
-            srv.record(t0.elapsed().as_micros() as u64, body.len());
+        let micros = started.map(|t0| t0.elapsed().as_micros() as u64).unwrap_or(0);
+        if srv.metrics_path.is_some() {
+            srv.record(micros, body.len());
         }
         if srv.log {
-            eprintln!("{method} {path} {status} {}b", body.len());
+            srv.log_line(method, path, status, body.len(), micros);
         }
         let tag = if srv.etag && status == 200 && (method == "GET" || method == "HEAD") {
             Some(crate::http::etag_of(&body))
