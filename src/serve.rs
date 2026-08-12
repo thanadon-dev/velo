@@ -1,11 +1,11 @@
 use crate::epoll::{self, Epoll, Event};
 use crate::http::{status_text, Ctype, Server, JSON, MAX_BODY, MAX_HEAD};
 use crate::router::Fnv;
+use crate::socket::{Listener, Stream};
 use crate::value::write_i64;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::io::{ErrorKind, Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -240,7 +240,7 @@ fn write_head_tagged(
 }
 
 struct Conn {
-    stream: TcpStream,
+    stream: Stream,
     inbuf: Vec<u8>,
     start: usize,
     out: Vec<u8>,
@@ -257,7 +257,7 @@ struct Conn {
 }
 
 impl Conn {
-    fn new(stream: TcpStream) -> Conn {
+    fn new(stream: Stream) -> Conn {
         Conn {
             stream,
             inbuf: Vec::with_capacity(READ_BUF),
@@ -434,7 +434,7 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
 
 type ConnMap = HashMap<u64, Conn, BuildHasherDefault<Fnv>>;
 
-pub(crate) fn worker(srv: &Server, listener: &TcpListener) -> std::io::Result<()> {
+pub(crate) fn worker(srv: &Server, listener: &Listener) -> std::io::Result<()> {
     let ep = Epoll::new()?;
     ep.add(listener, epoll::IN | epoll::EXCLUSIVE, u64::MAX)?;
     let mut events = vec![Event::default(); EVENTS];
@@ -530,10 +530,10 @@ fn response_headers(srv: &Server) -> Vec<u8> {
     h
 }
 
-fn accept_all(srv: &Server, listener: &TcpListener, ep: &Epoll, conns: &mut ConnMap) {
+fn accept_all(srv: &Server, listener: &Listener, ep: &Epoll, conns: &mut ConnMap) {
     loop {
-        let stream = match listener.accept() {
-            Ok((stream, _)) => stream,
+        let (stream, peer) = match listener.accept() {
+            Ok(pair) => pair,
             Err(e) if e.kind() == ErrorKind::WouldBlock => return,
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(_) => {
@@ -542,7 +542,8 @@ fn accept_all(srv: &Server, listener: &TcpListener, ep: &Epoll, conns: &mut Conn
             }
         };
         if conns.len() >= srv.max_conns {
-            let _ = (&stream).write_all(
+            let mut stream = stream;
+            let _ = stream.write_all(
                 b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             );
             continue;
@@ -550,9 +551,8 @@ fn accept_all(srv: &Server, listener: &TcpListener, ep: &Epoll, conns: &mut Conn
         if stream.set_nonblocking(true).is_err() {
             continue;
         }
-        let _ = stream.set_nodelay(true);
+        stream.set_nodelay();
         let key = stream.as_raw_fd() as u64;
-        let peer = stream.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default();
         let mut conn = Conn::new(stream);
         conn.peer = peer;
         if ep.add(&conn.stream, epoll::IN | epoll::RDHUP, key).is_err() {

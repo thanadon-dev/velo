@@ -1,10 +1,10 @@
 use crate::parser::{Ctx, Err_, Method, Program, Route};
 use crate::router::{Fnv, Router};
+use crate::socket::Listener;
 use crate::store::Store;
 use crate::value::{write_i64, Value};
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
-use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -311,10 +311,10 @@ impl Server {
     }
 
     pub fn listen(self: &Arc<Self>, addr: &str) -> std::io::Result<()> {
-        self.serve(TcpListener::bind(addr)?)
+        self.serve(Listener::bind(addr)?)
     }
 
-    pub fn serve(self: &Arc<Self>, listener: TcpListener) -> std::io::Result<()> {
+    pub fn serve(self: &Arc<Self>, listener: Listener) -> std::io::Result<()> {
         listener.set_nonblocking(true)?;
         let listener = Arc::new(listener);
         let mut handles = Vec::new();

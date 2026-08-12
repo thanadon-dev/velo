@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/velo run /srv/api/app.velo 127.0.0.1:8080 --data /srv/api/data.json
+ExecStart=/usr/local/bin/velo run /srv/api/app.velo unix:/run/user/1000/velo.sock --data /srv/api/data.json
 WorkingDirectory=/srv/api
 Environment=VELO_WORKERS=4
 Environment=VELO_METRICS=/_metrics

@@ -10,6 +10,7 @@ pub mod openapi;
 pub mod parser;
 pub mod router;
 pub mod serve;
+pub mod socket;
 pub mod store;
 pub mod value;
 

@@ -423,3 +423,48 @@ fn logs_carry_status_bytes_and_duration() {
     }
     let _ = std::fs::remove_file(&app);
 }
+
+#[test]
+fn serves_on_a_unix_socket() {
+    use std::os::unix::net::UnixStream;
+
+    let app = tmp("unix.velo");
+    let sock = tmp("velo.sock");
+    let _ = std::fs::remove_file(&sock);
+    write(&app, "GET /health => \"ok\"\nPOST /users => db.users.create(body)\n");
+
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("unix:{}", sock.display()))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut answer = String::new();
+    while Instant::now() < deadline {
+        if let Ok(mut c) = UnixStream::connect(&sock) {
+            c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            c.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+            answer.clear();
+            if c.read_to_string(&mut answer).is_ok() && !answer.is_empty() {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(answer.ends_with("ok"), "{answer}");
+
+    let mut c = UnixStream::connect(&sock).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(b"POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"name\":\"mark\"}").unwrap();
+    let mut created = String::new();
+    c.read_to_string(&mut created).unwrap();
+    assert!(created.starts_with("HTTP/1.1 201"), "{created}");
+
+    stop(&mut child, "-TERM");
+    assert!(!sock.exists(), "socket file left behind");
+    let _ = std::fs::remove_file(&app);
+}

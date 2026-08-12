@@ -153,7 +153,7 @@ fn spawn() -> u16 {
     let port = listener.local_addr().unwrap().port();
     let s = server();
     std::thread::spawn(move || {
-        let _ = s.serve(listener);
+        let _ = s.serve(velo::socket::Listener::Tcp(listener));
     });
     port
 }
@@ -394,7 +394,7 @@ fn serve_stops_on_shutdown() {
     let port = listener.local_addr().unwrap().port();
     let s = server();
     let s2 = s.clone();
-    let h = std::thread::spawn(move || s2.serve(listener));
+    let h = std::thread::spawn(move || s2.serve(velo::socket::Listener::Tcp(listener)));
     let res = raw(port, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     assert!(res.ends_with("ok"), "{res}");
     s.shutdown();
@@ -442,7 +442,7 @@ fn cors_preflight_and_headers() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let s2 = s.clone();
-    std::thread::spawn(move || s2.serve(listener));
+    std::thread::spawn(move || s2.serve(velo::socket::Listener::Tcp(listener)));
     let res = raw(port, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     assert!(res.contains("Access-Control-Allow-Origin: *"), "{res}");
     assert!(res.ends_with("ok"), "{res}");
@@ -539,7 +539,7 @@ fn http_header_routing_end_to_end() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let bg = s.clone();
-    std::thread::spawn(move || bg.serve(listener));
+    std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
     let res =
         raw(port, b"GET /tenant HTTP/1.1\r\nHost: x\r\nX-Team: blue\r\nConnection: close\r\n\r\n");
     assert!(res.ends_with(r#"[{"id":2,"name":"b","team":"blue"}]"#), "{res}");
@@ -672,7 +672,7 @@ fn etag_round_trip() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let bg = s.clone();
-    std::thread::spawn(move || bg.serve(listener));
+    std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
 
     let res = raw(port, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     let tag = res
@@ -698,7 +698,7 @@ fn etag_round_trip() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port2 = listener.local_addr().unwrap().port();
     let bg = plain.clone();
-    std::thread::spawn(move || bg.serve(listener));
+    std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
     let res = raw(port2, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     assert!(!res.contains("ETag"), "{res}");
 
@@ -846,7 +846,7 @@ fn rate_limit_counts_per_client() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let bg = s.clone();
-    std::thread::spawn(move || bg.serve(listener));
+    std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
 
     let hit = |ip: &str| {
         let req = format!(
@@ -894,7 +894,7 @@ fn deep_pipelining_returns_every_response() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let bg = s.clone();
-    std::thread::spawn(move || bg.serve(listener));
+    std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
 
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
     c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();

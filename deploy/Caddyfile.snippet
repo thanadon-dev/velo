@@ -1,6 +1,6 @@
 api.example.com {
 	encode zstd gzip
-	reverse_proxy 127.0.0.1:8080 {
+	reverse_proxy unix//run/user/1000/velo.sock {
 		header_up CF-Connecting-IP {http.request.header.CF-Connecting-IP}
 	}
 }

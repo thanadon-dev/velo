@@ -80,7 +80,7 @@ fn server_survives_malformed_requests() {
     let port = listener.local_addr().unwrap().port();
     let srv = Server::new(compile(SRC, None).unwrap()).unwrap();
     let bg = srv.clone();
-    let h = std::thread::spawn(move || bg.serve(listener));
+    let h = std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
 
     let pieces: [&[u8]; 12] = [
         b"GET",
@@ -129,7 +129,7 @@ fn oversized_requests_are_refused() {
     let port = listener.local_addr().unwrap().port();
     let srv = Server::new(compile(SRC, None).unwrap()).unwrap();
     let bg = srv.clone();
-    let h = std::thread::spawn(move || bg.serve(listener));
+    let h = std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
 
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
     c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
@@ -161,7 +161,7 @@ fn slow_clients_are_dropped() {
     let srv = Server::new(compile(SRC, None).unwrap()).unwrap();
     assert_eq!(srv.header_secs, 1);
     let bg = srv.clone();
-    let h = std::thread::spawn(move || bg.serve(listener));
+    let h = std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
     std::env::remove_var("VELO_HEADER_TIMEOUT");
 
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -194,7 +194,7 @@ fn mutated_valid_requests_never_break_the_server() {
     let port = listener.local_addr().unwrap().port();
     let srv = Server::new(compile(SRC, None).unwrap()).unwrap();
     let bg = srv.clone();
-    let h = std::thread::spawn(move || bg.serve(listener));
+    let h = std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
 
     let seeds: [&str; 6] = [
         "GET /health HTTP/1.1\r\nHost: x\r\n\r\n",

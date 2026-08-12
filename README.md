@@ -1,6 +1,6 @@
 # Velo
 
-**v0.40.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.41.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -34,7 +34,7 @@ CLI:
 
 | command | what it does |
 | --- | --- |
-| `velo run <file> [addr] [--data f.json] [--watch]` | start the server (default `:8080`, env `VELO_ADDR`, `VELO_DATA`) |
+| `velo run <file> [addr] [--data f.json] [--watch]` | start the server; `addr` is `:8080`, `127.0.0.1:8080`, or `unix:/run/velo.sock` |
 | `velo check <file>` | compile only, report errors with the offending line, column, and a caret |
 | `velo routes <file>` | list compiled routes with their kind, status, guard, and source file and line |
 | `velo openapi <file>` | print an OpenAPI 3.0 document for the routes |
@@ -244,7 +244,17 @@ install -Dm644 deploy/velo.service ~/.config/systemd/user/velo.service
 systemctl --user daemon-reload && systemctl --user enable --now velo
 ```
 
-`SIGTERM` is the clean stop: the event loop unwinds and the final snapshot is written before exit. Velo speaks plain HTTP/1.1, so put a TLS terminator in front of it; that proxy is also what compresses responses. Behind a proxy every socket looks local, so set `VELO_REAL_IP_HEADER` to whatever header your proxy sets (`CF-Connecting-IP` behind Cloudflare, `X-Forwarded-For` otherwise) if you rate-limit, and only trust that header when the proxy is the only way in.
+`SIGTERM` is the clean stop: the event loop unwinds and the final snapshot is written before exit. Behind a proxy on the same host you can skip TCP entirely:
+
+```sh
+velo run /srv/api/app.velo unix:/run/velo/api.sock --data /srv/api/data.json
+```
+
+```
+reverse_proxy unix//run/velo/api.sock
+```
+
+A stale socket file is replaced at startup unless something is still listening on it, and it is removed on shutdown. Velo speaks plain HTTP/1.1, so put a TLS terminator in front of it; that proxy is also what compresses responses. Behind a proxy every socket looks local, so set `VELO_REAL_IP_HEADER` to whatever header your proxy sets (`CF-Connecting-IP` behind Cloudflare, `X-Forwarded-For` otherwise) if you rate-limit, and only trust that header when the proxy is the only way in.
 
 ## Design
 
@@ -263,7 +273,8 @@ Env knobs:
 
 | variable | default | effect |
 | --- | --- | --- |
-| `VELO_ADDR` | `:8080` | listen address |
+| `VELO_ADDR` | `:8080` | listen address, TCP or `unix:<path>` |
+| `VELO_SOCKET_MODE` | `660` | permissions for a Unix socket, octal |
 | `VELO_WORKERS` | cores | event loops, one thread each |
 | `VELO_MAX_CONNS` | 65536 | live connections per worker, extra ones get 503 |
 | `VELO_KEEPALIVE` | 60 | idle seconds before a served connection is swept |
@@ -284,7 +295,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.40.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.41.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -362,9 +373,9 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-81 tests (61 integration + 11 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+82 tests (61 integration + 12 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
-`tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, `--watch` restarting on a change and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
+`tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, `--watch` restarting on a change and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
 `tests/fuzz.rs` adds six deterministic robustness tests: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, 400 connections carrying byte-level mutations of otherwise valid requests (every answer must still be a well-formed status line), and oversized header and body requests. They also cover slow drip-feeding clients. `VELO_FUZZ_ROUNDS` raises the iteration counts for a longer hunt; 40 000 compiler mutations and 4 000 mutated requests have been run clean. They assert the process never panics and that the server still answers a normal request afterwards.
 
@@ -395,6 +406,7 @@ velo: app.velo: line 2:15: unknown identifier "user"
 | `src/router.rs` | per-method exact map and param tree |
 | `src/http.rs` | `Server`, dispatch, metrics, status codes |
 | `src/serve.rs` | request parsing, connection state, the epoll loop |
+| `src/socket.rs` | TCP and Unix listeners behind one type |
 | `src/value.rs` | `Value`, JSON reader and writer |
 | `src/date.rs` | `Date` header formatting |
 | `src/openapi.rs` | OpenAPI 3.0 document generation |
@@ -409,6 +421,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.41.0** — `velo run app.velo unix:/run/velo.sock` listens on a Unix socket: stale files are replaced, permissions come from `VELO_SOCKET_MODE`, and the socket is removed on shutdown.
 
 **v0.40.0** — compile errors now report a column and underline the offending token with a caret; the lexer tracks column positions for every token.
 
