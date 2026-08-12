@@ -44,6 +44,7 @@ pub struct Server {
     pub cors: bool,
     pub log: bool,
     pub metrics_path: Option<String>,
+    pub etag: bool,
     started: Instant,
     requests: AtomicU64,
     failures: AtomicU64,
@@ -68,6 +69,7 @@ impl Server {
             cors: cors.is_some(),
             log: std::env::var("VELO_LOG").map(|v| v != "0").unwrap_or(false),
             metrics_path: std::env::var("VELO_METRICS").ok().filter(|v| v.starts_with('/')),
+            etag: std::env::var("VELO_ETAG").map(|v| v != "0").unwrap_or(false),
             started: Instant::now(),
             requests: AtomicU64::new(0),
             failures: AtomicU64::new(0),
@@ -205,6 +207,15 @@ impl Server {
         }
         res
     }
+}
+
+pub fn etag_of(body: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in body {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h ^ (body.len() as u64)
 }
 
 pub fn parse_headers(raw: &[u8]) -> Value {

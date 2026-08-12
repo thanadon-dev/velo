@@ -651,3 +651,44 @@ fn expect_continue_is_answered() {
     assert!(rest.starts_with("HTTP/1.1 201 Created"), "{rest}");
     assert!(rest.ends_with(r#"{"id":1,"name":"mark"}"#), "{rest}");
 }
+
+#[test]
+fn etag_round_trip() {
+    let mut s = Server::new(compile(SRC, None).unwrap()).unwrap();
+    Arc::get_mut(&mut s).unwrap().etag = true;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bg = s.clone();
+    std::thread::spawn(move || bg.serve(listener));
+
+    let res = raw(port, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    let tag = res
+        .lines()
+        .find(|l| l.starts_with("ETag: "))
+        .map(|l| l.trim_start_matches("ETag: ").trim().to_string())
+        .unwrap_or_default();
+    assert!(tag.starts_with('"') && tag.ends_with('"'), "{res}");
+
+    let req = format!(
+        "GET /health HTTP/1.1\r\nHost: x\r\nIf-None-Match: {tag}\r\nConnection: close\r\n\r\n"
+    );
+    let res = raw(port, req.as_bytes());
+    assert!(res.starts_with("HTTP/1.1 304 Not Modified"), "{res}");
+    assert!(!res.ends_with("ok"), "{res}");
+
+    let req = "GET /health HTTP/1.1\r\nHost: x\r\nIf-None-Match: \"deadbeef\"\r\nConnection: close\r\n\r\n";
+    let res = raw(port, req.as_bytes());
+    assert!(res.starts_with("HTTP/1.1 200 OK"), "{res}");
+    assert!(res.ends_with("ok"), "{res}");
+
+    let plain = server();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port2 = listener.local_addr().unwrap().port();
+    let bg = plain.clone();
+    std::thread::spawn(move || bg.serve(listener));
+    let res = raw(port2, b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    assert!(!res.contains("ETag"), "{res}");
+
+    s.shutdown();
+    plain.shutdown();
+}

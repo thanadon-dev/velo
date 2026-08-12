@@ -22,6 +22,7 @@ struct Head {
     keep_alive: bool,
     head_only: bool,
     expects: bool,
+    none_match: Option<u64>,
     error: Option<u16>,
 }
 
@@ -41,6 +42,7 @@ fn parse_head(buf: &[u8]) -> Option<Head> {
     let mut seen_len = false;
     let mut chunked = false;
     let mut expects = false;
+    let mut none_match = None;
     let mut pos = line_end + 1;
     while pos < end {
         let nl = match buf[pos..end].iter().position(|&c| c == b'\n') {
@@ -66,6 +68,8 @@ fn parse_head(buf: &[u8]) -> Option<Head> {
             } else if contains_ignore_case(val, b"keep-alive") {
                 keep_alive = true;
             }
+        } else if eq_ignore_case(name, b"if-none-match") {
+            none_match = parse_etag(val);
         } else if eq_ignore_case(name, b"expect") {
             expects = contains_ignore_case(val, b"100-continue");
         } else if eq_ignore_case(name, b"transfer-encoding")
@@ -90,6 +94,7 @@ fn parse_head(buf: &[u8]) -> Option<Head> {
         keep_alive: keep_alive && error.is_none(),
         head_only,
         expects,
+        none_match,
         error,
     })
 }
@@ -103,6 +108,7 @@ fn bad(end: usize, code: u16) -> Head {
         keep_alive: false,
         head_only: false,
         expects: false,
+        none_match: None,
         error: Some(code),
     }
 }
@@ -124,6 +130,11 @@ fn find_head_end(buf: &[u8]) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+fn parse_etag(val: &[u8]) -> Option<u64> {
+    let hex = val.strip_prefix(b"\"")?.strip_suffix(b"\"")?;
+    u64::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()
 }
 
 pub(crate) fn strip_cr(b: &[u8]) -> &[u8] {
@@ -168,6 +179,18 @@ fn write_head(
     keep_alive: bool,
     extra: &[u8],
 ) {
+    write_head_tagged(out, status, ct, len, keep_alive, extra, None)
+}
+
+fn write_head_tagged(
+    out: &mut Vec<u8>,
+    status: u16,
+    ct: Ctype,
+    len: usize,
+    keep_alive: bool,
+    extra: &[u8],
+    etag: Option<u64>,
+) {
     out.extend_from_slice(b"HTTP/1.1 ");
     write_i64(out, status as i64);
     out.push(b' ');
@@ -195,6 +218,11 @@ fn write_head(
         b"\r\nConnection: close\r\n".as_slice()
     });
     out.extend_from_slice(extra);
+    if let Some(tag) = etag {
+        out.extend_from_slice(b"ETag: \"");
+        out.extend_from_slice(format!("{tag:x}").as_bytes());
+        out.extend_from_slice(b"\"\r\n");
+    }
     out.extend_from_slice(b"\r\n");
 }
 
@@ -321,9 +349,18 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         if srv.log {
             eprintln!("{method} {path} {status} {}b", body.len());
         }
-        write_head(&mut c.out, status, ct, body.len(), head.keep_alive, headers);
-        if !head.head_only && !empty_status(status) {
-            c.out.extend_from_slice(&body);
+        let tag = if srv.etag && status == 200 && (method == "GET" || method == "HEAD") {
+            Some(crate::http::etag_of(&body))
+        } else {
+            None
+        };
+        if tag.is_some() && tag == head.none_match {
+            write_head_tagged(&mut c.out, 304, ct, 0, head.keep_alive, headers, tag);
+        } else {
+            write_head_tagged(&mut c.out, status, ct, body.len(), head.keep_alive, headers, tag);
+            if !head.head_only && !empty_status(status) {
+                c.out.extend_from_slice(&body);
+            }
         }
         c.body = body;
         c.start += need;
