@@ -1,6 +1,6 @@
 # Velo
 
-**v0.15.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.16.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -152,10 +152,11 @@ Env knobs:
 | `VELO_SAVE_MS` | 200 | minimum gap between snapshots |
 | `VELO_CORS` | off | value for `Access-Control-Allow-Origin`; also answers `OPTIONS` preflight with 204 |
 | `VELO_LOG` | off | one line per request on stderr; costs about 75% of throughput, so keep it for development |
+| `VELO_METRICS` | off | path that answers a metrics JSON, e.g. `/_metrics` |
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.15.1. The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.16.0. The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — this is client-bound, both processes fight for the same 4 cores:
 
@@ -204,9 +205,19 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-42 tests (35 integration + 5 fuzz + 2 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache invalidation, request headers, guards, client-supplied ids, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+43 tests (36 integration + 5 fuzz + 2 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache invalidation, request headers, guards, client-supplied ids, metrics, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 `tests/fuzz.rs` adds four deterministic robustness tests: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, and oversized header and body requests. They also cover slow drip-feeding clients. They assert the process never panics and that the server still answers a normal request afterwards.
+
+## Metrics
+
+Set `VELO_METRICS=/_metrics` and that path answers:
+
+```json
+{"version":"0.16.0","uptime_ms":3747,"requests":275021,"failures":1,"connections":1,"routes":21,"workers":4}
+```
+
+`failures` counts responses velo generated itself (404, 405, 400, 401, 409, 413, and store misses), `connections` is the live count across workers. The counters are relaxed atomics; the endpoint measured no throughput cost. Point a monitor at it, or at any route in your API.
 
 ## Deployment
 
@@ -238,6 +249,8 @@ WantedBy=default.target
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.16.0** — optional metrics endpoint (`VELO_METRICS=/_metrics`) reporting version, uptime, requests, failures, live connections, routes, and workers.
 
 **v0.15.1** — connections that never complete a request are dropped after `VELO_HEADER_TIMEOUT` (10s) measured from accept, so drip-feeding headers cannot hold a slot; `check.sh` mirrors CI locally.
 

@@ -8,7 +8,7 @@ use std::hash::BuildHasherDefault;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -51,6 +51,11 @@ pub struct Server {
     pub extra_headers: Vec<u8>,
     pub cors: bool,
     pub log: bool,
+    pub metrics_path: Option<String>,
+    started: Instant,
+    requests: AtomicU64,
+    failures: AtomicU64,
+    conns: AtomicU64,
     stop: AtomicBool,
 }
 
@@ -70,6 +75,11 @@ impl Server {
             extra_headers: cors_headers(&cors),
             cors: cors.is_some(),
             log: std::env::var("VELO_LOG").map(|v| v != "0").unwrap_or(false),
+            metrics_path: std::env::var("VELO_METRICS").ok().filter(|v| v.starts_with('/')),
+            started: Instant::now(),
+            requests: AtomicU64::new(0),
+            failures: AtomicU64::new(0),
+            conns: AtomicU64::new(0),
             stop: AtomicBool::new(false),
         }))
     }
@@ -96,8 +106,13 @@ impl Server {
             Some(i) => (&path[..i], &path[i + 1..]),
             None => (path, ""),
         };
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        if self.metrics_path.as_deref() == Some(path) {
+            self.write_metrics(out);
+            return (200, Ctype::Json);
+        }
         let Some(m) = Method::parse(method) else {
-            return err_body(Err_ { status: 405, msg: "method not allowed" }, out);
+            return self.fail(Err_ { status: 405, msg: "method not allowed" }, out);
         };
         let mut ctx = Ctx::default();
         let found = self.router.lookup(m, path, &mut ctx).or_else(|| {
@@ -116,7 +131,7 @@ impl Server {
             } else {
                 Err_ { status: 404, msg: "not found" }
             };
-            return err_body(e, out);
+            return self.fail(e, out);
         };
         let rt = &self.routes[idx];
         if rt.uses_query {
@@ -128,14 +143,14 @@ impl Server {
         if rt.uses_body && !raw_body.is_empty() {
             match crate::value::parse_json(raw_body) {
                 Ok(v) => ctx.body = v,
-                Err(_) => return err_body(crate::parser::BAD_BODY, out),
+                Err(_) => return self.fail(crate::parser::BAD_BODY, out),
             }
         }
         if let Some(g) = &rt.guard {
             match g.eval(&ctx) {
                 Ok(v) if crate::parser::truthy(&v) => {}
-                Ok(_) => return err_body(Err_ { status: 401, msg: "unauthorized" }, out),
-                Err(e) => return err_body(e, out),
+                Ok(_) => return self.fail(Err_ { status: 401, msg: "unauthorized" }, out),
+                Err(e) => return self.fail(e, out),
             }
         }
         if let Some(k) = &rt.konst {
@@ -151,8 +166,25 @@ impl Server {
                 v.write_json(out);
                 (rt.status, Ctype::Json)
             }
-            Err(e) => err_body(e, out),
+            Err(e) => self.fail(e, out),
         }
+    }
+
+    fn write_metrics(&self, out: &mut Vec<u8>) {
+        let f = |out: &mut Vec<u8>, key: &str, n: u64| {
+            out.extend_from_slice(key.as_bytes());
+            write_i64(out, n as i64);
+        };
+        out.extend_from_slice(b"{\"version\":\"");
+        out.extend_from_slice(crate::VERSION.as_bytes());
+        out.push(b'"');
+        f(out, ",\"uptime_ms\":", self.started.elapsed().as_millis() as u64);
+        f(out, ",\"requests\":", self.requests.load(Ordering::Relaxed));
+        f(out, ",\"failures\":", self.failures.load(Ordering::Relaxed));
+        f(out, ",\"connections\":", self.conns.load(Ordering::Relaxed));
+        f(out, ",\"routes\":", self.routes.len() as u64);
+        f(out, ",\"workers\":", self.workers as u64);
+        out.push(b'}');
     }
 
     pub fn shutdown(&self) {
@@ -223,6 +255,13 @@ fn cors_headers(origin: &Option<String>) -> Vec<u8> {
 
 fn env_usize(key: &str, default: usize) -> usize {
     std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+impl Server {
+    fn fail(&self, e: Err_, out: &mut Vec<u8>) -> (u16, Ctype) {
+        self.failures.fetch_add(1, Ordering::Relaxed);
+        err_body(e, out)
+    }
 }
 
 fn err_body(e: Err_, out: &mut Vec<u8>) -> (u16, Ctype) {
@@ -633,6 +672,7 @@ fn worker(srv: &Server, listener: &TcpListener) -> std::io::Result<()> {
         for key in dead.drain(..) {
             if let Some(c) = conns.remove(&key) {
                 let _ = ep.remove(&c.stream);
+                srv.conns.fetch_sub(1, Ordering::Relaxed);
             }
         }
         if last_sweep.elapsed() >= SWEEP {
@@ -644,6 +684,7 @@ fn worker(srv: &Server, listener: &TcpListener) -> std::io::Result<()> {
                     return true;
                 }
                 let _ = ep.remove(&c.stream);
+                srv.conns.fetch_sub(1, Ordering::Relaxed);
                 false
             });
         }
@@ -684,5 +725,6 @@ fn accept_all(srv: &Server, listener: &TcpListener, ep: &Epoll, conns: &mut Conn
             continue;
         }
         conns.insert(key, conn);
+        srv.conns.fetch_add(1, Ordering::Relaxed);
     }
 }

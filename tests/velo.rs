@@ -604,3 +604,22 @@ fn first_and_client_ids() {
     assert_eq!(call(&s, "POST", "/keyed", r#"{"id":"u-1","name":"dup"}"#).0, 409);
     assert_eq!(call(&s, "POST", "/keyed", r#"{"name":"auto"}"#).1, r#"{"id":1,"name":"auto"}"#);
 }
+
+#[test]
+fn metrics_endpoint() {
+    let mut s = Server::new(compile(SRC, None).unwrap()).unwrap();
+    Arc::get_mut(&mut s).unwrap().metrics_path = Some("/_metrics".to_string());
+    call(&s, "GET", "/health", "");
+    call(&s, "GET", "/missing", "");
+    call(&s, "GET", "/users/999", "");
+    let (status, body, ct) = call(&s, "GET", "/_metrics", "");
+    assert_eq!((status, ct), (200, Ctype::Json));
+    let m = velo::value::parse_json(body.as_bytes()).unwrap();
+    assert!(matches!(m.get("version"), Value::Str(_)), "{body}");
+    assert!(matches!(m.get("requests"), Value::Num(n) if n >= 4.0), "{body}");
+    assert!(matches!(m.get("failures"), Value::Num(n) if n == 2.0), "{body}");
+    assert!(matches!(m.get("routes"), Value::Num(n) if n > 0.0), "{body}");
+
+    let plain = server();
+    assert_eq!(call(&plain, "GET", "/_metrics", "").0, 404);
+}
