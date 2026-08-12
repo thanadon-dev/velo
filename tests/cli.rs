@@ -187,3 +187,36 @@ fn run_serves_metrics_when_configured() {
     stop(&mut child, "-TERM");
     let _ = std::fs::remove_file(&app);
 }
+
+#[test]
+fn metrics_track_latency_and_bytes() {
+    let app = tmp("latency.velo");
+    write(&app, "GET /health => \"ok\"\nGET /list => [1,2,3]\n");
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .env("VELO_METRICS", "/_metrics")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    for _ in 0..20 {
+        assert!(get(port, "/list").ends_with("[1,2,3]"));
+    }
+    let res = get(port, "/_metrics");
+    let body = res.split("\r\n\r\n").nth(1).unwrap_or_default().to_string();
+    let m = velo::value::parse_json(body.as_bytes()).expect(&res);
+    let num = |k: &str| match m.get(k) {
+        velo::Value::Num(n) => n,
+        _ => panic!("{k} missing in {body}"),
+    };
+    assert!(num("bytes_out") >= 20.0 * 7.0, "{body}");
+    assert!(num("max_micros") >= num("avg_micros"), "{body}");
+    assert!(num("max_micros") < 1_000_000.0, "{body}");
+
+    stop(&mut child, "-TERM");
+    let _ = std::fs::remove_file(&app);
+}

@@ -630,6 +630,9 @@ fn metrics_endpoint() {
     assert!(matches!(m.get("requests"), Value::Num(n) if n >= 4.0), "{body}");
     assert!(matches!(m.get("failures"), Value::Num(n) if n == 2.0), "{body}");
     assert!(matches!(m.get("routes"), Value::Num(n) if n > 0.0), "{body}");
+    for key in ["bytes_out", "avg_micros", "max_micros", "uptime_ms", "connections"] {
+        assert!(matches!(m.get(key), Value::Num(n) if n >= 0.0), "{key} missing in {body}");
+    }
 
     let plain = server();
     assert_eq!(call(&plain, "GET", "/_metrics", "").0, 404);

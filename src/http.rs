@@ -57,6 +57,9 @@ pub struct Server {
     started: Instant,
     requests: AtomicU64,
     failures: AtomicU64,
+    micros: AtomicU64,
+    max_micros: AtomicU64,
+    bytes_out: AtomicU64,
     pub(crate) conns: AtomicU64,
     stop: AtomicBool,
 }
@@ -88,6 +91,9 @@ impl Server {
             started: Instant::now(),
             requests: AtomicU64::new(0),
             failures: AtomicU64::new(0),
+            micros: AtomicU64::new(0),
+            max_micros: AtomicU64::new(0),
+            bytes_out: AtomicU64::new(0),
             conns: AtomicU64::new(0),
             stop: AtomicBool::new(false),
         }))
@@ -204,9 +210,19 @@ impl Server {
         f(out, ",\"requests\":", self.requests.load(Ordering::Relaxed));
         f(out, ",\"failures\":", self.failures.load(Ordering::Relaxed));
         f(out, ",\"connections\":", self.conns.load(Ordering::Relaxed));
+        let requests = self.requests.load(Ordering::Relaxed).max(1);
+        f(out, ",\"bytes_out\":", self.bytes_out.load(Ordering::Relaxed));
+        f(out, ",\"avg_micros\":", self.micros.load(Ordering::Relaxed) / requests);
+        f(out, ",\"max_micros\":", self.max_micros.load(Ordering::Relaxed));
         f(out, ",\"routes\":", self.routes.len() as u64);
         f(out, ",\"workers\":", self.workers as u64);
         out.push(b'}');
+    }
+
+    pub fn record(&self, micros: u64, bytes: usize) {
+        self.micros.fetch_add(micros, Ordering::Relaxed);
+        self.bytes_out.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.max_micros.fetch_max(micros, Ordering::Relaxed);
     }
 
     pub fn allow(&self, key: &str) -> bool {

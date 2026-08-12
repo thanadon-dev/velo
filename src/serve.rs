@@ -386,8 +386,12 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         }
         c.body.clear();
         let mut body = std::mem::take(&mut c.body);
+        let started = srv.metrics_path.as_ref().map(|_| Instant::now());
         let (status, ct) =
             srv.handle(method, path, &req[head.head_end..], &req[..head.head_end], &mut body);
+        if let Some(t0) = started {
+            srv.record(t0.elapsed().as_micros() as u64, body.len());
+        }
         if srv.log {
             eprintln!("{method} {path} {status} {}b", body.len());
         }
