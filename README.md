@@ -1,6 +1,6 @@
 # Velo
 
-**v0.35.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.36.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -226,24 +226,21 @@ Set `VELO_METRICS=/_metrics` and that path answers:
 
 ## Deployment
 
-Velo is one static binary and one text file. A systemd user unit is enough:
+Velo is one static binary and one text file. `deploy/` holds ready-to-copy templates:
 
-```ini
-[Unit]
-Description=velo api
-After=network.target
+| file | what it is |
+| --- | --- |
+| `deploy/velo.service` | systemd unit with `SIGTERM` shutdown, metrics, rate limiting, and sandboxing |
+| `deploy/Caddyfile.snippet` | reverse proxy that terminates TLS, compresses, and forwards the client IP |
+| `deploy/cloudflared.snippet.yml` | tunnel ingress for the same hostname |
 
-[Service]
-ExecStart=/usr/local/bin/velo run /srv/api/app.velo 127.0.0.1:8080 --data /srv/api/data.json
-Environment=VELO_WORKERS=4
-Restart=always
-KillSignal=SIGTERM
-
-[Install]
-WantedBy=default.target
+```sh
+sudo install -m755 target/x86_64-unknown-linux-musl/release/velo /usr/local/bin/velo
+install -Dm644 deploy/velo.service ~/.config/systemd/user/velo.service
+systemctl --user daemon-reload && systemctl --user enable --now velo
 ```
 
-`SIGTERM` is the clean stop: the event loop unwinds and the final snapshot is written before exit. Put a TLS terminator in front of it; velo speaks plain HTTP/1.1 only.
+`SIGTERM` is the clean stop: the event loop unwinds and the final snapshot is written before exit. Velo speaks plain HTTP/1.1, so put a TLS terminator in front of it; that proxy is also what compresses responses. Behind a proxy every socket looks local, so set `VELO_REAL_IP_HEADER` to whatever header your proxy sets (`CF-Connecting-IP` behind Cloudflare, `X-Forwarded-For` otherwise) if you rate-limit, and only trust that header when the proxy is the only way in.
 
 ## Design
 
@@ -283,7 +280,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.35.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.36.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -396,6 +393,8 @@ cargo test
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.36.0** — `deploy/` templates: a hardened systemd unit, a Caddy reverse-proxy block that forwards the client IP, and a cloudflared ingress entry.
 
 **v0.35.1** — benchmarked against a Go `net/http` server on the same box for scale: 1.8x the throughput on small responses, 14x pipelined, a tenth of the memory.
 

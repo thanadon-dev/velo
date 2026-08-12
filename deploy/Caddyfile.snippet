@@ -1,0 +1,6 @@
+api.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080 {
+		header_up CF-Connecting-IP {http.request.header.CF-Connecting-IP}
+	}
+}

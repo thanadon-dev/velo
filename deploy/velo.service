@@ -1,0 +1,25 @@
+[Unit]
+Description=velo api
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/velo run /srv/api/app.velo 127.0.0.1:8080 --data /srv/api/data.json
+WorkingDirectory=/srv/api
+Environment=VELO_WORKERS=4
+Environment=VELO_METRICS=/_metrics
+Environment=VELO_REAL_IP_HEADER=CF-Connecting-IP
+Environment=VELO_RATE=100
+Environment=VELO_HEADERS=X-Content-Type-Options: nosniff
+Restart=always
+RestartSec=1
+KillSignal=SIGTERM
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/srv/api
+
+[Install]
+WantedBy=default.target

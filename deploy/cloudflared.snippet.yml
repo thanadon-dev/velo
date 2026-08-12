@@ -1,0 +1,6 @@
+ingress:
+  - hostname: api.example.com
+    service: https://127.0.0.1:443
+    originRequest:
+      originServerName: api.example.com
+  - service: http_status:404
