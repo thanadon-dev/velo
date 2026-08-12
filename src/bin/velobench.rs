@@ -209,13 +209,6 @@ struct Counter {
 }
 
 impl Counter {
-    fn note_close(&mut self, head: &[u8]) {
-        let lower: Vec<u8> = head.iter().map(|c| c.to_ascii_lowercase()).collect();
-        if find(&lower, b"connection: close").is_some() {
-            self.server_closing = true;
-        }
-    }
-
     fn at_boundary(&self) -> bool {
         self.head.is_empty() && self.body_left == 0
     }
@@ -240,7 +233,7 @@ impl Counter {
                     return done;
                 };
                 let len = content_length(&chunk[..end]);
-                self.note_close(&chunk[..end]);
+                self.server_closing |= head_says_close(&chunk[..end]);
                 chunk = &chunk[end + 4..];
                 if len == 0 {
                     done += 1;
@@ -256,7 +249,8 @@ impl Counter {
             let consumed = chunk.len() - (self.head.len() - (end + 4));
             chunk = &chunk[consumed..];
             let len = content_length(&self.head[..end]);
-            self.note_close(&self.head[..end].to_vec());
+            let closing = head_says_close(&self.head[..end]);
+            self.server_closing |= closing;
             self.head.clear();
             if len == 0 {
                 done += 1;
@@ -266,6 +260,11 @@ impl Counter {
         }
         done
     }
+}
+
+fn head_says_close(head: &[u8]) -> bool {
+    let lower: Vec<u8> = head.iter().map(|c| c.to_ascii_lowercase()).collect();
+    find(&lower, b"connection: close").is_some()
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
