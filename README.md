@@ -1,6 +1,6 @@
 # Velo
 
-**v0.27.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.27.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -237,7 +237,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.27.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.27.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -261,7 +261,19 @@ Load generator: `velobench` (ships in this repo, thread per connection, keep-ali
 | `/users/sorted` | 158 000 |
 | `/users/by/team` | 131 000 |
 
-In-process, no sockets (`velomicro 5000`): `find` 0.23 us, `where` 1.1 us, `order` 5.0 us, `all` 6.2 us per call.
+In-process, no sockets, one thread (`velomicro <rows>`):
+
+| operation | 500 rows | 20 000 rows |
+| --- | --- | --- |
+| `find(id)` | 0.23 us | 0.26 us |
+| `where` (cached) | 1.1 us | 1.2 us |
+| `create` | 2.3 us | 3.5 us |
+| `order` (cached) | 5.0 us | 50 us |
+| `all` (cached) | 5.7 us | 51 us |
+| `create` + `delete` | 6.8 us | 52 us |
+| `create` then read the whole list | 196 us | 1 381 us |
+
+`find`, `create`, and cached filters stay flat. Anything that hands back the whole collection is bound by the bytes it copies, and `delete` is linear in the collection size because it keeps insertion order and reindexes.
 
 Run read benchmarks before write benchmarks, or restart in between: a `POST` run at 50k req/s adds a hundred thousand rows and every later list measurement is then measuring a much bigger response.
 
@@ -323,6 +335,8 @@ cargo test
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.27.1** — measured the store at 20 000 rows and published the numbers: `find` and `create` stay flat, list-shaped operations are bound by the bytes they copy, `delete` is linear because insertion order is preserved.
 
 **v0.27.0** — inserting a row now appends to the cached list JSON when the list has been read since the last write, cutting a write-then-list cycle from 309 us to 191 us on 4 500 rows; write-only bursts keep their previous cost (56k inserts/s).
 

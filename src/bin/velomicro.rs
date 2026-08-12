@@ -7,7 +7,8 @@ fn main() {
                GET /w => db.users.where(\"team\", query.t)\n\
                GET /o => db.users.order(\"name\")\n\
                GET /f => db.users.find(\"1\")\n\
-               POST /w => db.users.create(body)\n";
+               POST /w => db.users.create(body)\n\
+               DELETE /d/:id => db.users.delete(id)\n";
     let store = velo::Store::new();
     let prog = compile(src, Some(store.clone())).unwrap();
     let s = Server::new(prog).unwrap();
@@ -28,7 +29,22 @@ fn main() {
             s.dispatch("POST", "/w", body.as_bytes(), &mut out);
         }
         let per = t0.elapsed().as_secs_f64() / n as f64;
-        println!("{:8} {:>9.2} us/op  {:>10.0} op/s", "write", per * 1e6, 1.0 / per);
+        println!("{:9} {:>9.2} us/op  {:>10.0} op/s", "write", per * 1e6, 1.0 / per);
+    }
+    {
+        let t0 = Instant::now();
+        let n = 1_000;
+        let mut out = Vec::new();
+        for _ in 0..n {
+            out.clear();
+            let body = b"{\"team\":\"x\",\"name\":\"d\"}";
+            s.dispatch("POST", "/w", body, &mut out);
+            let id = velo::value::parse_json(&out).unwrap().get("id").as_key();
+            out.clear();
+            s.dispatch("DELETE", &format!("/d/{id}"), b"", &mut out);
+        }
+        let per = t0.elapsed().as_secs_f64() / n as f64;
+        println!("{:9} {:>9.2} us/op  {:>10.0} op/s", "create+del", per * 1e6, 1.0 / per);
     }
     {
         let t0 = Instant::now();
