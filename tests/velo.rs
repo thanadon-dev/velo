@@ -736,3 +736,22 @@ fn where_cache_invalidates() {
     }
     assert_eq!(call(&s, "GET", "/search?name=z", "").1, r#"[{"id":1,"name":"z","team":"red"}]"#);
 }
+
+#[test]
+fn cache_respects_byte_budget() {
+    std::env::set_var("VELO_CACHE_BYTES", "200");
+    let s = server();
+    for i in 0..40 {
+        call(&s, "POST", "/users", &format!(r#"{{"name":"n{i}","team":"t{i}"}}"#));
+    }
+    let big = call(&s, "GET", "/users", "").1;
+    assert!(big.len() > 200, "{}", big.len());
+    assert_eq!(call(&s, "GET", "/users", "").1, big);
+
+    let one = call(&s, "GET", "/search?name=n3", "").1;
+    assert_eq!(one, r#"[{"id":4,"name":"n3","team":"t3"}]"#);
+    assert_eq!(call(&s, "GET", "/search?name=n3", "").1, one);
+    assert_eq!(call(&s, "GET", "/sorted", "").1.matches(r#""id""#).count(), 40);
+    assert_eq!(call(&s, "GET", "/search?name=n3", "").1, one);
+    std::env::remove_var("VELO_CACHE_BYTES");
+}

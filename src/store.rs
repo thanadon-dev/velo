@@ -7,6 +7,10 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 const CACHE_MAX: usize = 32;
 
+fn cache_budget() -> usize {
+    std::env::var("VELO_CACHE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(8 << 20)
+}
+
 struct Snapshot {
     rows: Arc<Vec<Value>>,
     by_id: HashMap<String, usize>,
@@ -35,8 +39,13 @@ impl Snapshot {
     }
 
     fn store_cached(&self, key: String, json: Arc<[u8]>) -> Arc<[u8]> {
+        let budget = cache_budget();
+        if json.len() > budget {
+            return json;
+        }
         let mut cache = self.cache.lock().unwrap();
-        if cache.len() >= CACHE_MAX {
+        let used: usize = cache.values().map(|v| v.len()).sum();
+        if cache.len() >= CACHE_MAX || used + json.len() > budget {
             cache.clear();
         }
         cache.insert(key, json.clone());
