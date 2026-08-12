@@ -90,7 +90,7 @@ pub fn compile_in(
     let store = store.unwrap_or_default();
     let mut p = Parser {
         lex: Lexer::new(src),
-        tok: Token { kind: Kind::Eof, text: String::new(), num: 0.0, line: 0 },
+        tok: Token { kind: Kind::Eof, text: String::new(), num: 0.0, line: 0, col: 1 },
         store: store.clone(),
         params: Vec::new(),
         pure: true,
@@ -145,12 +145,17 @@ fn remember(list: &mut Vec<String>, name: &str) {
 
 fn with_source(src: &str, err: String) -> String {
     let Some(rest) = err.strip_prefix("line ") else { return err };
-    let Some(num) = rest.split(':').next().and_then(|n| n.parse::<usize>().ok()) else {
-        return err;
-    };
+    let mut parts = rest.split(':');
+    let Some(num) = parts.next().and_then(|n| n.parse::<usize>().ok()) else { return err };
+    let col = parts.next().and_then(|c| c.parse::<usize>().ok());
     let Some(text) = src.lines().nth(num.saturating_sub(1)) else { return err };
     let gutter = num.to_string();
-    format!("{err}\n  {gutter} | {}\n  {} |", text.trim_end(), " ".repeat(gutter.len()))
+    let pad = " ".repeat(gutter.len());
+    let caret = match col {
+        Some(col) if col >= 1 => format!("{}^", " ".repeat(col - 1)),
+        _ => String::new(),
+    };
+    format!("{err}\n  {gutter} | {}\n  {pad} | {caret}", text.trim_end())
 }
 
 struct Parser<'a> {
@@ -177,8 +182,9 @@ impl<'a> Parser<'a> {
     fn expect(&mut self, k: Kind) -> Result<Token, String> {
         if self.tok.kind != k {
             return Err(format!(
-                "line {}: expected {}, got {:?}",
+                "line {}:{}: expected {}, got {:?}",
                 self.tok.line,
+                self.tok.col,
                 k.name(),
                 self.tok.text
             ));
@@ -191,13 +197,14 @@ impl<'a> Parser<'a> {
     fn route(&mut self) -> Result<Route, String> {
         if self.tok.kind != Kind::Ident {
             return Err(format!(
-                "line {}: expected http method, got {:?}",
-                self.tok.line, self.tok.text
+                "line {}:{}: expected http method, got {:?}",
+                self.tok.line, self.tok.col, self.tok.text
             ));
         }
         let line = self.tok.line;
-        let method = Method::parse(&self.tok.text.to_uppercase())
-            .ok_or_else(|| format!("line {}: unknown method {:?}", line, self.tok.text))?;
+        let method = Method::parse(&self.tok.text.to_uppercase()).ok_or_else(|| {
+            format!("line {}:{}: unknown method {:?}", line, self.tok.col, self.tok.text)
+        })?;
         let path = self.lex.path()?;
         self.advance()?;
         self.expect(Kind::Arrow)?;
@@ -216,7 +223,7 @@ impl<'a> Parser<'a> {
             self.advance()?;
             let code = self.expect(Kind::Num)?;
             if code.num < 100.0 || code.num > 599.0 || code.num.fract() != 0.0 {
-                return Err(format!("line {}: bad status {}", code.line, code.text));
+                return Err(format!("line {}:{}: bad status {}", code.line, code.col, code.text));
             }
             status = code.num as u16;
         }
@@ -233,7 +240,7 @@ impl<'a> Parser<'a> {
             self.advance()?;
             let code = self.expect(Kind::Num)?;
             if !(100.0..=599.0).contains(&code.num) || code.num.fract() != 0.0 {
-                return Err(format!("line {}: bad status {}", code.line, code.text));
+                return Err(format!("line {}:{}: bad status {}", code.line, code.col, code.text));
             }
             guard_status = code.num as u16;
         }
@@ -362,9 +369,10 @@ impl<'a> Parser<'a> {
             Kind::LBrace => self.object(),
             Kind::LBrack => self.array(),
             Kind::Ident => self.chain(),
-            _ => {
-                Err(format!("line {}: unexpected {:?} in expression", self.tok.line, self.tok.text))
-            }
+            _ => Err(format!(
+                "line {}:{}: unexpected {:?} in expression",
+                self.tok.line, self.tok.col, self.tok.text
+            )),
         }
     }
 
@@ -374,8 +382,8 @@ impl<'a> Parser<'a> {
         while self.tok.kind != Kind::RBrace {
             if self.tok.kind != Kind::Ident && self.tok.kind != Kind::Str {
                 return Err(format!(
-                    "line {}: expected object key, got {:?}",
-                    self.tok.line, self.tok.text
+                    "line {}:{}: expected object key, got {:?}",
+                    self.tok.line, self.tok.col, self.tok.text
                 ));
             }
             let key: Arc<str> = Arc::from(self.tok.text.as_str());
@@ -445,17 +453,24 @@ impl<'a> Parser<'a> {
                 "file" => {
                     self.advance()?;
                     if self.tok.kind != Kind::Str {
-                        return Err(format!("line {}: file() needs a path", head.line));
+                        return Err(format!(
+                            "line {}:{}: file() needs a path",
+                            head.line, head.col
+                        ));
                     }
                     let rel = self.tok.text.clone();
                     self.advance()?;
                     if self.tok.kind != Kind::RParen {
-                        return Err(format!("line {}: file() takes one path", head.line));
+                        return Err(format!(
+                            "line {}:{}: file() takes one path",
+                            head.line, head.col
+                        ));
                     }
                     self.advance()?;
                     let path = self.base.join(&rel);
-                    let text = std::fs::read_to_string(&path)
-                        .map_err(|e| format!("line {}: {}: {e}", head.line, path.display()))?;
+                    let text = std::fs::read_to_string(&path).map_err(|e| {
+                        format!("line {}:{}: {}: {e}", head.line, head.col, path.display())
+                    })?;
                     self.file_ctype = Some(crate::http::ctype_for(&rel));
                     return Ok(Expr::Const(Value::str(&text)));
                 }
@@ -464,7 +479,12 @@ impl<'a> Parser<'a> {
                 "uuid" => Builtin::Uuid,
                 "len" => Builtin::Len,
                 "env" => Builtin::Env,
-                other => return Err(format!("line {}: unknown function {other}()", head.line)),
+                other => {
+                    return Err(format!(
+                        "line {}:{}: unknown function {other}()",
+                        head.line, head.col
+                    ))
+                }
             };
             self.advance()?;
             let mut args = Vec::new();
@@ -481,8 +501,9 @@ impl<'a> Parser<'a> {
             };
             if args.len() != arity {
                 return Err(format!(
-                    "line {}: {}() expects {arity} argument(s), got {}",
+                    "line {}:{}: {}() expects {arity} argument(s), got {}",
                     head.line,
+                    head.col,
                     head.text,
                     args.len()
                 ));
@@ -496,7 +517,7 @@ impl<'a> Parser<'a> {
             self.pure = false;
             return self.fields(Expr::Param(i));
         }
-        Err(format!("line {}: unknown identifier {:?}", head.line, head.text))
+        Err(format!("line {}:{}: unknown identifier {:?}", head.line, head.col, head.text))
     }
 
     fn fields(&mut self, base: Expr) -> Result<Expr, String> {
@@ -510,6 +531,7 @@ impl<'a> Parser<'a> {
     }
 
     fn db_call(&mut self, line: usize) -> Result<Expr, String> {
+        let at_col = self.tok.col;
         self.expect(Kind::Dot)?;
         let name = self.expect(Kind::Ident)?;
         let col = self.store.collection(&name.text);
@@ -528,8 +550,8 @@ impl<'a> Parser<'a> {
         let want = |k: usize| -> Result<(), String> {
             if n != k {
                 return Err(format!(
-                    "line {}: db.{}.{} expects {} argument(s), got {}",
-                    line, name.text, op.text, k, n
+                    "line {}:{}: db.{}.{} expects {} argument(s), got {}",
+                    line, at_col, name.text, op.text, k, n
                 ));
             }
             Ok(())
@@ -596,7 +618,10 @@ impl<'a> Parser<'a> {
                 Op::Delete(Box::new(args.next().unwrap()))
             }
             other => {
-                return Err(format!("line {}: unknown operation db.{}.{}", line, name.text, other))
+                return Err(format!(
+                    "line {}:{}: unknown operation db.{}.{}",
+                    line, at_col, name.text, other
+                ))
             }
         };
         Ok(Expr::Db(col, op))

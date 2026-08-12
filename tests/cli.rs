@@ -77,8 +77,9 @@ fn check_reports_errors_with_exit_codes() {
     let out = Command::new(BIN).arg("check").arg(&bad).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("line 2: unknown identifier"), "{err}");
+    assert!(err.contains("line 2:15: unknown identifier"), "{err}");
     assert!(err.contains("2 | GET /users => user.all()"), "{err}");
+    assert!(err.contains("|               ^"), "caret missing in {err}");
 
     let missing = Command::new(BIN).arg("check").arg(tmp("nope.velo")).output().unwrap();
     assert_eq!(missing.status.code(), Some(1));

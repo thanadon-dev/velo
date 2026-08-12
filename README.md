@@ -1,6 +1,6 @@
 # Velo
 
-**v0.39.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.40.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -35,7 +35,7 @@ CLI:
 | command | what it does |
 | --- | --- |
 | `velo run <file> [addr] [--data f.json] [--watch]` | start the server (default `:8080`, env `VELO_ADDR`, `VELO_DATA`) |
-| `velo check <file>` | compile only, report errors with the offending source line |
+| `velo check <file>` | compile only, report errors with the offending line, column, and a caret |
 | `velo routes <file>` | list compiled routes with their kind, status, guard, and source file and line |
 | `velo openapi <file>` | print an OpenAPI 3.0 document for the routes |
 | `velo new <file>` | write a starter file |
@@ -284,7 +284,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.39.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.40.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -372,6 +372,18 @@ cargo test
 
 `./check.sh` is the gate: `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the full test suite, a release build, all three examples compiled, a performance guard against `bench/baseline.json`, and a boot smoke test with a short benchmark. `.github/workflows/ci.yml` runs exactly the same steps on push.
 
+## Errors
+
+Compile errors carry a line, a column, the source line, and a caret:
+
+```
+velo: app.velo: line 2:15: unknown identifier "user"
+  2 | GET /users => user.all()
+    |               ^
+```
+
+`velo check` exits non-zero on the first error, which is what `--watch` and CI use.
+
 ## Layout
 
 | file | what it holds |
@@ -397,6 +409,8 @@ cargo test
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.40.0** — compile errors now report a column and underline the offending token with a caret; the lexer tracks column positions for every token.
 
 **v0.39.0** — `velomicro --json` and `velomicro --check <baseline>`: the microbenchmark can now fail the build when an operation regresses past a multiple of the recorded baseline. `check.sh` runs it.
 

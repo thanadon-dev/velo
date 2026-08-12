@@ -475,8 +475,9 @@ fn compile_error_shows_source_line() {
         Err(e) => e,
         Ok(_) => panic!("expected a compile error"),
     };
-    assert!(err.starts_with("line 2: unknown identifier"), "{err}");
+    assert!(err.starts_with("line 2:15: unknown identifier"), "{err}");
     assert!(err.contains("2 | GET /users => user.all()"), "{err}");
+    assert!(err.trim_end().ends_with('^'), "{err}");
 }
 
 #[test]
