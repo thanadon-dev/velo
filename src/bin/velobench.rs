@@ -164,7 +164,9 @@ fn worker(
     while !stop.load(Ordering::Relaxed) {
         let t0 = Instant::now();
         if s.write_all(&batch).is_err() {
-            errors.fetch_add(1, Ordering::Relaxed);
+            if !counter.at_boundary() {
+                errors.fetch_add(1, Ordering::Relaxed);
+            }
             break;
         }
         let mut seen = 0usize;
@@ -181,13 +183,20 @@ fn worker(
                     local_bytes += n as u64;
                     seen += counter.feed(&buf[..n]);
                 }
-                Err(_) => {
-                    errors.fetch_add(1, Ordering::Relaxed);
+                Err(e) => {
+                    let ended = matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    );
+                    if !(ended && counter.at_boundary()) {
+                        errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                    closed = true;
                     break;
                 }
             }
         }
-        if seen == 0 || closed || counter.server_closing {
+        if seen == 0 || closed {
             break;
         }
         let us = t0.elapsed().as_micros() as u64 / a.pipeline as u64;
@@ -205,7 +214,6 @@ fn worker(
 struct Counter {
     head: Vec<u8>,
     body_left: usize,
-    server_closing: bool,
 }
 
 impl Counter {
@@ -233,7 +241,6 @@ impl Counter {
                     return done;
                 };
                 let len = content_length(&chunk[..end]);
-                self.server_closing |= head_says_close(&chunk[..end]);
                 chunk = &chunk[end + 4..];
                 if len == 0 {
                     done += 1;
@@ -249,8 +256,6 @@ impl Counter {
             let consumed = chunk.len() - (self.head.len() - (end + 4));
             chunk = &chunk[consumed..];
             let len = content_length(&self.head[..end]);
-            let closing = head_says_close(&self.head[..end]);
-            self.server_closing |= closing;
             self.head.clear();
             if len == 0 {
                 done += 1;
@@ -260,11 +265,6 @@ impl Counter {
         }
         done
     }
-}
-
-fn head_says_close(head: &[u8]) -> bool {
-    let lower: Vec<u8> = head.iter().map(|c| c.to_ascii_lowercase()).collect();
-    find(&lower, b"connection: close").is_some()
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {

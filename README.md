@@ -1,6 +1,6 @@
 # Velo
 
-**v0.43.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.43.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -307,41 +307,43 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.43.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.43.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
-| route | kind | req/s |
-| --- | --- | --- |
-| `/health` | const fold | 91 900 |
-| `/users/:id` | store lookup | 91 200 |
-| `/stats` | 2 store counts | 86 700 |
-| `/users` (501 rows, 21 kB) | cached list | 65 400 |
-| `/users/by/team` | cached filter | 59 800 |
-| `POST /users` | JSON parse + insert | 53 900 |
+| route | kind | req/s | p50 |
+| --- | --- | --- | --- |
+| `/health` | const fold | 94 900 | 0.38 ms |
+| `/users/:id` | store lookup | 90 600 | 0.44 ms |
+| `/stats` | 2 store counts | 84 300 | 0.46 ms |
+| `/users` (500 rows, 21 kB) | cached list | 68 500 | 0.63 ms |
+| `/users/sorted` | cached sort | 60 800 | 0.66 ms |
+| `/users/by/team` | cached filter | 54 200 | 0.74 ms |
+| `POST /users` | JSON parse + insert | 51 700 | 0.73 ms |
 
 `-c 8 -p 32`, pipelined — what the server itself can do:
 
-| route | req/s |
-| --- | --- |
-| `/health` | 835 000 |
-| `/stats` | 785 000 |
-| `/scores` (3 aggregates) | 368 000 |
-| `/users` (21 kB each) | 243 000 |
-| `/users/sorted` | 158 000 |
-| `/users/by/team` | 131 000 |
+| route | req/s | transfer |
+| --- | --- | --- |
+| `/users/:id` | 705 000 | 121 MB/s |
+| `/stats` | 695 000 | 108 MB/s |
+| `/health` | 695 000 | 99 MB/s |
+| `/users` (21 kB each) | 215 000 | 4.6 GB/s |
+| `/scores` (3 aggregates) | 171 000 | 28 MB/s |
+| `/users/sorted` | 137 000 | 3.0 GB/s |
+| `/users/by/team` | 122 000 | 2.6 GB/s |
 
 In-process, no sockets, one thread (`velomicro <rows>`). `bench/baseline.json` records these on this machine, and `velomicro --check` fails the build if any of them regresses past `VELO_PERF_LIMIT` (3x by default) — that guard exists because a cache-key mistake once made `order` 200x slower while every test stayed green:
 
 | operation | 500 rows | 20 000 rows |
 | --- | --- | --- |
-| `find(id)` | 0.23 us | 0.26 us |
+| `find(id)` | 0.23 us | 0.24 us |
 | `where` (cached) | 1.1 us | 1.2 us |
-| `create` | 2.3 us | 3.5 us |
-| `order` (cached) | 5.0 us | 50 us |
-| `all` (cached) | 5.7 us | 51 us |
-| `create` + `delete` | 3.1 us | 3.4 us |
-| `create` then read the whole list | 8.9 us | 62 us |
+| `create` | 2.2 us | 2.3 us |
+| `create` + `delete` | 2.9 us | 3.0 us |
+| `all` (cached) | 4.9 us | 50 us |
+| `order` (cached) | 6.6 us | 53 us |
+| `create` then read the whole list | 7.8 us | 62 us |
 
 `find`, `create`, `delete`, and cached filters stay flat. Anything that hands back the whole collection is bound by the bytes it copies.
 
@@ -358,7 +360,7 @@ For scale, the same client and box against a Go 1.26 `net/http` server serving e
 | list, `-c 50` | 61 500 req/s | 72 600 req/s |
 | `/health`, `-c 8 -p 32` | 57 100 req/s | 812 000 req/s |
 | RSS while serving | 11.9 MB | 1.2 MB |
-| binary | 8.6 MB | 0.6 MB |
+| binary | 8.6 MB | 0.86 MB |
 
 Read that as a sanity check, not a verdict: `net/http` is a general server with middleware, HTTP/2, and dynamic handlers, while velo compiles a fixed route set and precomputes most of what it sends. The pipelining gap is mostly that `net/http` answers pipelined requests one at a time.
 
@@ -366,21 +368,21 @@ Over a Unix socket instead of loopback TCP, same server and client:
 
 | route | TCP | Unix socket |
 | --- | --- | --- |
-| `/health`, `-c 50` | 86 900 req/s | 124 400 req/s |
-| `/users/:id`, `-c 50` | 89 000 req/s | 113 800 req/s |
-| `/health`, `-c 8 -p 32` | 812 000 req/s | 845 000 req/s |
+| `/health`, `-c 50` | 94 900 req/s | 111 500 req/s |
+| `/users/:id`, `-c 50` | 90 600 req/s | 111 500 req/s |
+| `/health`, `-c 8 -p 32` | 695 000 req/s | 871 000 req/s |
 
-Skipping the loopback TCP stack is worth about 30% when the proxy sits on the same host.
+Skipping the loopback TCP stack is worth 15-25% when the proxy sits on the same host.
 
 Connection scaling (`/health`), server RSS while serving:
 
 | conns | req/s | p50 | RSS |
 | --- | --- | --- | --- |
-| 50 | 90 500 | 0.41 ms | 644 kB |
-| 500 | 78 000 | 2.77 ms | 764 kB |
-| 1 000 | 68 700 | 10.8 ms | 896 kB |
+| 50 | 80 400 | 0.47 ms | 1.45 MB |
+| 500 | 66 700 | 5.70 ms | 1.61 MB |
+| 1 000 | 62 600 | 12.97 ms | 1.74 MB |
 
-Binary: 594 kB, statically linked.
+Binary: 856 kB, statically linked.
 
 Reproduce:
 
@@ -443,6 +445,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.43.1** — every benchmark in this file re-measured against the current build, and `velobench` stopped scanning each response head for `Connection: close` (that check had quietly cost the client 3x on small responses). Clean connection ends are recognised from the socket state instead.
 
 **v0.43.0** — systemd socket activation: when `LISTEN_FDS` names an inherited listener, velo serves on it instead of binding its own. Combined with draining, a restart neither drops in-flight requests nor refuses new ones.
 
