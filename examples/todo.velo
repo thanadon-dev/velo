@@ -2,7 +2,7 @@ GET    /health              => "ok"
 
 GET    /todos               => db.todos.order("-id")
 GET    /todos/:id           => db.todos.find(id)
-POST   /todos               => db.todos.create({ id: uuid(), at: now(), text: body.text, done: false })
+POST   /todos               => db.todos.create({ id: uuid(), at: date(now()), text: body.text, done: false }) when body.text else 400
 PUT    /todos/:id           => db.todos.update(id, body)
 DELETE /todos/:id           => db.todos.delete(id) : 204
 

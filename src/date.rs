@@ -59,10 +59,39 @@ fn four(out: &mut Vec<u8>, n: u64) {
     out.push(b'0' + (n % 10) as u8);
 }
 
+pub fn iso(millis: u64) -> String {
+    let secs = millis / 1000;
+    let days = (secs / 86400) as i64;
+    let tod = secs % 86400;
+    let (y, m, d) = civil_from_days(days);
+    let mut out = Vec::with_capacity(20);
+    four(&mut out, y as u64);
+    out.push(b'-');
+    two(&mut out, m as u64);
+    out.push(b'-');
+    two(&mut out, d as u64);
+    out.push(b'T');
+    two(&mut out, tod / 3600);
+    out.push(b':');
+    two(&mut out, (tod / 60) % 60);
+    out.push(b':');
+    two(&mut out, tod % 60);
+    out.push(b'Z');
+    String::from_utf8(out).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn iso_timestamps() {
+        assert_eq!(iso(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso(1_755_000_000_000), "2025-08-12T12:00:00Z");
+        assert_eq!(iso(951_782_400_123), "2000-02-29T00:00:00Z");
+        assert_eq!(iso(1_000_000_000_999), "2001-09-09T01:46:40Z");
+    }
 
     #[test]
     fn known_timestamps() {

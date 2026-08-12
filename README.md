@@ -1,6 +1,6 @@
 # Velo
 
-**v0.47.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.48.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -109,6 +109,7 @@ Built-in functions:
 | function | returns |
 | --- | --- |
 | `now()` | Unix time in milliseconds |
+| `date(ms)` | that instant as `YYYY-MM-DDTHH:MM:SSZ`, or `null` if it is not a number |
 | `uuid()` | random v4 UUID string |
 | `len(x)` | length of a string, array, or object (`null` is 0) |
 | `env("NAME")` | environment variable, or `null`; folded at compile time |
@@ -117,6 +118,7 @@ Built-in functions:
 
 ```velo
 GET  /scores     => { total: db.orders.sum("amount"), avg: db.orders.avg("amount") }
+POST /todos      => db.todos.create({ id: uuid(), at: date(now()), text: body.text })
 POST /events     => db.events.create({ id: uuid(), at: now(), data: body })
 GET  /users/mine => db.users.where("team", header.x_team)
 ```
@@ -310,7 +312,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.47.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.48.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -448,6 +450,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.48.0** — `date(ms)` renders an instant as an ISO-8601 UTC string, so `date(now())` gives a timestamp a human can read; the todo example stores one.
 
 **v0.47.1** — the interner also covers the field names velo generates itself (`id`, `value`, `deleted`) and uses the fast hasher, so creating a row no longer allocates its key strings.
 

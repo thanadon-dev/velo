@@ -479,6 +479,7 @@ impl<'a> Parser<'a> {
                 }
                 "openapi" => Builtin::Openapi,
                 "now" => Builtin::Now,
+                "date" => Builtin::Date,
                 "uuid" => Builtin::Uuid,
                 "len" => Builtin::Len,
                 "env" => Builtin::Env,
@@ -500,7 +501,7 @@ impl<'a> Parser<'a> {
             self.advance()?;
             let arity = match f {
                 Builtin::Openapi | Builtin::Now | Builtin::Uuid => 0,
-                Builtin::Len | Builtin::Env => 1,
+                Builtin::Len | Builtin::Env | Builtin::Date => 1,
             };
             if args.len() != arity {
                 return Err(format!(

@@ -36,7 +36,7 @@ GET  /paged           => db.users.page(query.offset, query.limit)
 GET  /byname/:n       => db.users.first("name", n)
 POST /keyed           => db.keyed.create(body)
 GET  /keyed/:id       => db.keyed.find(id)
-GET  /time            => { at: now() }
+GET  /time            => { at: now(), iso: date(now()), fixed: date(1755000000000), bad: date("x") }
 GET  /id              => uuid()
 GET  /sizes           => { s: len("abc"), a: len([1,2]), n: len(null) }
 GET  /home            => env("VELO_TEST_ENV")
@@ -420,8 +420,18 @@ fn builtins() {
     assert_ne!(id, id2);
 
     let (_, body, _) = call(&s, "GET", "/time", "");
-    let at = body.trim_start_matches("{\"at\":").trim_end_matches('}').parse::<u64>().unwrap();
+    let at: u64 = body
+        .trim_start_matches("{\"at\":")
+        .split(',')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap_or_else(|e| panic!("{body}: {e}"));
     assert!(at > 1_700_000_000_000, "{at}");
+    assert!(body.contains(r#""fixed":"2025-08-12T12:00:00Z""#), "{body}");
+    assert!(body.contains(r#""bad":null"#), "{body}");
+    let iso = body.split(r#""iso":""#).nth(1).unwrap();
+    assert!(iso.starts_with("20") && iso.contains('T'), "{body}");
 
     let (status, ev, _) = call(&s, "POST", "/events", r#"{"kind":"ping"}"#);
     assert_eq!(status, 201);

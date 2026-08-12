@@ -77,6 +77,7 @@ pub enum BinOp {
 pub enum Builtin {
     Openapi,
     Now,
+    Date,
     Uuid,
     Len,
     Env,
@@ -341,6 +342,10 @@ pub fn call_builtin(f: Builtin, args: &[Value]) -> Value {
                 .unwrap_or(0.0),
         ),
         Builtin::Uuid => Value::Str(Arc::from(uuid_v4().as_str())),
+        Builtin::Date => match as_num(&args[0]) {
+            Some(ms) if ms >= 0.0 => Value::Str(Arc::from(crate::date::iso(ms as u64).as_str())),
+            _ => Value::Null,
+        },
         Builtin::Len => Value::Num(match &args[0] {
             Value::Str(s) => s.chars().count() as f64,
             Value::Arr(a) => a.len() as f64,
