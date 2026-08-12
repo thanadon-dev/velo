@@ -1,6 +1,6 @@
 # Velo
 
-**v1.4.2** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.5.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -345,7 +345,7 @@ Verified on this machine: a client running 20 keep-alive connections through two
 Filters, sorts, searches, and aggregates work the same way. On a large collection under a constant write load their caches are invalidated as fast as they are built, so each such read costs a full scan; that is the shape of the query, not a lock problem. Use `find`, `first`, or `page` when a collection gets big. A write-only burst therefore keeps its O(1) insert, and an alternating write/read workload neither re-renders nor recopies the list. The cost is holding rows twice in memory.
 - **Nothing is parsed unless it is read.** A route naming `query.limit` or `header.x_key` compiles to a lookup that scans the raw request bytes for that one name and decodes only its value; a request with eight headers costs no allocation for the seven the route ignores. Routes that use `query` or `header` as a whole object still get one built.
 - **No allocation for key lookups.** `db.users.find(id)` on a plain path param hashes the slice of the request line directly; nothing is copied unless the param is percent-encoded.
-- **Store.** Copy-on-write snapshot behind an `RwLock`; readers clone an `Arc<Vec<Value>>` and release the lock immediately.
+- **Store.** Rows live in `Arc`-ed chunks of 128 behind an `RwLock`. A reader clones the chunk handles, which is one refcount bump per 128 rows rather than per row, and releases the lock before it renders. A write that lands while a reader holds those handles copies one chunk, never the whole collection, so neither side can be made slow by the other. Before chunking, a filter that missed the cache spent most of its time cloning 20 000 row handles: 2 346 us, against 377 us now.
 - **HTTP.** Hand-written HTTP/1.1: keep-alive by default, request pipelining, per-connection read/write/body buffers reused across requests, batched writes. A connection stops rendering further pipelined requests once 256 kB of response bytes are waiting, so a client cannot make the server buffer an unbounded amount by pipelining requests for large lists; it resumes as soon as the socket drains. `Date` is formatted once per second per worker, not per response. `Expect: 100-continue` gets its interim response as soon as the headers arrive. The scan for the end of the headers resumes where it stopped, so a client feeding headers one byte at a time costs linear work, not quadratic. Chunked bodies are refused with 411, conflicting `Content-Length` headers with 400, oversized bodies with 413, oversized headers with 431.
 - **Event loop.** One epoll instance per worker thread (default: one per core), all sharing the listener with `EPOLLEXCLUSIVE`. Connections are non-blocking and cost a few kB each instead of a thread and a stack: 1 000 live connections fit in under 1 MB of RSS. `epoll` is called through three `extern "C"` declarations, still no crates.
 - **No dependencies.** `[dependencies]` is empty. std only.
@@ -378,7 +378,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v1.4.0. The `users` collection holds 500 rows (21 kB as JSON).
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v1.5.0. The `users` collection holds 500 rows (21 kB as JSON).
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -440,6 +440,19 @@ Mixed read/write load on a 186 000-row collection, one reader looping over a who
 At a larger scale, 554 000 rows and a 40 MB list, the same shape now runs at 26 800 writes/s with a reader looping `GET /users` against 46 800 with no reader at all. Before v1.1.0 a list that size was past `VELO_APPEND_MAX`, so every insert threw the cached list away and every read rebuilt all 40 MB.
 
 Write tail latency in that test fell with it: the worst insert went from 1 150 ms to 49 ms on the sort case. Writes with no reader at all run at about 41 000 req/s, so a heavy reader now costs roughly 20% of write throughput instead of 98%.
+
+A harder mix, five reader streams on different chain shapes plus a writer stream, all flat out against a collection growing past 32 000 rows, before and after chunked rows (v1.5.0):
+
+| stream | before | after |
+| --- | --- | --- |
+| `where` + `order` + `page(0,20)` | 367 req/s | 1 616 req/s |
+| `where` + `count` | 375 req/s | 1 352 req/s |
+| `page(offset, 50)` | 227 req/s | 526 req/s |
+| `where("score", ">=", n)` + `count` | 110 req/s | 303 req/s |
+| `where` + `order` + `first()` | 124 req/s | 363 req/s |
+| `POST /users` | 184 req/s | 534 req/s |
+
+Nothing here is cached: the writer invalidates every collection cache faster than the readers can fill it, so each of those reads is a full scan. Writes speed up too, because the readers stop hogging the machine. Zero errors on both runs, and the counts add up afterwards.
 
 A soak run (mixed reads and writes, millions of requests) holds steady: read-only load keeps RSS at 1.17 MB across 3.6 M requests, and memory otherwise tracks the data, not the traffic.
 
@@ -549,6 +562,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.5.0** — rows are stored in `Arc`-ed chunks of 128 instead of one flat vector. A read that misses the cache used to clone every row handle before rendering outside the lock, which cost four atomic operations a row and dominated the read path; it now clones one handle per chunk. An uncached filter over 20 000 rows fell from 2 346 us to 377 us, and a write that lands mid-read copies a single chunk rather than the whole collection. Under the mixed soak, with reads and writes both running flat out against 32 000 rows: the filter-sort-page chain went from 367 to 1 616 req/s, the filtered count from 375 to 1 352, the whole-collection page from 227 to 526, and inserts from 184 to 534 req/s, because readers stop hogging the machine.
 
 **v1.4.2** — a cached read could go stale. A reader that missed the cache checked the collection version, then took the lock to store its result; a writer landing between those two steps cleared the cache and bumped the version, and the reader then wrote its now-outdated bytes into the cache it had just been invalidated out of. Every later request got the stale answer until the next write. The check and the store now happen under the same read lock, which a committing writer cannot hold. This affected every cached read shape since caching was introduced, not only chains. The stress test added in v1.4.1 caught it within minutes of being written, and now runs three rounds; against the unfixed build it fails about a third of the time on its own and more often under load.
 

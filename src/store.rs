@@ -28,8 +28,58 @@ fn cache_budget() -> usize {
     std::env::var("VELO_CACHE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(8 << 20)
 }
 
+const CHUNK: usize = 128;
+
+#[derive(Default, Clone)]
+pub struct Rows {
+    chunks: Vec<Arc<Vec<Value>>>,
+    len: usize,
+}
+
+impl Rows {
+    fn from_vec(rows: Vec<Value>) -> Rows {
+        let mut out = Rows::default();
+        for row in rows {
+            out.push(row);
+        }
+        out
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn get(&self, i: usize) -> Option<&Value> {
+        self.chunks.get(i / CHUNK)?.get(i % CHUNK)
+    }
+
+    fn set(&mut self, i: usize, row: Value) {
+        if let Some(chunk) = self.chunks.get_mut(i / CHUNK) {
+            if i % CHUNK < chunk.len() {
+                Arc::make_mut(chunk)[i % CHUNK] = row;
+            }
+        }
+    }
+
+    fn push(&mut self, row: Value) {
+        if self.chunks.last().map_or(true, |c| c.len() == CHUNK) {
+            self.chunks.push(Arc::new(Vec::with_capacity(CHUNK)));
+        }
+        Arc::make_mut(self.chunks.last_mut().unwrap()).push(row);
+        self.len += 1;
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Value> {
+        self.chunks.iter().flat_map(|c| c.iter())
+    }
+
+    pub fn live(&self) -> impl Iterator<Item = &Value> {
+        self.iter().filter(|r| is_live(r))
+    }
+}
+
 struct Snapshot {
-    rows: Arc<Vec<Value>>,
+    rows: Rows,
     holes: usize,
     by_id: HashMap<String, usize>,
     all_json: Option<Arc<Vec<u8>>>,
@@ -43,13 +93,9 @@ fn is_live(v: &Value) -> bool {
     !matches!(v, Value::Null)
 }
 
-fn live(rows: &[Value]) -> impl Iterator<Item = &Value> {
-    rows.iter().filter(|r| is_live(r))
-}
-
 impl Snapshot {
     fn live(&self) -> impl Iterator<Item = &Value> {
-        self.rows.iter().filter(|r| is_live(r))
+        self.rows.live()
     }
 
     fn len(&self) -> usize {
@@ -60,11 +106,10 @@ impl Snapshot {
         if self.holes == 0 {
             return;
         }
-        let rows = Arc::make_mut(&mut self.rows);
-        rows.retain(is_live);
+        self.rows = Rows::from_vec(self.rows.live().cloned().collect());
         self.holes = 0;
         self.by_id.clear();
-        for (i, row) in rows.iter().enumerate() {
+        for (i, row) in self.rows.iter().enumerate() {
             self.by_id.insert(row.get("id").as_key(), i);
         }
     }
@@ -159,7 +204,7 @@ impl Collection {
             id: NEXT_COLLECTION_ID.fetch_add(1, Ordering::Relaxed),
             version: AtomicU64::new(0),
             snap: RwLock::new(Snapshot {
-                rows: Arc::new(Vec::new()),
+                rows: Rows::default(),
                 holes: 0,
                 by_id: HashMap::new(),
                 all_json: None,
@@ -198,7 +243,7 @@ impl Collection {
         kind: &str,
         a: &str,
         b: &str,
-        build: impl FnOnce(&[Value]) -> Arc<Vec<u8>>,
+        build: impl FnOnce(&Rows) -> Arc<Vec<u8>>,
     ) -> Value {
         let version = self.version.load(Ordering::Acquire);
         let tag = self.tag();
@@ -215,9 +260,9 @@ impl Collection {
         let json = match shared {
             Some(json) => json,
             None => {
-                let rows: Vec<Value> = {
+                let rows = {
                     let s = self.snap.read().unwrap();
-                    s.live().cloned().collect()
+                    s.rows.clone()
                 };
                 let json = build(&rows);
                 with_key4(&tag, kind, a, b, |key| {
@@ -260,7 +305,7 @@ impl Collection {
         for (i, r) in rows.iter().enumerate() {
             s.by_id.insert(r.get("id").as_key(), i);
         }
-        s.rows = Arc::new(rows.into_iter().map(as_row).collect());
+        s.rows = Rows::from_vec(rows.into_iter().map(as_row).collect());
         s.holes = 0;
         s.invalidate();
         self.bump();
@@ -277,13 +322,13 @@ impl Collection {
             }
         }
         let json = {
-            let rows: Vec<Value> = {
+            let rows = {
                 let s = self.snap.read().unwrap();
-                s.live().cloned().collect()
+                s.rows.clone()
             };
             let mut out = Vec::with_capacity(rows.len() * 64 + 2);
             out.push(b'[');
-            for (n, row) in rows.iter().enumerate() {
+            for (n, row) in rows.live().enumerate() {
                 if n > 0 {
                     out.push(b',');
                 }
@@ -306,7 +351,7 @@ impl Collection {
 
     pub fn find(&self, id: &str) -> Option<Value> {
         let s = self.snap.read().unwrap();
-        s.by_id.get(id).map(|&i| s.rows[i].clone())
+        s.by_id.get(id).and_then(|&i| s.rows.get(i).cloned())
     }
 
     pub fn filter(&self, field: &str, want: &str) -> Value {
@@ -399,9 +444,8 @@ impl Collection {
             }
             (key, row)
         };
-        let rows = Arc::make_mut(&mut s.rows);
-        rows.push(row.clone());
-        let idx = rows.len() - 1;
+        s.rows.push(row.clone());
+        let idx = s.rows.len() - 1;
         s.by_id.insert(key, idx);
         let appendable = s.list_used.load(Ordering::Relaxed);
         let reuse = appendable.then(|| s.all_json.take()).flatten();
@@ -417,7 +461,7 @@ impl Collection {
     pub fn clear(&self) -> usize {
         let mut s = self.snap.write().unwrap();
         let removed = s.len();
-        s.rows = Arc::new(Vec::new());
+        s.rows = Rows::default();
         s.holes = 0;
         s.by_id.clear();
         s.invalidate();
@@ -438,7 +482,7 @@ impl Collection {
         }
         for id in &hits {
             if let Some(i) = s.by_id.remove(id) {
-                Arc::make_mut(&mut s.rows)[i] = Value::Null;
+                s.rows.set(i, Value::Null);
                 s.holes += 1;
             }
         }
@@ -477,8 +521,8 @@ impl Collection {
     pub fn update(&self, id: &str, patch: Value) -> Option<Value> {
         let mut s = self.snap.write().unwrap();
         let i = *s.by_id.get(id)?;
-        let merged = as_row(merge(&s.rows[i], &patch));
-        Arc::make_mut(&mut s.rows)[i] = merged.clone();
+        let merged = as_row(merge(s.rows.get(i)?, &patch));
+        s.rows.set(i, merged.clone());
         s.invalidate();
         self.bump();
         self.touch();
@@ -488,7 +532,7 @@ impl Collection {
     pub fn delete(&self, id: &str) -> bool {
         let mut s = self.snap.write().unwrap();
         let Some(i) = s.by_id.remove(id) else { return false };
-        Arc::make_mut(&mut s.rows)[i] = Value::Null;
+        s.rows.set(i, Value::Null);
         s.holes += 1;
         if s.holes * 2 > s.rows.len() {
             s.compact();
@@ -655,10 +699,10 @@ fn field_eq(row: &Value, field: &str, want: &str) -> bool {
     }
 }
 
-fn filtered_json(rows: &[Value], field: &str, want: &str) -> Arc<Vec<u8>> {
+fn filtered_json(rows: &Rows, field: &str, want: &str) -> Arc<Vec<u8>> {
     let mut out = Vec::with_capacity(256);
     out.push(b'[');
-    for (n, row) in live(rows).filter(|r| field_eq(r, field, want)).enumerate() {
+    for (n, row) in rows.live().filter(|r| field_eq(r, field, want)).enumerate() {
         if n > 0 {
             out.push(b',');
         }
@@ -668,11 +712,11 @@ fn filtered_json(rows: &[Value], field: &str, want: &str) -> Arc<Vec<u8>> {
     Arc::new(out)
 }
 
-fn searched_json(rows: &[Value], field: &str, needle: &str) -> Arc<Vec<u8>> {
+fn searched_json(rows: &Rows, field: &str, needle: &str) -> Arc<Vec<u8>> {
     let lower = needle.to_lowercase();
     let mut out = Vec::with_capacity(256);
     out.push(b'[');
-    for (n, row) in live(rows).filter(|r| field_has(r, field, &lower)).enumerate() {
+    for (n, row) in rows.live().filter(|r| field_has(r, field, &lower)).enumerate() {
         if n > 0 {
             out.push(b',');
         }
@@ -785,8 +829,8 @@ fn chain_key(stages: &[Stage]) -> String {
     key
 }
 
-fn run_stages<'a>(rows: &'a [Value], stages: &[Stage]) -> Vec<&'a Value> {
-    let mut cur: Vec<&Value> = live(rows).collect();
+fn run_stages<'a>(rows: &'a Rows, stages: &[Stage]) -> Vec<&'a Value> {
+    let mut cur: Vec<&Value> = rows.live().collect();
     for stage in stages {
         match stage {
             Stage::Where(f, op, v) => {
@@ -820,8 +864,8 @@ fn rows_json(rows: &[&Value]) -> Arc<Vec<u8>> {
     Arc::new(out)
 }
 
-fn aggregate_json(rows: &[Value], op: Agg, field: &str) -> Arc<Vec<u8>> {
-    aggregate_over(live(rows), op, field)
+fn aggregate_json(rows: &Rows, op: Agg, field: &str) -> Arc<Vec<u8>> {
+    aggregate_over(rows.live(), op, field)
 }
 
 fn aggregate_over<'a>(rows: impl Iterator<Item = &'a Value>, op: Agg, field: &str) -> Arc<Vec<u8>> {
@@ -895,8 +939,8 @@ fn sort_rows(rows: &mut Vec<&Value>, field: &str) {
     rows.extend(keyed.into_iter().map(|(_, row)| row));
 }
 
-fn sorted_json(rows: &[Value], field: &str) -> Arc<Vec<u8>> {
-    let mut cur: Vec<&Value> = live(rows).collect();
+fn sorted_json(rows: &Rows, field: &str) -> Arc<Vec<u8>> {
+    let mut cur: Vec<&Value> = rows.live().collect();
     sort_rows(&mut cur, field);
     rows_json(&cur)
 }
