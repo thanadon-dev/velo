@@ -1148,3 +1148,28 @@ fn deletes_keep_order_and_indexes_valid() {
     assert_eq!(body, r#"{"id":13,"name":"fresh"}"#);
     assert_eq!(call(&s, "GET", "/users/13", "").1, body);
 }
+
+#[test]
+fn drip_fed_headers_still_parse() {
+    let port = spawn();
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    c.set_nodelay(true).unwrap();
+
+    let mut req = String::from("GET /health HTTP/1.1\r\nHost: x\r\n");
+    for i in 0..60 {
+        req.push_str(&format!("X-Pad-{i}: {}\r\n", "p".repeat(60)));
+    }
+    req.push_str("Connection: close\r\n\r\n");
+    assert!(req.len() > 3500, "{}", req.len());
+
+    let started = std::time::Instant::now();
+    for chunk in req.as_bytes().chunks(7) {
+        c.write_all(chunk).unwrap();
+    }
+    let mut out = String::new();
+    c.read_to_string(&mut out).unwrap();
+    assert!(out.starts_with("HTTP/1.1 200 OK"), "{out}");
+    assert!(out.ends_with("ok"), "{out}");
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+}

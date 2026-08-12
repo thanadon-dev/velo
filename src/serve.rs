@@ -27,8 +27,8 @@ struct Head {
     error: Option<u16>,
 }
 
-fn parse_head(buf: &[u8]) -> Option<Head> {
-    let end = find_head_end(buf)?;
+fn parse_head(buf: &[u8], scanned: &mut usize) -> Option<Head> {
+    let end = find_head_end(buf, scanned)?;
     let line_end = buf.iter().position(|&c| c == b'\n')?;
     let line = strip_cr(&buf[..line_end]);
     let mut parts = line.splitn(3, |&c| c == b' ');
@@ -114,8 +114,8 @@ fn bad(end: usize, code: u16) -> Head {
     }
 }
 
-fn find_head_end(buf: &[u8]) -> Option<usize> {
-    let mut i = 0;
+fn find_head_end(buf: &[u8], scanned: &mut usize) -> Option<usize> {
+    let mut i = scanned.saturating_sub(3);
     while i + 1 < buf.len() {
         if buf[i] == b'\n' && buf[i + 1] == b'\n' {
             return Some(i + 2);
@@ -130,6 +130,7 @@ fn find_head_end(buf: &[u8]) -> Option<usize> {
         }
         i += 1;
     }
+    *scanned = buf.len();
     None
 }
 
@@ -252,6 +253,7 @@ struct Conn {
     want_out: bool,
     continued: bool,
     served: bool,
+    scanned: usize,
     peer: String,
     opened: Instant,
     last: Instant,
@@ -270,6 +272,7 @@ impl Conn {
             want_out: false,
             continued: false,
             served: false,
+            scanned: 0,
             peer: String::new(),
             opened: Instant::now(),
             last: Instant::now(),
@@ -340,7 +343,10 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
             c.compact();
             return;
         }
-        let Some(head) = parse_head(&c.inbuf[c.start..]) else {
+        let mut scanned = c.scanned;
+        let parsed = parse_head(&c.inbuf[c.start..], &mut scanned);
+        c.scanned = scanned;
+        let Some(head) = parsed else {
             if c.inbuf.len() - c.start > MAX_HEAD {
                 write_head(&mut c.out, 431, Ctype::Json, 0, false, headers);
                 c.closing = true;
@@ -361,6 +367,7 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
             write_head(&mut c.out, code, Ctype::Json, 0, false, headers);
             c.closing = true;
             c.start += need;
+            c.scanned = 0;
             c.compact();
             return;
         }
@@ -375,6 +382,7 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
             if !srv.allow(key) {
                 write_head(&mut c.out, 429, Ctype::Json, 0, head.keep_alive, headers);
                 c.start += need;
+                c.scanned = 0;
                 c.served = true;
                 if !head.keep_alive {
                     c.closing = true;
@@ -410,6 +418,7 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         }
         c.body = body;
         c.start += need;
+        c.scanned = 0;
         c.served = true;
         c.continued = false;
         if !head.keep_alive {
