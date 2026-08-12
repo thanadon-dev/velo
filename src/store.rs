@@ -5,13 +5,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-const SORT_CACHE_MAX: usize = 16;
+const CACHE_MAX: usize = 32;
 
 struct Snapshot {
     rows: Arc<Vec<Value>>,
     by_id: HashMap<String, usize>,
     all_json: OnceLock<Arc<[u8]>>,
-    sorted: Mutex<HashMap<String, Arc<[u8]>>>,
+    cache: Mutex<HashMap<String, Arc<[u8]>>>,
 }
 
 impl Snapshot {
@@ -27,19 +27,52 @@ impl Snapshot {
 
     fn invalidate(&mut self) {
         self.all_json = OnceLock::new();
-        self.sorted.get_mut().unwrap().clear();
+        self.cache.get_mut().unwrap().clear();
+    }
+
+    fn cached(&self, key: &str) -> Option<Arc<[u8]>> {
+        self.cache.lock().unwrap().get(key).cloned()
+    }
+
+    fn store_cached(&self, key: String, json: Arc<[u8]>) -> Arc<[u8]> {
+        let mut cache = self.cache.lock().unwrap();
+        if cache.len() >= CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(key, json.clone());
+        json
+    }
+
+    fn filtered_json(&self, field: &str, want: &str) -> Arc<[u8]> {
+        let key = format!("w\0{field}\0{want}");
+        if let Some(hit) = self.cached(&key) {
+            return hit;
+        }
+        let mut out = Vec::with_capacity(256);
+        out.push(b'[');
+        let mut n = 0;
+        for row in self.rows.iter().filter(|r| field_eq(r, field, want)) {
+            if n > 0 {
+                out.push(b',');
+            }
+            row.write_json(&mut out);
+            n += 1;
+        }
+        out.push(b']');
+        self.store_cached(key, Arc::from(out.as_slice()))
     }
 
     fn sorted_json(&self, field: &str) -> Arc<[u8]> {
-        if let Some(hit) = self.sorted.lock().unwrap().get(field) {
-            return hit.clone();
+        let key = format!("o\0{field}");
+        if let Some(hit) = self.cached(&key) {
+            return hit;
         }
-        let (key, desc) = match field.strip_prefix('-') {
+        let (sort_field, desc) = match field.strip_prefix('-') {
             Some(f) => (f, true),
             None => (field, false),
         };
         let mut keyed: Vec<(SortKey, &Value)> =
-            self.rows.iter().map(|r| (sort_key(r.get_ref(key)), r)).collect();
+            self.rows.iter().map(|r| (sort_key(r.get_ref(sort_field)), r)).collect();
         keyed.sort_by(|(a, _), (b, _)| {
             let ord = match (a, b) {
                 (SortKey::Num(m), SortKey::Num(n)) => m.partial_cmp(n).unwrap_or(Ordering2::Equal),
@@ -62,13 +95,7 @@ impl Snapshot {
             row.write_json(&mut out);
         }
         out.push(b']');
-        let json: Arc<[u8]> = Arc::from(out.as_slice());
-        let mut cache = self.sorted.lock().unwrap();
-        if cache.len() >= SORT_CACHE_MAX {
-            cache.clear();
-        }
-        cache.insert(field.to_string(), json.clone());
-        json
+        self.store_cached(key, Arc::from(out.as_slice()))
     }
 }
 
@@ -87,7 +114,7 @@ impl Collection {
                 rows: Arc::new(Vec::new()),
                 by_id: HashMap::new(),
                 all_json: OnceLock::new(),
-                sorted: Mutex::new(HashMap::new()),
+                cache: Mutex::new(HashMap::new()),
             }),
             next_id: AtomicU64::new(0),
             dirty,
@@ -131,10 +158,7 @@ impl Collection {
     }
 
     pub fn filter(&self, field: &str, want: &str) -> Value {
-        let s = self.snap.read().unwrap();
-        let rows: Vec<Value> =
-            s.rows.iter().filter(|r| field_eq(r, field, want)).cloned().collect();
-        Value::Arr(Arc::new(rows))
+        Value::Raw(self.snap.read().unwrap().filtered_json(field, want))
     }
 
     pub fn first(&self, field: &str, want: &str) -> Option<Value> {

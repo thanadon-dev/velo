@@ -1,6 +1,6 @@
 # Velo
 
-**v0.18.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.18.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -75,7 +75,7 @@ Built-in store (`db.<collection>.<op>`):
 | `count()` | number | |
 | `find(key)` | row | 404 |
 | `first(field, value)` | first matching row | 404 |
-| `where(field, value)` | array of matching rows, linear scan | `[]` |
+| `where(field, value)` | array of matching rows; linear scan, cached per field and value | `[]` |
 | `page(offset, limit)` | slice of rows, `limit` 0 means "to the end" | `[]` |
 | `order(field)` | rows sorted by `field`, `"-field"` for descending | `[]` |
 | `create(value)` | the stored row; `id` is generated unless the value carries one | 400 on an empty body, 409 on a duplicate `id` |
@@ -158,7 +158,7 @@ Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothin
 - **Const folding.** Routes whose expression touches no param, body, or store are evaluated at compile time and stored as ready-to-send bytes. `GET /health => "ok"` costs one `memcpy` per request.
 - **Router.** Per-method exact map (FNV-hashed) for static paths, a segment tree for `:param` paths. Params are borrowed slices of the request line, never copied.
 - **Values.** `Value` is an enum with `Arc` payloads, so returning a whole collection is a refcount bump, not a deep copy. JSON is written straight into the connection's output buffer.
-- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and of up to 16 sort orders; all of it is rebuilt only when the collection is written to. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. The cost is holding rows twice in memory.
+- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and up to 32 sort orders and filters; all of it is rebuilt only when the collection is written to. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. The cost is holding rows twice in memory.
 - **No allocation for key lookups.** `db.users.find(id)` on a plain path param hashes the slice of the request line directly; nothing is copied unless the param is percent-encoded.
 - **Store.** Copy-on-write snapshot behind an `RwLock`; readers clone an `Arc<Vec<Value>>` and release the lock immediately.
 - **HTTP.** Hand-written HTTP/1.1: keep-alive by default, request pipelining, per-connection read/write/body buffers reused across requests, batched writes. `Date` is formatted once per second per worker, not per response. `Expect: 100-continue` gets its interim response as soon as the headers arrive. Chunked bodies are refused with 411, conflicting `Content-Length` headers with 400, oversized bodies with 413, oversized headers with 431.
@@ -183,33 +183,35 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.18.0. The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.18.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
-`-c 50`, one request in flight per connection — this is client-bound, both processes fight for the same 4 cores:
+`-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
 | route | kind | req/s |
 | --- | --- | --- |
-| `/version` | const fold, object | 89 400 |
-| `/users/:id` | store lookup | 88 800 |
-| `/stats` | 2 store counts | 87 600 |
-| `/health` | const fold | 85 300 |
-| `/teams/:tid/members/:mid` | 2 params | 74 000 |
-| `POST /users` | JSON parse + insert | 57 700 |
-| `/users` (200 rows, 9 kB) | cached list | 56 000 |
-| `/users/page` (20 of 200) | slice + render | 54 500 |
-| `/users/sorted` | cached sort | 49 900 |
+| `/health` | const fold | 88 800 |
+| `/users/:id` | store lookup | 88 000 |
+| `/stats` | 2 store counts | 80 700 |
+| `/users` (501 rows, 16 kB) | cached list | 74 300 |
+| `/users/by/team` | cached filter | 68 300 |
+| `/users/sorted` | cached sort | 60 700 |
+| `/users/page` (20 of 501) | slice + render | 54 200 |
+| `POST /users` | JSON parse + insert | 53 500 |
 
-`-c 8 -p 32`, pipelined — this is what the server itself can do, with 500 rows in `users`:
+`-c 8 -p 32`, pipelined — what the server itself can do:
 
-| route | req/s |
-| --- | --- |
-| `/users/:id` | 968 000 |
-| `/health` | 867 000 |
-| `/users/by/team` (1 of 500 matches) | 82 000 |
-| `/users` (500 rows, 18 kB) | 62 000 |
-| `/users/sorted` (cached sort) | 56 000 |
+| route | req/s | transfer |
+| --- | --- | --- |
+| `/health` | 862 000 | 122 MB/s |
+| `/users/:id` | 786 000 | 127 MB/s |
+| `/stats` | 417 000 | 65 MB/s |
+| `/users` (16 kB each) | 304 000 | 5.0 GB/s |
+| `/users/sorted` | 139 000 | 2.3 GB/s |
+| `/users/by/team` | 97 000 | 16 MB/s |
 
-In-process, no sockets (`velomicro 500`): `find` 0.23 us, `all` 0.35 us, `order` 0.64 us, `where` 7.1 us per call.
+In-process, no sockets (`velomicro 5000`): `find` 0.23 us, `where` 1.19 us, `all` 5.8 us, `order` 6.4 us per call.
+
+Run read benchmarks before write benchmarks, or restart in between: a `POST` run at 50k req/s adds a hundred thousand rows and every later list measurement is then measuring a much bigger response.
 
 Connection scaling (`/health`), server RSS while serving:
 
@@ -234,7 +236,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-47 tests (40 integration + 5 fuzz + 2 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+49 tests (41 integration + 5 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 `tests/fuzz.rs` adds four deterministic robustness tests: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, and oversized header and body requests. They also cover slow drip-feeding clients. They assert the process never panics and that the server still answers a normal request afterwards.
 
@@ -278,6 +280,8 @@ WantedBy=default.target
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.18.1** — `where` results are cached per field and value alongside the sorted and full-list caches, all cleared on any write (`where` 77 us to 1.2 us per call on 5 000 rows). `velobench` now parses `Content-Length` instead of scanning every byte, so large responses measure the server rather than the client.
 
 **v0.18.0** — `when <condition> or <status>` picks the status a failed guard answers, so a guard doubles as body validation (`when body.name or 400`). `velo routes` now prints each route guard.
 

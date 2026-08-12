@@ -715,3 +715,24 @@ fn guard_status_override() {
 
     assert!(compile("GET /a => 1 when 1 or 99", None).is_err());
 }
+
+#[test]
+fn where_cache_invalidates() {
+    let s = server();
+    call(&s, "POST", "/users", r#"{"name":"a","team":"red"}"#);
+    assert_eq!(call(&s, "GET", "/search?name=a", "").1, r#"[{"id":1,"name":"a","team":"red"}]"#);
+    assert_eq!(call(&s, "GET", "/search?name=a", "").1, r#"[{"id":1,"name":"a","team":"red"}]"#);
+    call(&s, "POST", "/users", r#"{"name":"a","team":"blue"}"#);
+    assert_eq!(
+        call(&s, "GET", "/search?name=a", "").1,
+        r#"[{"id":1,"name":"a","team":"red"},{"id":2,"name":"a","team":"blue"}]"#
+    );
+    call(&s, "PUT", "/users/1", r#"{"name":"z"}"#);
+    assert_eq!(call(&s, "GET", "/search?name=a", "").1, r#"[{"id":2,"name":"a","team":"blue"}]"#);
+    call(&s, "DELETE", "/users/2", "");
+    assert_eq!(call(&s, "GET", "/search?name=a", "").1, "[]");
+    for i in 0..40 {
+        call(&s, "GET", &format!("/search?name=miss{i}"), "");
+    }
+    assert_eq!(call(&s, "GET", "/search?name=z", "").1, r#"[{"id":1,"name":"z","team":"red"}]"#);
+}

@@ -145,6 +145,7 @@ fn worker(
         batch.extend_from_slice(&req);
     }
     let mut buf = vec![0u8; 64 << 10];
+    let mut counter = Counter::default();
     let mut local_done = 0u64;
     let mut local_bytes = 0u64;
     while !stop.load(Ordering::Relaxed) {
@@ -162,7 +163,7 @@ fn worker(
                 }
                 Ok(n) => {
                     local_bytes += n as u64;
-                    seen += count_responses(&buf[..n]);
+                    seen += counter.feed(&buf[..n]);
                 }
                 Err(_) => {
                     errors.fetch_add(1, Ordering::Relaxed);
@@ -184,27 +185,121 @@ fn worker(
     lat
 }
 
-fn count_responses(b: &[u8]) -> usize {
-    let needle = b"HTTP/1.";
-    let mut n = 0;
-    let mut i = 0;
-    while i + needle.len() <= b.len() {
-        if &b[i..i + needle.len()] == needle {
-            n += 1;
-            i += needle.len();
-        } else {
-            i += 1;
+#[derive(Default)]
+struct Counter {
+    head: Vec<u8>,
+    body_left: usize,
+}
+
+impl Counter {
+    fn feed(&mut self, mut chunk: &[u8]) -> usize {
+        let mut done = 0;
+        while !chunk.is_empty() {
+            if self.body_left > 0 {
+                let take = self.body_left.min(chunk.len());
+                self.body_left -= take;
+                chunk = &chunk[take..];
+                if self.body_left == 0 {
+                    done += 1;
+                }
+                continue;
+            }
+            if self.head.is_empty() {
+                let Some(end) = find(chunk, b"\r\n\r\n") else {
+                    self.head.extend_from_slice(chunk);
+                    return done;
+                };
+                let len = content_length(&chunk[..end]);
+                chunk = &chunk[end + 4..];
+                if len == 0 {
+                    done += 1;
+                } else {
+                    self.body_left = len;
+                }
+                continue;
+            }
+            self.head.extend_from_slice(chunk);
+            let Some(end) = find(&self.head, b"\r\n\r\n") else {
+                return done;
+            };
+            let consumed = chunk.len() - (self.head.len() - (end + 4));
+            chunk = &chunk[consumed..];
+            let len = content_length(&self.head[..end]);
+            self.head.clear();
+            if len == 0 {
+                done += 1;
+            } else {
+                self.body_left = len;
+            }
+        }
+        done
+    }
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if hay.len() < needle.len() {
+        return None;
+    }
+    let last = needle[needle.len() - 1];
+    let mut i = needle.len() - 1;
+    while i < hay.len() {
+        if hay[i] == last && &hay[i + 1 - needle.len()..=i] == needle {
+            return Some(i + 1 - needle.len());
+        }
+        i += 1;
+    }
+    None
+}
+
+fn content_length(head: &[u8]) -> usize {
+    let mut pos = 0;
+    while pos < head.len() {
+        let end =
+            head[pos..].iter().position(|&c| c == b'\n').map(|j| pos + j).unwrap_or(head.len());
+        let line = &head[pos..end];
+        pos = end + 1;
+        let Some(colon) = line.iter().position(|&c| c == b':') else { continue };
+        let name: Vec<u8> = line[..colon].iter().map(|c| c.to_ascii_lowercase()).collect();
+        if name == b"content-length" {
+            return std::str::from_utf8(&line[colon + 1..])
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(0);
         }
     }
-    n
+    0
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
+    fn counts_large_stream_in_chunks() {
+        let body = "x".repeat(16_000);
+        let one = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\nDate: Tue, 12 Aug 2026 03:20:00 GMT\r\n\r\n{body}",
+            body.len()
+        );
+        let stream = one.repeat(20).into_bytes();
+        let mut c = super::Counter::default();
+        let mut total = 0;
+        for chunk in stream.chunks(64 << 10) {
+            total += c.feed(chunk);
+        }
+        assert_eq!(total, 20);
+    }
+
+    #[test]
     fn counts_pipelined_responses() {
+        let mut c = super::Counter::default();
         let b = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
-        assert_eq!(super::count_responses(b), 2);
-        assert_eq!(super::count_responses(b"ok"), 0);
+        assert_eq!(c.feed(b), 2);
+
+        let mut c = super::Counter::default();
+        assert_eq!(c.feed(b"HTTP/1.1 200 OK\r\nContent-Len"), 0);
+        assert_eq!(c.feed(b"gth: 4\r\n\r\nab"), 0);
+        assert_eq!(c.feed(b"cd"), 1);
+
+        let mut c = super::Counter::default();
+        assert_eq!(c.feed(b"HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n"), 1);
     }
 }
