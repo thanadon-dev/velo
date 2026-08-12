@@ -499,7 +499,16 @@ cargo test
 
 ## CI
 
-`./check.sh` is the gate: `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the full test suite, a release build, all three examples compiled, a performance guard against `bench/baseline.json`, and a boot smoke test with a short benchmark. `.github/workflows/ci.yml` runs exactly the same steps on push.
+`./check.sh` is the gate: `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the full test suite, a release build, all three examples compiled, a performance guard against `bench/baseline.json`, and a boot smoke test with a short benchmark. `.github/workflows/ci.yml` runs the same steps on GitHub, but it is set to `workflow_dispatch` only: this account's Actions are blocked ("the job was not started because your account is locked due to a billing issue"), so every automatic run failed in three seconds without executing a step and marked good commits red. Once billing is settled, restore the trigger to run it on every push:
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+```
+
+Until then `./check.sh` is the real gate, and it is what every release here has passed.
 
 ## Errors
 
