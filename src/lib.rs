@@ -32,6 +32,7 @@ pub fn compile_file(
         store: store.clone(),
         includes: Vec::new(),
         sources: Vec::new(),
+        assets: Vec::new(),
     };
     load_into(&mut prog, path, &store, &mut seen)?;
     if prog.routes.is_empty() {
@@ -61,6 +62,7 @@ fn load_into(
     let part = compile_in(&src, Some(store.clone()), &dir)
         .map_err(|e| format!("{}: {e}", path.display()))?;
     let label: std::sync::Arc<str> = std::sync::Arc::from(path.display().to_string().as_str());
+    prog.assets.extend(part.assets);
     prog.routes.extend(part.routes.into_iter().map(|mut r| {
         r.source = Some(label.clone());
         r

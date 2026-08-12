@@ -71,7 +71,7 @@ fn watch(args: &[String]) {
     let Some(main_file) = args.get(2).cloned() else { usage(2) };
     let sources = |current: &Vec<PathBuf>| -> Vec<PathBuf> {
         match compile_file(std::path::Path::new(&main_file), None) {
-            Ok(p) => p.sources,
+            Ok(p) => p.sources.into_iter().chain(p.assets).collect(),
             Err(_) if !current.is_empty() => current.clone(),
             Err(_) => vec![PathBuf::from(&main_file)],
         }

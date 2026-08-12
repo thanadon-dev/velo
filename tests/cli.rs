@@ -527,3 +527,38 @@ POST /c3 => body.name when body.name and header.x_key else 400\n";
     assert!(String::from_utf8_lossy(&out.stdout).contains("20 routes"));
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn watch_follows_files_pulled_in_by_file() {
+    let dir = tmp("watchassets");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write(&dir.join("page.html"), "<h1>one</h1>\n");
+    write(&dir.join("app.velo"), "GET /health => \"ok\"\nGET / => file(\"page.html\")\n");
+
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(dir.join("app.velo"))
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--watch")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    assert!(get(port, "/").ends_with("<h1>one</h1>\n"));
+
+    write(&dir.join("page.html"), "<h1>two</h1>\n");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if get(port, "/").ends_with("<h1>two</h1>\n") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "watch ignored the html file");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    stop(&mut child, "-TERM");
+    let _ = std::fs::remove_dir_all(&dir);
+}

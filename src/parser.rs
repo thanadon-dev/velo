@@ -77,6 +77,7 @@ pub struct Program {
     pub store: Arc<Store>,
     pub includes: Vec<String>,
     pub sources: Vec<std::path::PathBuf>,
+    pub assets: Vec<std::path::PathBuf>,
 }
 
 pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> {
@@ -102,6 +103,7 @@ pub fn compile_in(
         header_fields: Vec::new(),
         base: base.to_path_buf(),
         file_ctype: None,
+        assets: Vec::new(),
     };
     p.advance().map_err(|e| with_source(src, e))?;
     let mut routes = Vec::new();
@@ -118,7 +120,8 @@ pub fn compile_in(
     if routes.is_empty() && includes.is_empty() {
         return Err("no routes defined".to_string());
     }
-    let mut prog = Program { routes, store, includes, sources: Vec::new() };
+    let mut prog =
+        Program { routes, store, includes, sources: Vec::new(), assets: p.assets.clone() };
     bake_openapi(&mut prog);
     Ok(prog)
 }
@@ -173,6 +176,7 @@ struct Parser<'a> {
     header_fields: Vec<String>,
     base: std::path::PathBuf,
     file_ctype: Option<crate::http::Ctype>,
+    assets: Vec<std::path::PathBuf>,
 }
 
 impl<'a> Parser<'a> {
@@ -475,6 +479,7 @@ impl<'a> Parser<'a> {
                         format!("line {}:{}: {}: {e}", head.line, head.col, path.display())
                     })?;
                     self.file_ctype = Some(crate::http::ctype_for(&rel));
+                    self.assets.push(path);
                     return Ok(Expr::Const(Value::str(&text)));
                 }
                 "openapi" => Builtin::Openapi,
