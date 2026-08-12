@@ -1,6 +1,6 @@
 # Velo
 
-**v1.4.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.4.2** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -540,6 +540,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.4.2** — a cached read could go stale. A reader that missed the cache checked the collection version, then took the lock to store its result; a writer landing between those two steps cleared the cache and bumped the version, and the reader then wrote its now-outdated bytes into the cache it had just been invalidated out of. Every later request got the stale answer until the next write. The check and the store now happen under the same read lock, which a committing writer cannot hold. This affected every cached read shape since caching was introduced, not only chains. The stress test added in v1.4.1 caught it within minutes of being written, and now runs three rounds; against the unfixed build it fails about a third of the time on its own and more often under load.
 
 **v1.4.1** — a stress test for chained reads: five readers on different chain shapes assert their own invariants (a page never exceeds its limit, never leaks another team's row, never comes back unsorted) while three writers insert and one deletes, then every chain is checked against the full list. A 150-second soak over HTTP with 24 reader connections and constant writes finished with zero errors and counts that add up, and memory tracked the data at 580 bytes a row.
 

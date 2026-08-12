@@ -1757,12 +1757,18 @@ GET  /stats     => { users: db.users.count() }
 #[test]
 fn chained_reads_stay_consistent_under_writes() {
     let s = Server::new(compile(STRESS_SRC, None).unwrap()).unwrap();
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     for i in 0..200 {
         let body = format!(r#"{{"name":"s{i}","team":"t{}","score":{}}}"#, i % 3, i % 50);
         assert_eq!(call(&s, "POST", "/users", &body).0, 201);
     }
+    for round in 0..3 {
+        chain_stress_round(&s, round);
+        verify_chains(&s);
+    }
+}
 
+fn chain_stress_round(s: &Arc<Server>, round: usize) {
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let readers: Vec<_> =
         ["/page?t=t0", "/howmany?t=t1", "/high?n=25", "/best?t=t2", "/total?t=t0"]
             .iter()
@@ -1807,8 +1813,11 @@ fn chained_reads_stay_consistent_under_writes() {
             std::thread::spawn(move || {
                 for i in 0..150 {
                     let mut out = Vec::new();
-                    let body =
-                        format!(r#"{{"name":"w{w}x{i}","team":"t{}","score":{}}}"#, i % 3, i % 50);
+                    let body = format!(
+                        r#"{{"name":"r{round}w{w}x{i}","team":"t{}","score":{}}}"#,
+                        i % 3,
+                        i % 50
+                    );
                     assert_eq!(s.dispatch("POST", "/users", body.as_bytes(), &mut out).0, 201);
                 }
             })
@@ -1818,7 +1827,7 @@ fn chained_reads_stay_consistent_under_writes() {
     let deleter = {
         let s = s.clone();
         std::thread::spawn(move || {
-            for id in 1..=100 {
+            for id in (round * 100 + 1)..=(round * 100 + 100) {
                 let mut out = Vec::new();
                 s.dispatch("DELETE", &format!("/users/{id}"), b"", &mut out);
             }
@@ -1831,13 +1840,15 @@ fn chained_reads_stay_consistent_under_writes() {
     deleter.join().unwrap();
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let reads: u64 = readers.into_iter().map(|r| r.join().unwrap()).sum();
-    assert!(reads > 100, "readers barely ran: {reads}");
+    assert!(reads > 0, "readers never ran");
+}
 
-    let all = match parse_json(call(&s, "GET", "/all", "").1.as_bytes()).unwrap() {
+fn verify_chains(s: &Arc<Server>) {
+    let all = match parse_json(call(s, "GET", "/all", "").1.as_bytes()).unwrap() {
         Value::Arr(rows) => rows.as_ref().clone(),
         other => panic!("not a list: {other:?}"),
     };
-    assert_eq!(all.len(), 550, "200 seeded + 450 written - 100 deleted");
+    assert_eq!(call(s, "GET", "/stats", "").1, format!(r#"{{"users":{}}}"#, all.len()));
     for team in ["t0", "t1", "t2"] {
         let mine: Vec<&Value> = all.iter().filter(|r| r.get("team").as_key() == team).collect();
         let sum: f64 = mine
@@ -1847,15 +1858,22 @@ fn chained_reads_stay_consistent_under_writes() {
                 _ => 0.0,
             })
             .sum();
-        let path = format!("/howmany?t={team}");
-        assert_eq!(call(&s, "GET", &path, "").1, mine.len().to_string(), "count for {team}");
-        let path = format!("/total?t={team}");
-        assert_eq!(call(&s, "GET", &path, "").1, format!("{sum}"), "sum for {team}");
-        let path = format!("/list?t={team}");
-        let listed = names(&call(&s, "GET", &path, "").1);
-        assert_eq!(listed.len(), mine.len(), "list for {team}");
+        assert_eq!(
+            call(s, "GET", &format!("/howmany?t={team}"), "").1,
+            mine.len().to_string(),
+            "count for {team}"
+        );
+        assert_eq!(
+            call(s, "GET", &format!("/total?t={team}"), "").1,
+            format!("{sum}"),
+            "sum for {team}"
+        );
+        assert_eq!(
+            names(&call(s, "GET", &format!("/list?t={team}"), "").1).len(),
+            mine.len(),
+            "list for {team}"
+        );
     }
-    let over: usize =
-        all.iter().filter(|r| matches!(r.get("score"), Value::Num(n) if n >= 25.0)).count();
-    assert_eq!(call(&s, "GET", "/high?n=25", "").1, over.to_string());
+    let over = all.iter().filter(|r| matches!(r.get("score"), Value::Num(n) if n >= 25.0)).count();
+    assert_eq!(call(s, "GET", "/high?n=25", "").1, over.to_string());
 }

@@ -220,11 +220,12 @@ impl Collection {
                     s.live().cloned().collect()
                 };
                 let json = build(&rows);
-                if self.version.load(Ordering::Acquire) == version {
-                    with_key4(&tag, kind, a, b, |key| {
-                        self.snap.read().unwrap().store_cached(key, json.clone())
-                    });
-                }
+                with_key4(&tag, kind, a, b, |key| {
+                    let s = self.snap.read().unwrap();
+                    if self.version.load(Ordering::Acquire) == version {
+                        s.store_cached(key, json.clone());
+                    }
+                });
                 json
             }
         };
