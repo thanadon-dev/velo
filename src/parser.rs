@@ -613,6 +613,15 @@ impl<'a> Parser<'a> {
                 let k = Box::new(args.next().unwrap());
                 Op::Update(k, Box::new(args.next().unwrap()))
             }
+            "clear" => {
+                want(0)?;
+                Op::Clear
+            }
+            "delete_where" => {
+                want(2)?;
+                let f = Box::new(args.next().unwrap());
+                Op::DeleteWhere(f, Box::new(args.next().unwrap()))
+            }
             "upsert" => {
                 want(2)?;
                 let k = Box::new(args.next().unwrap());

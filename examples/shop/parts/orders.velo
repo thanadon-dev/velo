@@ -2,4 +2,5 @@ GET  /orders                => db.orders.page(query.offset, query.limit)
 GET  /orders/:id            => db.orders.find(id)
 POST /orders                => db.orders.create({ id: uuid(), at: now(), item: body.item, amount: body.amount, customer: header.x_customer }) when body.item else 400
 DELETE /orders/:id          => db.orders.delete(id) : 204
+DELETE /orders/of/:customer => db.orders.delete_where("customer", customer)
 GET  /orders/mine           => db.orders.where("customer", header.x_customer) when header.x_customer else 400

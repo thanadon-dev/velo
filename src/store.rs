@@ -448,6 +448,43 @@ impl Collection {
         Some(row)
     }
 
+    pub fn clear(&self) -> usize {
+        let mut s = self.snap.write().unwrap();
+        let removed = s.len();
+        s.rows = Arc::new(Vec::new());
+        s.holes = 0;
+        s.by_id.clear();
+        s.invalidate();
+        self.bump();
+        self.next_id.store(0, Ordering::Relaxed);
+        if removed > 0 {
+            self.touch();
+        }
+        removed
+    }
+
+    pub fn delete_where(&self, field: &str, want: &str) -> usize {
+        let mut s = self.snap.write().unwrap();
+        let hits: Vec<String> =
+            s.live().filter(|r| field_eq(r, field, want)).map(|r| r.get("id").as_key()).collect();
+        if hits.is_empty() {
+            return 0;
+        }
+        for id in &hits {
+            if let Some(i) = s.by_id.remove(id) {
+                Arc::make_mut(&mut s.rows)[i] = Value::Null;
+                s.holes += 1;
+            }
+        }
+        if s.holes * 2 > s.rows.len() {
+            s.compact();
+        }
+        s.invalidate();
+        self.bump();
+        self.touch();
+        hits.len()
+    }
+
     pub fn upsert(&self, id: &str, value: Value) -> Value {
         if let Some(row) = self.update(id, value.clone()) {
             return row;

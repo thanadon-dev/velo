@@ -14,6 +14,8 @@ GET  /users/:id       => db.users.find(id)
 POST /users           => db.users.create(body)
 PUT  /users/:id       => db.users.update(id, body)
 PUT  /put/:id         => db.users.upsert(id, body)
+DELETE /wipe          => db.users.clear()
+DELETE /team/:t       => db.users.delete_where("team", t)
 PUT  /keyed/:id       => db.keyed.upsert(id, body)
 DELETE /users/:id     => db.users.delete(id)
 GET  /stats           => { users: db.users.count() }
@@ -1360,4 +1362,27 @@ fn upsert_creates_or_merges() {
     assert_eq!(body, r#"{"id":1,"name":"auto"}"#);
     assert_eq!(call(&s, "GET", "/users", "").1.matches(r#""id""#).count(), 2);
     assert_eq!(call(&s, "PUT", "/put/7", "").0, 400);
+}
+
+#[test]
+fn bulk_deletes() {
+    let s = server();
+    for i in 0..6 {
+        call(&s, "POST", "/users", &format!(r#"{{"name":"n{i}","team":"t{}"}}"#, i % 3));
+    }
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":6}"#);
+
+    assert_eq!(call(&s, "DELETE", "/team/t1", "").1, r#"{"deleted":2}"#);
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":4}"#);
+    assert_eq!(call(&s, "GET", "/users/2", "").0, 404);
+    assert_eq!(call(&s, "GET", "/users/1", "").1, r#"{"id":1,"name":"n0","team":"t0"}"#);
+    assert_eq!(call(&s, "DELETE", "/team/t1", "").1, r#"{"deleted":0}"#);
+    assert_eq!(call(&s, "GET", "/users", "").1.matches(r#""id""#).count(), 4);
+
+    assert_eq!(call(&s, "DELETE", "/wipe", "").1, r#"{"deleted":4}"#);
+    assert_eq!(call(&s, "GET", "/users", "").1, "[]");
+    assert_eq!(call(&s, "DELETE", "/wipe", "").1, r#"{"deleted":0}"#);
+    let (_, body, _) = call(&s, "POST", "/users", r#"{"name":"fresh"}"#);
+    assert_eq!(body, r#"{"id":1,"name":"fresh"}"#);
+    assert_eq!(call(&s, "GET", "/sorted", "").1, r#"[{"id":1,"name":"fresh"}]"#);
 }

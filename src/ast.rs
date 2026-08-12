@@ -96,6 +96,8 @@ pub enum Op {
     Update(Box<Expr>, Box<Expr>),
     Upsert(Box<Expr>, Box<Expr>),
     Delete(Box<Expr>),
+    Clear,
+    DeleteWhere(Box<Expr>, Box<Expr>),
 }
 
 impl Expr {
@@ -238,6 +240,12 @@ impl Expr {
                         val => Ok(col.upsert(&key, val)),
                     }
                 }
+                Op::Clear => Ok(deleted(col.clear())),
+                Op::DeleteWhere(f, v) => {
+                    let field = f.eval(c)?.as_key();
+                    let want = v.eval(c)?.as_key();
+                    Ok(deleted(col.delete_where(&field, &want)))
+                }
                 Op::Delete(k) => {
                     let hit = match fast_key(k, c) {
                         Some(raw) => col.delete(raw),
@@ -298,6 +306,10 @@ pub fn apply(op: BinOp, l: &Value, r: &Value) -> Value {
         BinOp::Le => Value::Bool(a <= b),
         BinOp::Ge => Value::Bool(a >= b),
     }
+}
+
+fn deleted(n: usize) -> Value {
+    Value::obj(vec![(Arc::from("deleted"), Value::Num(n as f64))])
 }
 
 pub fn truthy(v: &Value) -> bool {
