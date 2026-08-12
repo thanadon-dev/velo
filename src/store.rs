@@ -175,9 +175,10 @@ impl Snapshot {
 
 static NEXT_COLLECTION_ID: AtomicU64 = AtomicU64::new(0);
 
+type LocalCache = std::cell::RefCell<HashMap<String, (u64, Arc<[u8]>)>>;
+
 thread_local! {
-    static LOCAL_CACHE: std::cell::RefCell<HashMap<String, (u64, Arc<[u8]>)>> =
-        std::cell::RefCell::new(HashMap::new());
+    static LOCAL_CACHE: LocalCache = std::cell::RefCell::new(HashMap::new());
 }
 
 const LOCAL_CACHE_MAX: usize = 64;
