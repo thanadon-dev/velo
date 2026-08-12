@@ -69,22 +69,6 @@ impl Snapshot {
         }
     }
 
-    fn json(&self) -> Arc<Vec<u8>> {
-        if let Some(json) = &self.all_json {
-            return json.clone();
-        }
-        let mut out = Vec::with_capacity(self.len() * 64 + 2);
-        out.push(b'[');
-        for (n, row) in self.live().enumerate() {
-            if n > 0 {
-                out.push(b',');
-            }
-            row.write_json(&mut out);
-        }
-        out.push(b']');
-        Arc::new(out)
-    }
-
     fn append_json(&mut self, row: &Value) {
         let Some(mut old) = self.all_json.take() else { return };
         if old.len() < 2 {
