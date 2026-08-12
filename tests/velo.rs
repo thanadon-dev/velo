@@ -1396,3 +1396,28 @@ fn bulk_deletes() {
     assert_eq!(body, r#"{"id":1,"name":"fresh"}"#);
     assert_eq!(call(&s, "GET", "/sorted", "").1, r#"[{"id":1,"name":"fresh"}]"#);
 }
+
+#[test]
+fn protocol_edge_cases() {
+    let port = spawn();
+    let ask = |req: &str| raw(port, req.as_bytes());
+
+    let res = ask("GET /health HTTP/1.0\r\n\r\n");
+    assert!(res.starts_with("HTTP/1.1 200 OK"), "{res}");
+    assert!(res.contains("Connection: close"), "1.0 should close by default: {res}");
+
+    let res = ask("GET /health HTTP/1.0\r\nConnection: keep-alive\r\nHost: x\r\n\r\n");
+    assert!(res.contains("Connection: keep-alive"), "{res}");
+
+    let res = ask("GET /health HTTP/1.1\r\nConnection: close\r\n\r\n");
+    assert!(res.ends_with("ok"), "missing Host is still served: {res}");
+
+    let res = ask("get /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    assert!(res.starts_with("HTTP/1.1 405"), "methods are case sensitive: {res}");
+
+    let res = ask("GET http://x/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    assert!(res.starts_with("HTTP/1.1 404"), "absolute-form targets are not routed: {res}");
+
+    let res = ask("OPTIONS * HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    assert!(res.starts_with("HTTP/1.1 404"), "{res}");
+}
