@@ -19,7 +19,9 @@ pub struct Ctx<'a> {
     pub nparams: usize,
     pub body: Value,
     pub query: Value,
+    pub query_raw: &'a str,
     pub header: Value,
+    pub header_raw: &'a [u8],
 }
 
 impl<'a> Default for Ctx<'a> {
@@ -29,7 +31,9 @@ impl<'a> Default for Ctx<'a> {
             nparams: 0,
             body: Value::Null,
             query: Value::Null,
+            query_raw: "",
             header: Value::Null,
+            header_raw: &[],
         }
     }
 }
@@ -49,7 +53,9 @@ pub enum Expr {
     Param(usize),
     Body,
     Query,
+    QueryField(Arc<str>),
     Header,
+    HeaderField(Arc<str>),
     Field(Box<Expr>, Arc<str>),
     Object(Vec<(Arc<str>, Expr)>),
     Array(Vec<Expr>),
@@ -165,7 +171,9 @@ impl Expr {
             Expr::Param(i) => Ok(decode_param(c.param(*i))),
             Expr::Body => Ok(c.body.clone()),
             Expr::Query => Ok(c.query.clone()),
+            Expr::QueryField(name) => Ok(query_value(c.query_raw, name)),
             Expr::Header => Ok(c.header.clone()),
+            Expr::HeaderField(name) => Ok(crate::http::header_value(c.header_raw, name)),
             Expr::Field(base, key) => Ok(base.eval(c)?.get(key)),
             Expr::Object(fields) => {
                 let mut out = Vec::with_capacity(fields.len());
@@ -503,6 +511,24 @@ fn hex(c: u8) -> Option<u8> {
         b'A'..=b'F' => Some(c - b'A' + 10),
         _ => None,
     }
+}
+
+pub fn query_value(raw: &str, name: &str) -> Value {
+    for pair in raw.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, val) = pair.split_once('=').unwrap_or((pair, ""));
+        let hit = if key.contains('%') || key.contains('+') {
+            percent_decode(key) == name
+        } else {
+            key == name
+        };
+        if hit {
+            return decode_param(val);
+        }
+    }
+    Value::Null
 }
 
 pub fn parse_query(q: &str) -> Value {

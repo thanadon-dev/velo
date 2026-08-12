@@ -182,10 +182,12 @@ impl Server {
             return self.fail(e, out);
         };
         let rt = &self.routes[idx];
-        if rt.uses_query {
+        ctx.query_raw = query;
+        if rt.query_obj {
             ctx.query = crate::parser::parse_query(query);
         }
-        if rt.uses_header {
+        ctx.header_raw = raw_headers;
+        if rt.header_obj {
             ctx.header = parse_headers(raw_headers);
         }
         if rt.uses_body && !raw_body.is_empty() {
@@ -362,6 +364,38 @@ pub fn etag_of(body: &[u8]) -> u64 {
         h = h.wrapping_mul(0x100000001b3);
     }
     h ^ (body.len() as u64)
+}
+
+pub fn header_value(raw: &[u8], name: &str) -> Value {
+    let mut pos = match raw.iter().position(|&c| c == b'\n') {
+        Some(i) => i + 1,
+        None => return Value::Null,
+    };
+    while pos < raw.len() {
+        let nl = match raw[pos..].iter().position(|&c| c == b'\n') {
+            Some(j) => pos + j,
+            None => raw.len(),
+        };
+        let line = crate::serve::strip_cr(&raw[pos..nl]);
+        pos = nl + 1;
+        let Some(colon) = line.iter().position(|&c| c == b':') else { continue };
+        if colon > 0 && header_name_eq(&line[..colon], name) {
+            let value = std::str::from_utf8(crate::serve::trim(&line[colon + 1..])).unwrap_or("");
+            return Value::str(value);
+        }
+    }
+    Value::Null
+}
+
+fn header_name_eq(raw: &[u8], want: &str) -> bool {
+    let want = want.as_bytes();
+    if raw.len() != want.len() {
+        return false;
+    }
+    raw.iter().zip(want).all(|(seen, wanted)| {
+        let seen = if *seen == b'-' { b'_' } else { seen.to_ascii_lowercase() };
+        seen == wanted.to_ascii_lowercase()
+    })
 }
 
 pub fn parse_headers(raw: &[u8]) -> Value {

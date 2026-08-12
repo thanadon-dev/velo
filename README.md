@@ -1,6 +1,6 @@
 # Velo
 
-**v1.2.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.3.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -83,8 +83,8 @@ Expressions:
 | array | `[1, 2, 3]` | |
 | path param | `id` | resolved to a slot index at compile time |
 | request body | `body`, `body.name` | parsed only if the route mentions it; JSON, or form-encoded as a fallback |
-| query string | `query.limit` | parsed only if the route mentions it, percent-decoded |
-| request header | `header.x_team` | lowercased, `-` written as `_`, parsed only if the route mentions it |
+| query string | `query.limit` | read straight from the request, percent-decoded; naming a field costs one scan, not a parse of the whole string |
+| request header | `header.x_team` | lowercased, `-` written as `_`, read straight from the request; the first header of that name wins |
 | store call | `db.users.find(id)` | see below |
 | function call | `now()`, `uuid()`, `len(x)`, `env("PORT")` | see below |
 | arithmetic | `query.page + 1`, `body.price * body.qty`, `(a + b) * 2` | `+` on two strings concatenates |
@@ -336,6 +336,7 @@ Verified on this machine: a client running 20 keep-alive connections through two
 - **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and up to 32 sort orders and filters, inside a byte budget; all of it is rebuilt only when the collection is written to. Each worker also keeps a thread-local map of the results it has already seen, tagged with a collection version, so a cache hit costs an atomic load and a local lookup instead of a lock shared by every worker. The thread-local view holds pointers to the same bytes, and is bounded by both an entry count and `VELO_LOCAL_CACHE_BYTES` so superseded results cannot pile up. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. Inserting a row appends to the cached list JSON in place when nothing else is holding it and the list was read since the last write, at any size. When a reader is holding those bytes the insert has to copy them instead, and `VELO_APPEND_MAX` caps that: past it the insert drops the cache, because copying a multi-megabyte list on every write is far worse than re-rendering it on the next read. Chained reads are cached the same way, keyed on the whole chain. Rendering happens outside the collection lock: a reader copies the live row handles under a brief lock, releases it, then renders, and the result is only cached if the collection did not change meanwhile. Writers never wait behind a long render, and never pay a copy-on-write of the row list because no reader holds it.
 
 Filters, sorts, searches, and aggregates work the same way. On a large collection under a constant write load their caches are invalidated as fast as they are built, so each such read costs a full scan; that is the shape of the query, not a lock problem. Use `find`, `first`, or `page` when a collection gets big. A write-only burst therefore keeps its O(1) insert, and an alternating write/read workload neither re-renders nor recopies the list. The cost is holding rows twice in memory.
+- **Nothing is parsed unless it is read.** A route naming `query.limit` or `header.x_key` compiles to a lookup that scans the raw request bytes for that one name and decodes only its value; a request with eight headers costs no allocation for the seven the route ignores. Routes that use `query` or `header` as a whole object still get one built.
 - **No allocation for key lookups.** `db.users.find(id)` on a plain path param hashes the slice of the request line directly; nothing is copied unless the param is percent-encoded.
 - **Store.** Copy-on-write snapshot behind an `RwLock`; readers clone an `Arc<Vec<Value>>` and release the lock immediately.
 - **HTTP.** Hand-written HTTP/1.1: keep-alive by default, request pipelining, per-connection read/write/body buffers reused across requests, batched writes. A connection stops rendering further pipelined requests once 256 kB of response bytes are waiting, so a client cannot make the server buffer an unbounded amount by pipelining requests for large lists; it resumes as soon as the socket drains. `Date` is formatted once per second per worker, not per response. `Expect: 100-continue` gets its interim response as soon as the headers arrive. The scan for the end of the headers resumes where it stopped, so a client feeding headers one byte at a time costs linear work, not quadratic. Chunked bodies are refused with 411, conflicting `Content-Length` headers with 400, oversized bodies with 413, oversized headers with 431.
@@ -370,7 +371,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v1.2.0. The `users` collection holds 500 rows (21 kB as JSON).
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v1.3.0. The `users` collection holds 500 rows (21 kB as JSON).
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -397,6 +398,8 @@ Load generator: `velobench` (ships in this repo, thread per connection, keep-ali
 | `/health` | 695 000 | 99 MB/s |
 | `/users` (21 kB each) | 215 000 | 4.6 GB/s |
 | `/scores` (3 aggregates) | 171 000 | 28 MB/s |
+| `/gated` (header guard) | 644 000 | 92 MB/s |
+| `{ a: query.a, b: query.b }` | 554 000 | 84 MB/s |
 | `/users/sorted` | 137 000 | 3.0 GB/s |
 | `/users/by/team` | 122 000 | 2.6 GB/s |
 
@@ -405,13 +408,13 @@ In-process, no sockets, one thread (`velomicro <rows>`). `bench/baseline.json` r
 | operation | 500 rows | 20 000 rows |
 | --- | --- | --- |
 | `find(id)` | 0.23 us | 0.24 us |
-| `where` (cached) | 1.1 us | 1.2 us |
+| `where` (cached, driven by `query.t`) | 0.65 us | 0.82 us |
 | `create` | 2.2 us | 2.3 us |
 | `create` + `delete` | 2.9 us | 3.0 us |
 | `all` (cached) | 6.3 us | 50 us |
 | `order` (cached) | 6.6 us | 53 us |
 | `create` then read the whole list | 7.8 us | 57 us |
-| `where` + `order` + `page` chain (cached) | 2.4 us | 2.5 us |
+| `where` + `order` + `page` chain (cached) | 1.6 us | 2.1 us |
 
 A chain costs about what a single cached filter costs, and stays flat as the collection grows, because only the result of the whole chain is rendered and cached. `first()` is the exception: it scans on every request, which is why `/users/top/one` sits at half the throughput of the others.
 
@@ -481,7 +484,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-99 tests (75 integration + 14 CLI + 6 fuzz + 4 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+101 tests (77 integration + 14 CLI + 6 fuzz + 4 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -530,6 +533,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.3.0** — `query.x` and `header.x` no longer parse what they do not read. A route naming a field compiles to a direct lookup that scans the raw request for that one name and decodes only its value, instead of building an object out of every query pair and every header first. Pipelined throughput on a header-guarded route went from 234 000 to 644 000 req/s, on a two-field query route from 120 000 to 554 000, and a cached `where` driven by a query parameter fell from 1.21 us to 0.65 us. Routes that use `query` or `header` as a whole object still get one, unchanged.
 
 **v1.2.0** — filters compare, not just match: `db.orders.where("amount", ">", 100)`, with `== != < <= > >=`, in a chain or on its own, and `first(field, op, value)` for the first row past a bound. Two steps make a range: `.where("score", ">=", query.lo).where("score", "<=", query.hi)`. The operator is a literal and unknown ones fail the compile; comparisons are numeric when both sides read as numbers and textual otherwise, and a row missing the field never matches.
 

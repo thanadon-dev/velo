@@ -19,7 +19,9 @@ pub struct Route {
     pub status: u16,
     pub uses_body: bool,
     pub uses_query: bool,
+    pub query_obj: bool,
     pub uses_header: bool,
+    pub header_obj: bool,
     pub query_fields: Vec<String>,
     pub header_fields: Vec<String>,
     pub guard: Option<Expr>,
@@ -98,7 +100,9 @@ pub fn compile_in(
         pure: true,
         body: false,
         query: false,
+        query_obj: false,
         header: false,
+        header_obj: false,
         query_fields: Vec::new(),
         header_fields: Vec::new(),
         base: base.to_path_buf(),
@@ -171,7 +175,9 @@ struct Parser<'a> {
     pure: bool,
     body: bool,
     query: bool,
+    query_obj: bool,
     header: bool,
+    header_obj: bool,
     query_fields: Vec<String>,
     header_fields: Vec<String>,
     base: std::path::PathBuf,
@@ -219,7 +225,9 @@ impl<'a> Parser<'a> {
         self.pure = true;
         self.body = false;
         self.query = false;
+        self.query_obj = false;
         self.header = false;
+        self.header_obj = false;
         self.query_fields.clear();
         self.header_fields.clear();
         self.file_ctype = None;
@@ -271,7 +279,9 @@ impl<'a> Parser<'a> {
             status,
             uses_body: self.body,
             uses_query: self.query,
+            query_obj: self.query_obj,
             uses_header: self.header,
+            header_obj: self.header_obj,
             source: None,
             query_fields: std::mem::take(&mut self.query_fields),
             header_fields: std::mem::take(&mut self.header_fields),
@@ -439,18 +449,26 @@ impl<'a> Parser<'a> {
                 self.pure = false;
                 self.query = true;
                 let e = self.fields(Expr::Query)?;
-                if let Expr::Field(_, name) = &e {
-                    remember(&mut self.query_fields, name);
+                if let Expr::Field(base, name) = &e {
+                    if matches!(**base, Expr::Query) {
+                        remember(&mut self.query_fields, name);
+                        return Ok(Expr::QueryField(name.clone()));
+                    }
                 }
+                self.query_obj = true;
                 return Ok(e);
             }
             "header" => {
                 self.pure = false;
                 self.header = true;
                 let e = self.fields(Expr::Header)?;
-                if let Expr::Field(_, name) = &e {
-                    remember(&mut self.header_fields, name);
+                if let Expr::Field(base, name) = &e {
+                    if matches!(**base, Expr::Header) {
+                        remember(&mut self.header_fields, name);
+                        return Ok(Expr::HeaderField(name.clone()));
+                    }
                 }
+                self.header_obj = true;
                 return Ok(e);
             }
             _ => {}

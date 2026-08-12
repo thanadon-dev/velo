@@ -1634,3 +1634,49 @@ fn comparison_needs_a_literal_operator() {
     assert!(compile(r#"GET /a => db.x.first("n", ">=", 1)"#, None).is_ok());
     assert!(compile(r#"GET /a => db.x.where("n", ">", 1, 2)"#, None).is_err());
 }
+
+const LAZY_SRC: &str = r#"
+GET /one   => header.x_team
+GET /all    => header
+GET /qone  => query.a
+GET /qall   => query
+GET /mixed  => { t: header.x_team, a: query.a, both: header.x_key == query.a }
+"#;
+
+#[test]
+fn header_fields_are_read_without_building_an_object() {
+    let s = Server::new(compile(LAZY_SRC, None).unwrap()).unwrap();
+    let raw = b"GET /one HTTP/1.1\r\nHost: x\r\nX-Team: red\r\nX-Key: k\r\nX-Team: blue\r\n\r\n";
+    let mut out = Vec::new();
+    s.handle("GET", "/one", b"", raw, &mut out);
+    assert_eq!(String::from_utf8(out).unwrap(), "red", "first header wins");
+
+    let mut out = Vec::new();
+    s.handle("GET", "/one", b"", b"GET /one HTTP/1.1\r\nx-team:  spaced  \r\n\r\n", &mut out);
+    assert_eq!(String::from_utf8(out).unwrap(), "spaced");
+
+    let mut out = Vec::new();
+    s.handle("GET", "/one", b"", b"GET /one HTTP/1.1\r\nHost: x\r\n\r\n", &mut out);
+    assert_eq!(String::from_utf8(out).unwrap(), "null", "a missing header reads as null");
+
+    let mut out = Vec::new();
+    s.handle("GET", "/all", b"", raw, &mut out);
+    let all = String::from_utf8(out).unwrap();
+    assert!(all.contains(r#""x_team":"red""#) && all.contains(r#""x_key":"k""#), "{all}");
+}
+
+#[test]
+fn query_fields_are_read_without_building_an_object() {
+    let s = Server::new(compile(LAZY_SRC, None).unwrap()).unwrap();
+    assert_eq!(call(&s, "GET", "/qone?a=1&b=2", "").1, "1");
+    assert_eq!(call(&s, "GET", "/qone?b=2&a=hi+there", "").1, "hi there");
+    assert_eq!(call(&s, "GET", "/qone?b=2&a%5B%5D=x&a=late", "").1, "late");
+    assert_eq!(call(&s, "GET", "/qone?a=", "").1, "");
+    assert_eq!(call(&s, "GET", "/qone", "").0, 200);
+    assert_eq!(call(&s, "GET", "/qall?a=1&b=2", "").1, r#"{"a":"1","b":"2"}"#);
+
+    let raw = b"GET /mixed?a=k HTTP/1.1\r\nX-Team: red\r\nX-Key: k\r\n\r\n";
+    let mut out = Vec::new();
+    s.handle("GET", "/mixed?a=k", b"", raw, &mut out);
+    assert_eq!(String::from_utf8(out).unwrap(), r#"{"t":"red","a":"k","both":true}"#);
+}
