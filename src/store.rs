@@ -7,10 +7,6 @@ use std::sync::{Arc, Mutex, RwLock};
 
 const CACHE_MAX: usize = 32;
 
-fn with_key<R>(prefix: &str, a: &str, b: &str, f: impl FnOnce(&str) -> R) -> R {
-    with_key4("", prefix, a, b, f)
-}
-
 fn with_key4<R>(tag: &str, prefix: &str, a: &str, b: &str, f: impl FnOnce(&str) -> R) -> R {
     let mut buf = [0u8; 224];
     let need = tag.len() + prefix.len() + a.len() + b.len() + 3;
