@@ -37,6 +37,8 @@ GET  /whoami          => { agent: header.user_agent, auth: header.authorization 
 GET  /tenant          => db.users.where("team", header.x_team)
 GET  /admin           => db.users.all() when header.authorization == "Bearer secret"
 GET  /gated           => "in" when header.x_key
+POST /validated       => db.users.create(body) when body.name or 400
+GET  /forbidden       => "secret" when header.x_key == "root" or 403
 DELETE /purge/:id     => db.users.delete(id) : 204 when header.x_key != "block"
 POST /events          => db.events.create({ at: now(), id: uuid(), data: body })
 "#;
@@ -691,4 +693,25 @@ fn etag_round_trip() {
 
     s.shutdown();
     plain.shutdown();
+}
+
+#[test]
+fn guard_status_override() {
+    let s = server();
+    assert_eq!(call(&s, "POST", "/validated", r#"{"name":"ok"}"#).0, 201);
+    let (status, body, _) = call(&s, "POST", "/validated", r#"{"other":1}"#);
+    assert_eq!((status, body), (400, r#"{"error":"invalid body"}"#.to_string()));
+    assert_eq!(call(&s, "POST", "/validated", r#"{"name":""}"#).0, 400);
+
+    let mut out = Vec::new();
+    let raw = "GET /forbidden HTTP/1.1\r\nX-Key: nope\r\n\r\n";
+    let (status, _) = s.handle("GET", "/forbidden", b"", raw.as_bytes(), &mut out);
+    assert_eq!(status, 403);
+
+    let mut out = Vec::new();
+    let raw = "GET /forbidden HTTP/1.1\r\nX-Key: root\r\n\r\n";
+    let (status, _) = s.handle("GET", "/forbidden", b"", raw.as_bytes(), &mut out);
+    assert_eq!((status, String::from_utf8(out).unwrap()), (200, "secret".to_string()));
+
+    assert!(compile("GET /a => 1 when 1 or 99", None).is_err());
 }

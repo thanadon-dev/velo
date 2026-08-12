@@ -1,9 +1,9 @@
 GET  /health              => "ok"
-GET  /version             => { name: "velo", version: "0.17.1" }
+GET  /version             => { name: "velo", version: "0.18.0" }
 
 GET  /users               => db.users.all()
 GET  /users/:id           => db.users.find(id)
-POST /users               => db.users.create(body)
+POST /users               => db.users.create(body) when body.name or 400
 PUT  /users/:id           => db.users.update(id, body)
 DELETE /users/:id         => db.users.delete(id) : 204
 GET  /users/page          => db.users.page(query.offset, query.limit)

@@ -20,6 +20,7 @@ pub struct Route {
     pub uses_query: bool,
     pub uses_header: bool,
     pub guard: Option<Expr>,
+    pub guard_status: u16,
     pub line: usize,
 }
 
@@ -181,6 +182,15 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let mut guard_status = 401;
+        if guard.is_some() && self.tok.kind == Kind::Ident && self.tok.text == "or" {
+            self.advance()?;
+            let code = self.expect(Kind::Num)?;
+            if !(100.0..=599.0).contains(&code.num) || code.num.fract() != 0.0 {
+                return Err(format!("line {}: bad status {}", code.line, code.text));
+            }
+            guard_status = code.num as u16;
+        }
         let (konst, const_text) = if self.pure {
             match expr.eval(&Ctx::default()) {
                 Ok(Value::Str(s)) => (Some(s.as_bytes().to_vec()), true),
@@ -202,6 +212,7 @@ impl<'a> Parser<'a> {
             uses_query: self.query,
             uses_header: self.header,
             guard,
+            guard_status,
             line,
         })
     }

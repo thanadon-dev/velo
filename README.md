@@ -1,6 +1,6 @@
 # Velo
 
-**v0.17.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.18.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -47,6 +47,7 @@ A program is a list of routes:
 METHOD /path/:param => expression
 METHOD /path        => expression : status
 METHOD /path        => expression when condition
+METHOD /path        => expression when condition or status
 ```
 
 Methods: `GET POST PUT PATCH DELETE HEAD OPTIONS`. Comments: `#` or `//`. `HEAD` falls back to the matching `GET` route.
@@ -116,6 +117,13 @@ DELETE /users/:id   => db.users.delete(id) : 204 when header.x_key != "readonly"
 
 A condition is one expression, optionally compared with `==` or `!=`. On its own an expression is truthy unless it is `null`, `false`, `0`, or an empty string. Guarded routes are never const-folded.
 
+`or <status>` changes what a failed guard answers, which turns a guard into input validation:
+
+```velo
+POST /users => db.users.create(body) when body.name or 400
+GET  /root  => db.audit.all() when header.x_key == env("ROOT_KEY") or 403
+```
+
 `examples/todo.velo` is a complete todo API using uuid keys, timestamps, sorting, and filters.
 
 ## Persistence
@@ -175,7 +183,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.17.1. The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.18.0. The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — this is client-bound, both processes fight for the same 4 cores:
 
@@ -226,7 +234,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-46 tests (39 integration + 5 fuzz + 2 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+47 tests (40 integration + 5 fuzz + 2 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 `tests/fuzz.rs` adds four deterministic robustness tests: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, and oversized header and body requests. They also cover slow drip-feeding clients. They assert the process never panics and that the server still answers a normal request afterwards.
 
@@ -270,6 +278,8 @@ WantedBy=default.target
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.18.0** — `when <condition> or <status>` picks the status a failed guard answers, so a guard doubles as body validation (`when body.name or 400`). `velo routes` now prints each route guard.
 
 **v0.17.1** — `where` and `first` compare fields without allocating a string per row and `order` extracts each sort key once: `where` over HTTP went from 2.4k to 82k req/s on a 500-row collection. Added `velomicro`, an in-process dispatch benchmark.
 

@@ -143,7 +143,10 @@ impl Server {
         if let Some(g) = &rt.guard {
             match g.eval(&ctx) {
                 Ok(v) if crate::parser::truthy(&v) => {}
-                Ok(_) => return self.fail(Err_ { status: 401, msg: "unauthorized" }, out),
+                Ok(_) => {
+                    let msg = if rt.guard_status == 400 { "invalid body" } else { "unauthorized" };
+                    return self.fail(Err_ { status: rt.guard_status, msg }, out);
+                }
                 Err(e) => return self.fail(e, out),
             }
         }
