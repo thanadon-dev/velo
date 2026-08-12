@@ -1,3 +1,6 @@
+#[cfg(not(target_os = "linux"))]
+compile_error!("velo's event loop is built on epoll, so it only builds on Linux");
+
 pub mod ast;
 pub mod date;
 pub mod epoll;
