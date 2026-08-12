@@ -47,6 +47,10 @@ fn is_live(v: &Value) -> bool {
     !matches!(v, Value::Null)
 }
 
+fn live(rows: &[Value]) -> impl Iterator<Item = &Value> {
+    rows.iter().filter(|r| is_live(r))
+}
+
 impl Snapshot {
     fn live(&self) -> impl Iterator<Item = &Value> {
         self.rows.iter().filter(|r| is_live(r))
@@ -136,100 +140,6 @@ impl Snapshot {
         cache.insert(key.to_string(), json.clone());
         json
     }
-
-    fn filtered_json(&self, field: &str, want: &str) -> Arc<Vec<u8>> {
-        if let Some(hit) = with_key("w", field, want, |k| self.cached(k)) {
-            return hit;
-        }
-        let mut out = Vec::with_capacity(256);
-        out.push(b'[');
-        for (n, row) in self.live().filter(|r| field_eq(r, field, want)).enumerate() {
-            if n > 0 {
-                out.push(b',');
-            }
-            row.write_json(&mut out);
-        }
-        out.push(b']');
-        with_key("w", field, want, |k| self.store_cached(k, Arc::new(out)))
-    }
-
-    fn searched_json(&self, field: &str, needle: &str) -> Arc<Vec<u8>> {
-        if let Some(hit) = with_key("s", field, needle, |k| self.cached(k)) {
-            return hit;
-        }
-        let lower = needle.to_lowercase();
-        let mut out = Vec::with_capacity(256);
-        out.push(b'[');
-        for (n, row) in self.live().filter(|r| field_has(r, field, &lower)).enumerate() {
-            if n > 0 {
-                out.push(b',');
-            }
-            row.write_json(&mut out);
-        }
-        out.push(b']');
-        with_key("s", field, needle, |k| self.store_cached(k, Arc::new(out)))
-    }
-
-    fn aggregate_json(&self, op: Agg, field: &str) -> Arc<Vec<u8>> {
-        if let Some(hit) = with_key("a", op.name(), field, |k| self.cached(k)) {
-            return hit;
-        }
-        let mut acc: Option<f64> = None;
-        let mut n = 0u64;
-        for row in self.live() {
-            let Some(Value::Num(v)) = row.get_ref(field) else { continue };
-            n += 1;
-            acc = Some(match (acc, op) {
-                (None, _) => *v,
-                (Some(a), Agg::Sum | Agg::Avg) => a + v,
-                (Some(a), Agg::Min) => a.min(*v),
-                (Some(a), Agg::Max) => a.max(*v),
-            });
-        }
-        let mut out = Vec::with_capacity(24);
-        match (acc, op) {
-            (Some(a), Agg::Avg) => crate::value::write_number(&mut out, a / n as f64),
-            (Some(a), _) => crate::value::write_number(&mut out, a),
-            (None, Agg::Sum) => out.extend_from_slice(b"0"),
-            (None, _) => out.extend_from_slice(b"null"),
-        }
-        with_key("a", op.name(), field, |k| self.store_cached(k, Arc::new(out)))
-    }
-
-    fn sorted_json(&self, field: &str) -> Arc<Vec<u8>> {
-        if let Some(hit) = with_key("o", field, "", |k| self.cached(k)) {
-            return hit;
-        }
-        let (sort_field, desc) = match field.strip_prefix('-') {
-            Some(f) => (f, true),
-            None => (field, false),
-        };
-        let mut keyed: Vec<(SortKey, &Value)> =
-            self.live().map(|r| (sort_key(r.get_ref(sort_field)), r)).collect();
-        keyed.sort_by(|(a, _), (b, _)| {
-            let ord = match (a, b) {
-                (SortKey::Num(m), SortKey::Num(n)) => m.partial_cmp(n).unwrap_or(Ordering2::Equal),
-                (SortKey::Num(_), _) => Ordering2::Less,
-                (_, SortKey::Num(_)) => Ordering2::Greater,
-                (SortKey::Text(m), SortKey::Text(n)) => m.cmp(n),
-            };
-            if desc {
-                ord.reverse()
-            } else {
-                ord
-            }
-        });
-        let mut out = Vec::with_capacity(self.len() * 64 + 2);
-        out.push(b'[');
-        for (i, (_, row)) in keyed.iter().enumerate() {
-            if i > 0 {
-                out.push(b',');
-            }
-            row.write_json(&mut out);
-        }
-        out.push(b']');
-        with_key("o", field, "", |k| self.store_cached(k, Arc::new(out)))
-    }
 }
 
 static NEXT_COLLECTION_ID: AtomicU64 = AtomicU64::new(0);
@@ -305,18 +215,35 @@ impl Collection {
         kind: &str,
         a: &str,
         b: &str,
-        build: impl FnOnce(&Snapshot) -> Arc<Vec<u8>>,
+        build: impl FnOnce(&[Value]) -> Arc<Vec<u8>>,
     ) -> Value {
         let version = self.version.load(Ordering::Acquire);
         let tag = self.tag();
-        let json = with_key4(&tag, kind, a, b, |key| {
-            let hit = LOCAL_CACHE.with(|c| {
-                c.borrow().get(key).and_then(|(v, json)| (*v == version).then(|| json.clone()))
-            });
-            if let Some(json) = hit {
-                return json;
+
+        let local = with_key4(&tag, kind, a, b, |key| {
+            LOCAL_CACHE
+                .with(|c| c.borrow().get(key).and_then(|(v, j)| (*v == version).then(|| j.clone())))
+        });
+        if let Some(json) = local {
+            return Value::Raw(json);
+        }
+
+        let shared = with_key4(&tag, kind, a, b, |key| self.snap.read().unwrap().cached(key));
+        let json = match shared {
+            Some(json) => json,
+            None => {
+                let rows = self.snap.read().unwrap().rows.clone();
+                let json = build(&rows);
+                if self.version.load(Ordering::Acquire) == version {
+                    with_key4(&tag, kind, a, b, |key| {
+                        self.snap.read().unwrap().store_cached(key, json.clone())
+                    });
+                }
+                json
             }
-            let json = build(&self.snap.read().unwrap());
+        };
+
+        with_key4(&tag, kind, a, b, |key| {
             LOCAL_CACHE.with(|c| {
                 let mut c = c.borrow_mut();
                 let used: usize = c.values().map(|(_, v)| v.len()).sum();
@@ -326,8 +253,7 @@ impl Collection {
                 if json.len() <= local_budget() {
                     c.insert(key.to_string(), (version, json.clone()));
                 }
-            });
-            json
+            })
         });
         Value::Raw(json)
     }
@@ -383,7 +309,7 @@ impl Collection {
     }
 
     pub fn filter(&self, field: &str, want: &str) -> Value {
-        self.derived("w", field, want, |s| s.filtered_json(field, want))
+        self.derived("w", field, want, |rows| filtered_json(rows, field, want))
     }
 
     pub fn first(&self, field: &str, want: &str) -> Option<Value> {
@@ -405,15 +331,15 @@ impl Collection {
     }
 
     pub fn aggregate(&self, op: Agg, field: &str) -> Value {
-        self.derived("a", op.name(), field, |s| s.aggregate_json(op, field))
+        self.derived("a", op.name(), field, |rows| aggregate_json(rows, op, field))
     }
 
     pub fn search(&self, field: &str, needle: &str) -> Value {
-        self.derived("s", field, needle, |s| s.searched_json(field, needle))
+        self.derived("s", field, needle, |rows| searched_json(rows, field, needle))
     }
 
     pub fn order(&self, field: &str) -> Value {
-        self.derived("o", field, "", |s| s.sorted_json(field))
+        self.derived("o", field, "", |rows| sorted_json(rows, field))
     }
 
     pub fn create(&self, v: Value) -> Option<Value> {
@@ -693,6 +619,88 @@ fn field_eq(row: &Value, field: &str, want: &str) -> bool {
         Some(v) => v.key_eq(want),
         None => want.is_empty(),
     }
+}
+
+fn filtered_json(rows: &[Value], field: &str, want: &str) -> Arc<Vec<u8>> {
+    let mut out = Vec::with_capacity(256);
+    out.push(b'[');
+    for (n, row) in live(rows).filter(|r| field_eq(r, field, want)).enumerate() {
+        if n > 0 {
+            out.push(b',');
+        }
+        row.write_json(&mut out);
+    }
+    out.push(b']');
+    Arc::new(out)
+}
+
+fn searched_json(rows: &[Value], field: &str, needle: &str) -> Arc<Vec<u8>> {
+    let lower = needle.to_lowercase();
+    let mut out = Vec::with_capacity(256);
+    out.push(b'[');
+    for (n, row) in live(rows).filter(|r| field_has(r, field, &lower)).enumerate() {
+        if n > 0 {
+            out.push(b',');
+        }
+        row.write_json(&mut out);
+    }
+    out.push(b']');
+    Arc::new(out)
+}
+
+fn aggregate_json(rows: &[Value], op: Agg, field: &str) -> Arc<Vec<u8>> {
+    let mut acc: Option<f64> = None;
+    let mut n = 0u64;
+    for row in live(rows) {
+        let Some(Value::Num(v)) = row.get_ref(field) else { continue };
+        n += 1;
+        acc = Some(match (acc, op) {
+            (None, _) => *v,
+            (Some(a), Agg::Sum | Agg::Avg) => a + v,
+            (Some(a), Agg::Min) => a.min(*v),
+            (Some(a), Agg::Max) => a.max(*v),
+        });
+    }
+    let mut out = Vec::with_capacity(24);
+    match (acc, op) {
+        (Some(a), Agg::Avg) => crate::value::write_number(&mut out, a / n as f64),
+        (Some(a), _) => crate::value::write_number(&mut out, a),
+        (None, Agg::Sum) => out.extend_from_slice(b"0"),
+        (None, _) => out.extend_from_slice(b"null"),
+    }
+    Arc::new(out)
+}
+
+fn sorted_json(rows: &[Value], field: &str) -> Arc<Vec<u8>> {
+    let (sort_field, desc) = match field.strip_prefix('-') {
+        Some(f) => (f, true),
+        None => (field, false),
+    };
+    let mut keyed: Vec<(SortKey, &Value)> =
+        live(rows).map(|r| (sort_key(r.get_ref(sort_field)), r)).collect();
+    keyed.sort_by(|(a, _), (b, _)| {
+        let ord = match (a, b) {
+            (SortKey::Num(m), SortKey::Num(n)) => m.partial_cmp(n).unwrap_or(Ordering2::Equal),
+            (SortKey::Num(_), _) => Ordering2::Less,
+            (_, SortKey::Num(_)) => Ordering2::Greater,
+            (SortKey::Text(m), SortKey::Text(n)) => m.cmp(n),
+        };
+        if desc {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
+    let mut out = Vec::with_capacity(rows.len() * 64 + 2);
+    out.push(b'[');
+    for (i, (_, row)) in keyed.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        row.write_json(&mut out);
+    }
+    out.push(b']');
+    Arc::new(out)
 }
 
 fn id_value(id: &str) -> Value {
