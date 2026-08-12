@@ -1,6 +1,6 @@
 # Velo
 
-**v0.53.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.0.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -342,7 +342,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.53.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v1.0.0. The `users` collection holds 500 rows (21 kB as JSON).
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -494,6 +494,9 @@ Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCL
 
 ## Changelog
 
+**v1.0.0** — the surface is settled and the engine has been measured, soaked, and fuzzed, so this is the first version promising not to break what is documented above. The language (routes, params, query, headers, body, arithmetic, comparisons, guards, includes, `file()`, `openapi()`), the store (CRUD, filters, search, sort, paging, aggregates, bulk deletes, snapshots), and the runtime knobs are stable; anything added from here is additive. Ninety tests, a deterministic fuzz suite, a performance guard, and a Go baseline for scale.
+
+
 **v0.53.1** — the event loop, lexer, epoll wrapper, and date formatter are now crate-private; the library surface is the language, the store, the server, and the values that flow through them.
 
 **v0.53.0** — `examples/embed.rs` shows velo used as a library: compile against your own store, seed it, dispatch without a socket, then serve. `Value::object(&[("k", v)])` makes building rows from Rust readable, and `check.sh` runs the example.
@@ -522,142 +525,75 @@ Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCL
 
 **v0.46.0** — constant routes (including `file()` and `openapi()`) carry an `ETag` computed at compile time instead of hashing the body on every request, and `velo new` writes a starter that shows search, validation, upsert, and a served OpenAPI document.
 
-**v0.45.0** — bulk deletes: `db.x.delete_where(field, value)` and `db.x.clear()`, both answering with how many rows went away.
-
-**v0.44.0** — `db.x.upsert(key, value)` merges into an existing row or creates one under that key, which is what `PUT /users/:id` usually means. Numeric-looking keys are stored as numbers so they match generated ids.
-
-**v0.43.1** — every benchmark in this file re-measured against the current build, and `velobench` stopped scanning each response head for `Connection: close` (that check had quietly cost the client 3x on small responses). Clean connection ends are recognised from the socket state instead.
-
-**v0.43.0** — systemd socket activation: when `LISTEN_FDS` names an inherited listener, velo serves on it instead of binding its own. Combined with draining, a restart neither drops in-flight requests nor refuses new ones.
-
-**v0.42.0** — shutdown drains instead of dropping: no new connections, in-flight requests answered with `Connection: close`, exit when the last one finishes or `VELO_DRAIN_MS` elapses. `velobench` now understands a clean close, so a restart under load reports zero errors.
-
-**v0.41.1** — `velobench` can drive a Unix socket, which measured the gain: 86.9k to 124.4k req/s on `/health` compared with loopback TCP.
-
-**v0.41.0** — `velo run app.velo unix:/run/velo.sock` listens on a Unix socket: stale files are replaced, permissions come from `VELO_SOCKET_MODE`, and the socket is removed on shutdown.
-
-**v0.40.0** — compile errors now report a column and underline the offending token with a caret; the lexer tracks column positions for every token.
-
-**v0.39.0** — `velomicro --json` and `velomicro --check <baseline>`: the microbenchmark can now fail the build when an operation regresses past a multiple of the recorded baseline. `check.sh` runs it.
-
-**v0.38.0** — conditions combine with short-circuiting `and` / `or`. The keyword that sets a failed guard's status moved from `or` to `else` to free `or` for boolean use: `when body.name else 400`.
-
-**v0.37.0** — expressions gained `+ - * /`, `< > <= >=`, and parentheses, with the usual precedence. Numbers written as strings (path params, query values) take part in arithmetic; `+` on two strings concatenates; mixed-type comparisons are false rather than surprising. Pure arithmetic still folds to a constant at compile time.
-
-**v0.36.1** — `velo routes` prints where each route came from, which matters once files include each other; dropped an unused store method and fixed the quoting in the systemd template.
-
-**v0.36.0** — `deploy/` templates: a hardened systemd unit, a Caddy reverse-proxy block that forwards the client IP, and a cloudflared ingress entry.
-
-**v0.35.1** — benchmarked against a Go `net/http` server on the same box for scale: 1.8x the throughput on small responses, 14x pipelined, a tenth of the memory.
-
-**v0.35.0** — `VELO_HEADERS` adds fixed response headers (security or caching policy), rejecting malformed entries and anything carrying control characters.
-
-**v0.34.0** — request logs now carry the response size and duration, and `VELO_LOG=json` emits one JSON object per line.
-
-**v0.33.0** — `file("page.html")` folds a file into a route at compile time and serves it with a content type derived from its extension; response content types are now plain strings throughout. `examples/shop` gained a `/docs` page listing the API from its own OpenAPI document.
-
-**v0.32.1** — fuzz iteration counts are configurable with `VELO_FUZZ_ROUNDS`; an extended run (40 000 compiler mutations, 4 000 mutated requests) found only a divide-by-zero in the fuzz harness itself, now fixed.
-
-**v0.32.0** — a request body that is not JSON is retried as `application/x-www-form-urlencoded`, so HTML forms and `curl --data-urlencode` work without changing a route.
-
-**v0.31.0** — rendered bytes are held as `Arc<Vec<u8>>`, so building a cache entry no longer copies it and an insert can extend the cached list in place. A create-then-list cycle dropped from 1 381 us to 62 us on 20 000 rows and from 222 us to 8.9 us on 500; `/users` pipelined went 243k to 308k req/s.
-
-**v0.30.1** — the header terminator scan resumes from where it left off instead of restarting on every read, so drip-fed headers cost linear work.
-
-**v0.30.0** — `velo run --watch` restarts the server when the route file or any included file changes, stopping the old process with `SIGTERM` so snapshots flush, and surviving files that fail to compile.
-
-**v0.29.1** — `openapi()` and `velo openapi` now describe included files too; the document is built after the merge. Added `examples/shop/`, a four-file API using `include`.
-
-**v0.29.0** — `include "other.velo"` merges route files, resolved relative to the including file, with repeats skipped so cycles are harmless. Every CLI command loads through the same path.
-
-**v0.28.0** — deleting is now constant time: rows are tombstoned instead of shifted, and the collection compacts when tombstones exceed half the rows. A create/delete cycle on 20 000 rows went from 52 us to 3.4 us.
-
-**v0.27.1** — measured the store at 20 000 rows and published the numbers: `find` and `create` stay flat, list-shaped operations are bound by the bytes they copy, `delete` is linear because insertion order is preserved.
-
-**v0.27.0** — inserting a row now appends to the cached list JSON when the list has been read since the last write, cutting a write-then-list cycle from 309 us to 191 us on 4 500 rows; write-only bursts keep their previous cost (56k inserts/s).
-
-**v0.26.2** — README reordered into a reading path with a table of contents.
-
-**v0.26.1** — fuzz suite now mutates valid requests byte by byte and asserts every answer is still a well-formed HTTP status line. No defects found; kept as a regression net.
-
-**v0.26.0** — metrics now report `bytes_out`, `avg_micros`, and `max_micros`, measured only when `VELO_METRICS` is set.
-
-**v0.25.1** — the per-worker cache view is bounded by bytes as well as entries, so invalidated large results are released instead of being held by every worker until 64 entries accumulate.
-
-**v0.25.0** — two evaluation changes: object and array routes render straight into the output buffer instead of building a `Value` tree (`/stats` 417k to 785k req/s pipelined), and each worker keeps a thread-local, version-tagged view of the derived caches so hits no longer serialize on one lock (`order` 55k to 158k, `where` 50k to 131k req/s).
-
-**v0.24.0** — aggregations: `sum`, `avg`, `min`, `max` over a numeric field, cached and invalidated with the other derived results. Non-numeric and missing values are skipped.
-
-**v0.23.1** — stress test covering cache invalidation under concurrent reads and writes.
-
-**v0.23.0** — `db.x.search(field, text)`: case-insensitive substring match over a field, cached and invalidated like `where` and `order`.
-
-**v0.22.0** — building on a non-Linux target now fails with a plain message instead of a link error, and the platform requirements are stated up front.
-
-**v0.21.2** — bounded response buffering: pipelined requests stop being rendered past 256 kB of pending output and resume after the flush. 100 pipelined 16 kB responses now cost 1.1 MB of RSS instead of growing with the batch, at the same throughput.
-
-**v0.21.1** — end-to-end CLI tests: the real binary is started, driven over TCP, stopped with `SIGTERM`/`SIGINT`, and restarted to prove the snapshot round-trips.
-
-**v0.21.0** — `openapi()` built-in: a route can serve this API's own OpenAPI document, folded to constant bytes at compile time.
-
-**v0.20.0** — per-client rate limiting: `VELO_RATE` requests per second, keyed on the socket address or on `VELO_REAL_IP_HEADER` behind a proxy, answered with 429.
-
-**v0.19.1** — snapshot interval is now self-tuning: a save may cost at most `VELO_SAVE_DUTY` percent of wall time (10 by default). Under a sustained 45k writes/s load on a 5 MB dataset that cut disk writes from 53 MB to 42 MB per 5 s while running slightly faster.
-
-**v0.19.0** — `velo openapi` generates an OpenAPI 3.0 document from the compiled routes. The compiler now records which query and header fields each route reads, so the document lists real parameters instead of guesses.
-
-**v0.18.2** — the render caches now respect a byte budget (`VELO_CACHE_BYTES`, 8 MB by default) instead of only an entry count, so 32 large lists cannot quietly hold hundreds of megabytes.
-
-**v0.18.1** — `where` results are cached per field and value alongside the sorted and full-list caches, all cleared on any write (`where` 77 us to 1.2 us per call on 5 000 rows). `velobench` now parses `Content-Length` instead of scanning every byte, so large responses measure the server rather than the client.
-
-**v0.18.0** — `when <condition> or <status>` picks the status a failed guard answers, so a guard doubles as body validation (`when body.name else 400`). `velo routes` now prints each route guard.
-
-**v0.17.1** — `where` and `first` compare fields without allocating a string per row and `order` extracts each sort key once: `where` over HTTP went from 2.4k to 82k req/s on a 500-row collection. Added `velomicro`, an in-process dispatch benchmark.
-
-**v0.17.0** — optional `ETag` / `If-None-Match` (`VELO_ETAG=1`): 200 `GET` and `HEAD` responses carry an FNV tag of the body and a matching conditional request answers 304 without the body.
-
-**v0.16.2** — `Expect: 100-continue` is answered with an interim `100 Continue` instead of leaving the client to time out before sending its body.
-
-**v0.16.1** — split the two large modules: evaluation moved out of `parser.rs` into `ast.rs`, the event loop out of `http.rs` into `serve.rs`. Auto-generated ids now skip over ids a client already claimed instead of returning 409.
-
-**v0.16.0** — optional metrics endpoint (`VELO_METRICS=/_metrics`) reporting version, uptime, requests, failures, live connections, routes, and workers.
-
-**v0.15.1** — connections that never complete a request are dropped after `VELO_HEADER_TIMEOUT` (10s) measured from accept, so drip-feeding headers cannot hold a slot; `check.sh` mirrors CI locally.
-
-**v0.15.0** — `db.x.first(field, value)`, `create` honours an `id` supplied in the body (409 on duplicates), `velo new` writes a starter file, `examples/todo.velo`, and deployment notes.
-
-**v0.14.1** — repository hygiene: `rustfmt.toml`, formatted tree, zero clippy warnings, and a GitHub Actions workflow running fmt, clippy, tests, release build, and a boot smoke test.
-
-**v0.14.0** — route guards: `when <condition>` with `==` / `!=` or a truthiness check, answering 401 before the body runs.
-
-**v0.13.0** — request headers in expressions: `header.x_team` (lowercased, hyphens as underscores), parsed only for routes that mention `header`.
-
-**v0.12.1** — deterministic fuzz suite for the compiler and the HTTP parser. No panics or hangs found; kept as a regression net.
-
-**v0.12.0** — `order(...)` results are cached per sort key and invalidated on write (6k to 120k req/s pipelined), and `find`/`update`/`delete` on a plain path param no longer allocate a key (`/users/:id` 562k to 1 037k req/s pipelined).
-
-**v0.11.0** — spec and hardening pass: `Date` response header (computed once per second per worker), 400 on conflicting `Content-Length` headers, backoff instead of a spin loop when `accept` fails with no file descriptors left.
-
-**v0.10.0** — `db.x.order(field)` sorting (`"-field"` descending, numbers compare numerically) and compile errors that print the offending source line.
-
-**v0.9.0** — `VELO_CORS` adds the allow-origin headers and answers `OPTIONS` preflight with a bodyless 204; `VELO_LOG` prints one line per request.
-
-**v0.8.0** — built-in functions: `now()`, `uuid()` (v4, seeded from `/dev/urandom`, per-thread xorshift after that), `len(x)`, `env("NAME")`.
-
-**v0.7.1** — graceful shutdown: `SIGINT`/`SIGTERM` unwind the event loop and flush a final snapshot when `--data` is set. `Server::shutdown()` does the same from code.
-
-**v0.7.0** — rows carry their rendered JSON and collections cache the JSON of the whole list, invalidated on write. Paged reads 47.4k to 56.7k req/s, list reads become a memcpy.
-
-**v0.6.0** — per-route status override (`expr : 204`, bodyless 204/304 responses) and `db.x.page(offset, limit)` for pagination.
-
-**v0.5.0** — optional persistence: `--data file.json` loads at boot and autosaves on change (atomic rename, dirty-flag gated, `VELO_SAVE_MS`). POST throughput 49.5k to 62.2k req/s on the epoll loop.
-
-**v0.4.0** — query strings (`query.name`), percent-decoding for path params and query values, `db.x.where(field, value)` filters. Query parsing happens only for routes that mention `query`.
-
-**v0.3.0** — epoll event loop replaces thread-per-connection: one epoll per core sharing the listener with `EPOLLEXCLUSIVE`, non-blocking sockets, EPOLLOUT-driven partial-write handling, idle sweep on `VELO_KEEPALIVE`. 1 000 connections in 896 kB RSS, p99 on `/health` down from 3.96 ms to 2.25 ms.
-
-**v0.2.1** — `velobench` load generator (thread per connection, pipelining, p50/p99), explicit `Connection: keep-alive` response header so standard tools reuse connections.
-
-**v0.2.0** — rewritten in Rust, zero dependencies. Hand-written HTTP/1.1 engine (keep-alive, pipelining, HEAD fallback, chunked rejection), FNV router, `Arc`-backed values, copy-on-write store, const-folded routes, 488 kB RSS.
-
-**v0.1.0** — first version (Go): language, closure compiler, router, in-memory store.
+### Earlier
+
+- **v0.45.0** — bulk deletes: `db.x.delete_where(field, value)` and `db.x.clear()`, both answering with how many rows went away.
+- **v0.44.0** — `db.x.upsert(key, value)` merges into an existing row or creates one under that key, which is what `PUT /users/:id` usually means.
+- **v0.43.1** — every benchmark in this file re-measured against the current build, and `velobench` stopped scanning each response head for `Connection: close` (that….
+- **v0.43.0** — systemd socket activation: when `LISTEN_FDS` names an inherited listener, velo serves on it instead of binding its own.
+- **v0.42.0** — shutdown drains instead of dropping: no new connections, in-flight requests answered with `Connection: close`, exit when the last one finishes or….
+- **v0.41.1** — `velobench` can drive a Unix socket, which measured the gain: 86.9k to 124.4k req/s on `/health` compared with loopback TCP.
+- **v0.41.0** — `velo run app.velo unix:/run/velo.sock` listens on a Unix socket: stale files are replaced, permissions come from `VELO_SOCKET_MODE`, and the socket….
+- **v0.40.0** — compile errors now report a column and underline the offending token with a caret; the lexer tracks column positions for every token.
+- **v0.39.0** — `velomicro --json` and `velomicro --check <baseline>`: the microbenchmark can now fail the build when an operation regresses past a multiple of the….
+- **v0.38.0** — conditions combine with short-circuiting `and` / `or`.
+- **v0.37.0** — expressions gained `+ - * /`, `< > <= >=`, and parentheses, with the usual precedence.
+- **v0.36.1** — `velo routes` prints where each route came from, which matters once files include each other; dropped an unused store method and fixed the quoting in….
+- **v0.36.0** — `deploy/` templates: a hardened systemd unit, a Caddy reverse-proxy block that forwards the client IP, and a cloudflared ingress entry.
+- **v0.35.1** — benchmarked against a Go `net/http` server on the same box for scale: 1.8x the throughput on small responses, 14x pipelined, a tenth of the memory.
+- **v0.35.0** — `VELO_HEADERS` adds fixed response headers (security or caching policy), rejecting malformed entries and anything carrying control characters.
+- **v0.34.0** — request logs now carry the response size and duration, and `VELO_LOG=json` emits one JSON object per line.
+- **v0.33.0** — `file("page.html")` folds a file into a route at compile time and serves it with a content type derived from its extension; response content types….
+- **v0.32.1** — fuzz iteration counts are configurable with `VELO_FUZZ_ROUNDS`; an extended run (40 000 compiler mutations, 4 000 mutated requests) found only a….
+- **v0.32.0** — a request body that is not JSON is retried as `application/x-www-form-urlencoded`, so HTML forms and `curl --data-urlencode` work without changing a….
+- **v0.31.0** — rendered bytes are held as `Arc<Vec<u8>>`, so building a cache entry no longer copies it and an insert can extend the cached list in place.
+- **v0.30.1** — the header terminator scan resumes from where it left off instead of restarting on every read, so drip-fed headers cost linear work.
+- **v0.30.0** — `velo run --watch` restarts the server when the route file or any included file changes, stopping the old process with `SIGTERM` so snapshots flush,….
+- **v0.29.1** — `openapi()` and `velo openapi` now describe included files too; the document is built after the merge.
+- **v0.29.0** — `include "other.velo"` merges route files, resolved relative to the including file, with repeats skipped so cycles are harmless.
+- **v0.28.0** — deleting is now constant time: rows are tombstoned instead of shifted, and the collection compacts when tombstones exceed half the rows.
+- **v0.27.1** — measured the store at 20 000 rows and published the numbers: `find` and `create` stay flat, list-shaped operations are bound by the bytes they copy,….
+- **v0.27.0** — inserting a row now appends to the cached list JSON when the list has been read since the last write, cutting a write-then-list cycle from 309 us to….
+- **v0.26.2** — README reordered into a reading path with a table of contents.
+- **v0.26.1** — fuzz suite now mutates valid requests byte by byte and asserts every answer is still a well-formed HTTP status line.
+- **v0.26.0** — metrics now report `bytes_out`, `avg_micros`, and `max_micros`, measured only when `VELO_METRICS` is set.
+- **v0.25.1** — the per-worker cache view is bounded by bytes as well as entries, so invalidated large results are released instead of being held by every worker….
+- **v0.25.0** — two evaluation changes: object and array routes render straight into the output buffer instead of building a `Value` tree (`/stats` 417k to 785k….
+- **v0.24.0** — aggregations: `sum`, `avg`, `min`, `max` over a numeric field, cached and invalidated with the other derived results.
+- **v0.23.1** — stress test covering cache invalidation under concurrent reads and writes.
+- **v0.23.0** — `db.x.search(field, text)`: case-insensitive substring match over a field, cached and invalidated like `where` and `order`.
+- **v0.22.0** — building on a non-Linux target now fails with a plain message instead of a link error, and the platform requirements are stated up front.
+- **v0.21.2** — bounded response buffering: pipelined requests stop being rendered past 256 kB of pending output and resume after the flush. 100 pipelined 16 kB….
+- **v0.21.1** — end-to-end CLI tests: the real binary is started, driven over TCP, stopped with `SIGTERM`/`SIGINT`, and restarted to prove the snapshot round-trips.
+- **v0.21.0** — `openapi()` built-in: a route can serve this API's own OpenAPI document, folded to constant bytes at compile time.
+- **v0.20.0** — per-client rate limiting: `VELO_RATE` requests per second, keyed on the socket address or on `VELO_REAL_IP_HEADER` behind a proxy, answered with 429.
+- **v0.19.1** — snapshot interval is now self-tuning: a save may cost at most `VELO_SAVE_DUTY` percent of wall time (10 by default).
+- **v0.19.0** — `velo openapi` generates an OpenAPI 3.0 document from the compiled routes.
+- **v0.18.2** — the render caches now respect a byte budget (`VELO_CACHE_BYTES`, 8 MB by default) instead of only an entry count, so 32 large lists cannot quietly….
+- **v0.18.1** — `where` results are cached per field and value alongside the sorted and full-list caches, all cleared on any write (`where` 77 us to 1.2 us per call….
+- **v0.18.0** — `when <condition> or <status>` picks the status a failed guard answers, so a guard doubles as body validation (`when body.name else 400`).
+- **v0.17.1** — `where` and `first` compare fields without allocating a string per row and `order` extracts each sort key once: `where` over HTTP went from 2.4k to….
+- **v0.17.0** — optional `ETag` / `If-None-Match` (`VELO_ETAG=1`): 200 `GET` and `HEAD` responses carry an FNV tag of the body and a matching conditional request….
+- **v0.16.2** — `Expect: 100-continue` is answered with an interim `100 Continue` instead of leaving the client to time out before sending its body.
+- **v0.16.1** — split the two large modules: evaluation moved out of `parser.rs` into `ast.rs`, the event loop out of `http.rs` into `serve.rs`.
+- **v0.16.0** — optional metrics endpoint (`VELO_METRICS=/_metrics`) reporting version, uptime, requests, failures, live connections, routes, and workers.
+- **v0.15.1** — connections that never complete a request are dropped after `VELO_HEADER_TIMEOUT` (10s) measured from accept, so drip-feeding headers cannot hold a….
+- **v0.15.0** — `db.x.first(field, value)`, `create` honours an `id` supplied in the body (409 on duplicates), `velo new` writes a starter file,….
+- **v0.14.1** — repository hygiene: `rustfmt.toml`, formatted tree, zero clippy warnings, and a GitHub Actions workflow running fmt, clippy, tests, release build,….
+- **v0.14.0** — route guards: `when <condition>` with `==` / `!=` or a truthiness check, answering 401 before the body runs.
+- **v0.13.0** — request headers in expressions: `header.x_team` (lowercased, hyphens as underscores), parsed only for routes that mention `header`.
+- **v0.12.1** — deterministic fuzz suite for the compiler and the HTTP parser.
+- **v0.12.0** — `order(...)` results are cached per sort key and invalidated on write (6k to 120k req/s pipelined), and `find`/`update`/`delete` on a plain path….
+- **v0.11.0** — spec and hardening pass: `Date` response header (computed once per second per worker), 400 on conflicting `Content-Length` headers, backoff instead….
+- **v0.10.0** — `db.x.order(field)` sorting (`"-field"` descending, numbers compare numerically) and compile errors that print the offending source line.
+- **v0.9.0** — `VELO_CORS` adds the allow-origin headers and answers `OPTIONS` preflight with a bodyless 204; `VELO_LOG` prints one line per request.
+- **v0.8.0** — built-in functions: `now()`, `uuid()` (v4, seeded from `/dev/urandom`, per-thread xorshift after that), `len(x)`, `env("NAME")`.
+- **v0.7.1** — graceful shutdown: `SIGINT`/`SIGTERM` unwind the event loop and flush a final snapshot when `--data` is set.
+- **v0.7.0** — rows carry their rendered JSON and collections cache the JSON of the whole list, invalidated on write.
+- **v0.6.0** — per-route status override (`expr : 204`, bodyless 204/304 responses) and `db.x.page(offset, limit)` for pagination.
+- **v0.5.0** — optional persistence: `--data file.json` loads at boot and autosaves on change (atomic rename, dirty-flag gated, `VELO_SAVE_MS`).
+- **v0.4.0** — query strings (`query.name`), percent-decoding for path params and query values, `db.x.where(field, value)` filters.
+- **v0.3.0** — epoll event loop replaces thread-per-connection: one epoll per core sharing the listener with `EPOLLEXCLUSIVE`, non-blocking sockets, EPOLLOUT-driven….
+- **v0.2.1** — `velobench` load generator (thread per connection, pipelining, p50/p99), explicit `Connection: keep-alive` response header so standard tools reuse….
+- **v0.2.0** — rewritten in Rust, zero dependencies.
+- **v0.1.0** — first version (Go): language, closure compiler, router, in-memory store.
