@@ -1,13 +1,18 @@
 use crate::parser::{Ctx, Err_, Method, Program, Route};
-use crate::router::Router;
+use crate::router::{Fnv, Router};
 use crate::store::Store;
 use crate::value::{write_i64, Value};
+use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 pub const MAX_BODY: usize = 1 << 20;
+const RATE_SHARDS: usize = 16;
+const RATE_KEYS_MAX: usize = 4096;
 pub const MAX_HEAD: usize = 8 << 10;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -45,6 +50,9 @@ pub struct Server {
     pub log: bool,
     pub metrics_path: Option<String>,
     pub etag: bool,
+    pub rate: u32,
+    pub real_ip_header: Option<String>,
+    limiter: Vec<Mutex<HashMap<String, (Instant, u32), BuildHasherDefault<Fnv>>>>,
     started: Instant,
     requests: AtomicU64,
     failures: AtomicU64,
@@ -70,6 +78,12 @@ impl Server {
             log: std::env::var("VELO_LOG").map(|v| v != "0").unwrap_or(false),
             metrics_path: std::env::var("VELO_METRICS").ok().filter(|v| v.starts_with('/')),
             etag: std::env::var("VELO_ETAG").map(|v| v != "0").unwrap_or(false),
+            rate: env_usize("VELO_RATE", 0) as u32,
+            real_ip_header: std::env::var("VELO_REAL_IP_HEADER")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_ascii_lowercase()),
+            limiter: (0..RATE_SHARDS).map(|_| Mutex::new(HashMap::default())).collect(),
             started: Instant::now(),
             requests: AtomicU64::new(0),
             failures: AtomicU64::new(0),
@@ -184,6 +198,31 @@ impl Server {
         out.push(b'}');
     }
 
+    pub fn allow(&self, key: &str) -> bool {
+        if self.rate == 0 {
+            return true;
+        }
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for b in key.as_bytes() {
+            hash ^= *b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        let mut shard = self.limiter[hash as usize % RATE_SHARDS].lock().unwrap();
+        let now = Instant::now();
+        if shard.len() > RATE_KEYS_MAX {
+            shard.retain(|_, (start, _)| now.duration_since(*start) < Duration::from_secs(1));
+        }
+        if let Some(slot) = shard.get_mut(key) {
+            if now.duration_since(slot.0) >= Duration::from_secs(1) {
+                *slot = (now, 0);
+            }
+            slot.1 += 1;
+            return slot.1 <= self.rate;
+        }
+        shard.insert(key.to_string(), (now, 1));
+        true
+    }
+
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
@@ -292,6 +331,7 @@ pub(crate) fn status_text(code: u16) -> &'static str {
         409 => "Conflict",
         411 => "Length Required",
         413 => "Payload Too Large",
+        429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         503 => "Service Unavailable",

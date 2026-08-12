@@ -817,3 +817,41 @@ fn autosave_writes_and_keeps_up() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn rate_limit_counts_per_client() {
+    let mut s = Server::new(compile(SRC, None).unwrap()).unwrap();
+    {
+        let srv = Arc::get_mut(&mut s).unwrap();
+        srv.rate = 3;
+        srv.real_ip_header = Some("x-real-ip".to_string());
+    }
+    for _ in 0..3 {
+        assert!(s.allow("1.2.3.4"));
+    }
+    assert!(!s.allow("1.2.3.4"));
+    assert!(s.allow("5.6.7.8"));
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bg = s.clone();
+    std::thread::spawn(move || bg.serve(listener));
+
+    let hit = |ip: &str| {
+        let req = format!(
+            "GET /health HTTP/1.1\r\nHost: x\r\nX-Real-Ip: {ip}\r\nConnection: close\r\n\r\n"
+        );
+        raw(port, req.as_bytes())
+    };
+    let mut codes = Vec::new();
+    for _ in 0..5 {
+        codes.push(hit("9.9.9.9").lines().next().unwrap_or_default().to_string());
+    }
+    assert!(codes.iter().any(|c| c.contains("429 Too Many Requests")), "{codes:?}");
+    assert!(codes.iter().filter(|c| c.contains("200 OK")).count() >= 3, "{codes:?}");
+    assert!(hit("8.8.8.8").ends_with("ok"));
+
+    let open = server();
+    assert!(open.allow("1.2.3.4"));
+    s.shutdown();
+}

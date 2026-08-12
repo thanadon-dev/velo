@@ -137,6 +137,20 @@ fn parse_etag(val: &[u8]) -> Option<u64> {
     u64::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()
 }
 
+fn header_value<'a>(raw: &'a [u8], name: &str) -> Option<&'a str> {
+    let mut pos = raw.iter().position(|&c| c == b'\n')? + 1;
+    while pos < raw.len() {
+        let nl = raw[pos..].iter().position(|&c| c == b'\n').map(|j| pos + j)?;
+        let line = strip_cr(&raw[pos..nl]);
+        pos = nl + 1;
+        let Some(colon) = line.iter().position(|&c| c == b':') else { continue };
+        if eq_ignore_case(&line[..colon], name.as_bytes()) {
+            return std::str::from_utf8(trim(&line[colon + 1..])).ok();
+        }
+    }
+    None
+}
+
 pub(crate) fn strip_cr(b: &[u8]) -> &[u8] {
     match b.last() {
         Some(b'\r') => &b[..b.len() - 1],
@@ -237,6 +251,7 @@ struct Conn {
     want_out: bool,
     continued: bool,
     served: bool,
+    peer: String,
     opened: Instant,
     last: Instant,
 }
@@ -254,6 +269,7 @@ impl Conn {
             want_out: false,
             continued: false,
             served: false,
+            peer: String::new(),
             opened: Instant::now(),
             last: Instant::now(),
         }
@@ -342,6 +358,23 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         let req = &c.inbuf[c.start..c.start + need];
         let method = std::str::from_utf8(&req[head.method.0..head.method.1]).unwrap_or("");
         let path = std::str::from_utf8(&req[head.path.0..head.path.1]).unwrap_or("/");
+        if srv.rate > 0 {
+            let key = match &srv.real_ip_header {
+                Some(name) => header_value(&req[..head.head_end], name).unwrap_or(&c.peer),
+                None => &c.peer,
+            };
+            if !srv.allow(key) {
+                write_head(&mut c.out, 429, Ctype::Json, 0, head.keep_alive, headers);
+                c.start += need;
+                c.served = true;
+                if !head.keep_alive {
+                    c.closing = true;
+                    c.compact();
+                    return;
+                }
+                continue;
+            }
+        }
         c.body.clear();
         let mut body = std::mem::take(&mut c.body);
         let (status, ct) =
@@ -491,7 +524,9 @@ fn accept_all(srv: &Server, listener: &TcpListener, ep: &Epoll, conns: &mut Conn
         }
         let _ = stream.set_nodelay(true);
         let key = stream.as_raw_fd() as u64;
-        let conn = Conn::new(stream);
+        let peer = stream.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default();
+        let mut conn = Conn::new(stream);
+        conn.peer = peer;
         if ep.add(&conn.stream, epoll::IN | epoll::RDHUP, key).is_err() {
             continue;
         }
