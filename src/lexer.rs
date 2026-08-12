@@ -17,6 +17,14 @@ pub enum Kind {
     Colon,
     Eq,
     Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    Plus,
+    Minus,
+    Star,
+    Slash,
 }
 
 impl Kind {
@@ -39,6 +47,14 @@ impl Kind {
             Kind::Colon => ":",
             Kind::Eq => "==",
             Kind::Ne => "!=",
+            Kind::Lt => "<",
+            Kind::Gt => ">",
+            Kind::Le => "<=",
+            Kind::Ge => ">=",
+            Kind::Plus => "+",
+            Kind::Minus => "-",
+            Kind::Star => "*",
+            Kind::Slash => "/",
         }
     }
 }
@@ -99,7 +115,9 @@ impl<'a> Lexer<'a> {
             }
             return Ok(Token::new(Kind::Ident, self.slice(start), self.line));
         }
-        if c.is_ascii_digit() || c == b'-' {
+        if c.is_ascii_digit()
+            || (c == b'-' && self.src.get(self.pos + 1).is_some_and(|n| n.is_ascii_digit()))
+        {
             let start = self.pos;
             self.pos += 1;
             while self.pos < self.src.len()
@@ -130,7 +148,22 @@ impl<'a> Lexer<'a> {
             self.pos += 2;
             return Ok(Token::new(Kind::Ne, "!=", self.line));
         }
+        if c == b'<' || c == b'>' {
+            let eq = self.src.get(self.pos + 1) == Some(&b'=');
+            self.pos += if eq { 2 } else { 1 };
+            let kind = match (c, eq) {
+                (b'<', false) => Kind::Lt,
+                (b'<', true) => Kind::Le,
+                (b'>', false) => Kind::Gt,
+                _ => Kind::Ge,
+            };
+            return Ok(Token::new(kind, kind.name(), self.line));
+        }
         let kind = match c {
+            b'+' => Kind::Plus,
+            b'-' => Kind::Minus,
+            b'*' => Kind::Star,
+            b'/' => Kind::Slash,
             b'(' => Kind::LParen,
             b')' => Kind::RParen,
             b'{' => Kind::LBrace,

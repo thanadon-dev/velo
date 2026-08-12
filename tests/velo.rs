@@ -20,6 +20,9 @@ POST /name            => body.name
 GET  /list            => [1, 2, "three", true, null]
 GET  /search          => db.users.where("name", query.name)
 GET  /find            => db.users.search("name", query.q)
+GET  /math            => { sum: 2 + 3 * 4, grouped: (2 + 3) * 4, div: 10 / 4, neg: 0 - 7, join: "a" + "b" }
+GET  /calc/:n         => { n: n, doubled: n * 2, next: n + 1, big: n > 10 }
+GET  /limited         => db.users.page(0, query.limit) when query.limit < 100 or 400
 GET  /totals          => { n: db.users.count(), sum: db.users.sum("score"), avg: db.users.avg("score"), lo: db.users.min("score"), hi: db.users.max("score") }
 GET  /q               => { limit: query.limit, tag: query.tag }
 GET  /raw/:v          => { v: v }
@@ -1206,4 +1209,59 @@ fn extra_headers_are_parsed_and_validated() {
     assert_eq!(render("X-A: with\rinjection"), "");
     assert_eq!(render(""), "");
     assert_eq!(String::from_utf8(velo::http::extra_headers(None)).unwrap(), "");
+}
+
+#[test]
+fn arithmetic_and_comparisons() {
+    let s = server();
+    assert_eq!(
+        call(&s, "GET", "/math", "").1,
+        r#"{"sum":14,"grouped":20,"div":2.5,"neg":-7,"join":"ab"}"#
+    );
+    assert_eq!(
+        call(&s, "GET", "/calc/21", "").1,
+        r#"{"n":"21","doubled":42,"next":22,"big":true}"#
+    );
+    assert_eq!(call(&s, "GET", "/calc/3", "").1, r#"{"n":"3","doubled":6,"next":4,"big":false}"#);
+    assert_eq!(
+        call(&s, "GET", "/calc/abc", "").1,
+        r#"{"n":"abc","doubled":null,"next":null,"big":false}"#
+    );
+
+    let math = compile("GET /a => { v: 6 * 7 }", None).unwrap();
+    assert_eq!(math.routes[0].konst.as_deref(), Some(br#"{"v":42}"#.as_slice()));
+
+    for _ in 0..3 {
+        call(&s, "POST", "/users", r#"{"name":"u"}"#);
+    }
+    assert_eq!(call(&s, "GET", "/limited?limit=2", "").1.matches(r#""id""#).count(), 2);
+    assert_eq!(call(&s, "GET", "/limited?limit=500", "").0, 400);
+    assert_eq!(call(&s, "GET", "/math", "").2, JSON);
+    assert!(compile("GET /a => 1 +", None).is_err());
+    assert!(compile("GET /a => (1 + 2", None).is_err());
+}
+
+#[test]
+fn comparison_type_rules() {
+    let cases = [
+        ("GET /a => 2 < 10", "true"),
+        ("GET /a => \"2\" < \"10\"", "true"),
+        ("GET /a => \"b\" < \"a\"", "false"),
+        ("GET /a => \"abc\" > 10", "false"),
+        ("GET /a => null > 1", "false"),
+        ("GET /a => 1 <= 1", "true"),
+        ("GET /a => 3 >= 4", "false"),
+        ("GET /a => \"7\" * \"6\"", "42"),
+        ("GET /a => \"x\" * 2", "null"),
+        ("GET /a => 5 / 0", "null"),
+        ("GET /a => 1 + 2 + 3", "6"),
+        ("GET /a => 10 - 3 - 2", "5"),
+        ("GET /a => 2 * 3 + 4 * 5", "26"),
+        ("GET /a => \"a\" + \"b\" + \"c\"", "abc"),
+    ];
+    for (src, want) in cases {
+        let prog = compile(src, None).unwrap_or_else(|e| panic!("{src}: {e}"));
+        let s = Server::new(prog).unwrap();
+        assert_eq!(call(&s, "GET", "/a", "").1, want, "{src}");
+    }
 }

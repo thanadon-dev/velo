@@ -4,8 +4,8 @@ use crate::value::Value;
 use std::sync::Arc;
 
 pub use crate::ast::{
-    call_builtin, decode_param, parse_query, percent_decode, truthy, Builtin, Ctx, Err_, Expr, Op,
-    BAD_BODY, CONFLICT, MAX_PARAMS, NOT_FOUND,
+    call_builtin, decode_param, parse_query, percent_decode, truthy, BinOp, Builtin, Ctx, Err_,
+    Expr, Op, BAD_BODY, CONFLICT, MAX_PARAMS, NOT_FOUND,
 };
 
 pub struct Route {
@@ -222,15 +222,7 @@ impl<'a> Parser<'a> {
         }
         let guard = if self.tok.kind == Kind::Ident && self.tok.text == "when" {
             self.advance()?;
-            let left = self.expr()?;
-            let g = match self.tok.kind {
-                Kind::Eq | Kind::Ne => {
-                    let eq = self.tok.kind == Kind::Eq;
-                    self.advance()?;
-                    Expr::Cmp(Box::new(left), eq, Box::new(self.expr()?))
-                }
-                _ => left,
-            };
+            let g = self.expr()?;
             self.pure = false;
             Some(g)
         } else {
@@ -276,6 +268,62 @@ impl<'a> Parser<'a> {
     }
 
     fn expr(&mut self) -> Result<Expr, String> {
+        let left = self.additive()?;
+        let op = match self.tok.kind {
+            Kind::Eq => return self.compare(left, true),
+            Kind::Ne => return self.compare(left, false),
+            Kind::Lt => BinOp::Lt,
+            Kind::Gt => BinOp::Gt,
+            Kind::Le => BinOp::Le,
+            Kind::Ge => BinOp::Ge,
+            _ => return Ok(left),
+        };
+        self.advance()?;
+        let right = self.additive()?;
+        Ok(Expr::Bin(op, Box::new(left), Box::new(right)))
+    }
+
+    fn compare(&mut self, left: Expr, eq: bool) -> Result<Expr, String> {
+        self.advance()?;
+        let right = self.additive()?;
+        Ok(Expr::Cmp(Box::new(left), eq, Box::new(right)))
+    }
+
+    fn additive(&mut self) -> Result<Expr, String> {
+        let mut left = self.multiplicative()?;
+        loop {
+            let op = match self.tok.kind {
+                Kind::Plus => BinOp::Add,
+                Kind::Minus => BinOp::Sub,
+                _ => return Ok(left),
+            };
+            self.advance()?;
+            let right = self.multiplicative()?;
+            left = Expr::Bin(op, Box::new(left), Box::new(right));
+        }
+    }
+
+    fn multiplicative(&mut self) -> Result<Expr, String> {
+        let mut left = self.primary()?;
+        loop {
+            let op = match self.tok.kind {
+                Kind::Star => BinOp::Mul,
+                Kind::Slash => BinOp::Div,
+                _ => return Ok(left),
+            };
+            self.advance()?;
+            let right = self.primary()?;
+            left = Expr::Bin(op, Box::new(left), Box::new(right));
+        }
+    }
+
+    fn primary(&mut self) -> Result<Expr, String> {
+        if self.tok.kind == Kind::LParen {
+            self.advance()?;
+            let inner = self.expr()?;
+            self.expect(Kind::RParen)?;
+            return Ok(inner);
+        }
         match self.tok.kind {
             Kind::Str => {
                 let e = Expr::Const(Value::str(&self.tok.text));

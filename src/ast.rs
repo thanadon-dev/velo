@@ -56,6 +56,19 @@ pub enum Expr {
     Db(Arc<Collection>, Op),
     Call(Builtin, Vec<Expr>),
     Cmp(Box<Expr>, bool, Box<Expr>),
+    Bin(BinOp, Box<Expr>, Box<Expr>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Lt,
+    Gt,
+    Le,
+    Ge,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -147,6 +160,7 @@ impl Expr {
                 }
                 Ok(Value::Arr(Arc::new(out)))
             }
+            Expr::Bin(op, l, r) => Ok(apply(*op, &l.eval(c)?, &r.eval(c)?)),
             Expr::Cmp(l, eq, r) => {
                 let same = l.eval(c)?.as_key() == r.eval(c)?.as_key();
                 Ok(Value::Bool(same == *eq))
@@ -212,6 +226,52 @@ impl Expr {
                 }
             },
         }
+    }
+}
+
+fn as_num(v: &Value) -> Option<f64> {
+    match v {
+        Value::Num(n) => Some(*n),
+        Value::Str(s) => s.trim().parse().ok(),
+        Value::Bool(b) => Some(*b as u8 as f64),
+        Value::Raw(bytes) => std::str::from_utf8(bytes).ok().and_then(|t| t.trim().parse().ok()),
+        _ => None,
+    }
+}
+
+pub fn apply(op: BinOp, l: &Value, r: &Value) -> Value {
+    if op == BinOp::Add {
+        if let (Value::Str(a), Value::Str(b)) = (l, r) {
+            return Value::Str(Arc::from(format!("{a}{b}").as_str()));
+        }
+    }
+    let (Some(a), Some(b)) = (as_num(l), as_num(r)) else {
+        return match (op, l, r) {
+            (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div, _, _) => Value::Null,
+            (_, Value::Str(x), Value::Str(y)) => Value::Bool(match op {
+                BinOp::Lt => x < y,
+                BinOp::Gt => x > y,
+                BinOp::Le => x <= y,
+                _ => x >= y,
+            }),
+            _ => Value::Bool(false),
+        };
+    };
+    match op {
+        BinOp::Add => Value::Num(a + b),
+        BinOp::Sub => Value::Num(a - b),
+        BinOp::Mul => Value::Num(a * b),
+        BinOp::Div => {
+            if b == 0.0 {
+                Value::Null
+            } else {
+                Value::Num(a / b)
+            }
+        }
+        BinOp::Lt => Value::Bool(a < b),
+        BinOp::Gt => Value::Bool(a > b),
+        BinOp::Le => Value::Bool(a <= b),
+        BinOp::Ge => Value::Bool(a >= b),
     }
 }
 
