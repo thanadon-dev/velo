@@ -340,11 +340,21 @@ impl Store {
 
     pub fn autosave(self: &Arc<Self>, path: std::path::PathBuf, every: std::time::Duration) {
         let store = self.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(every);
-            if store.take_dirty() {
-                if let Err(e) = store.save_to(&path) {
-                    eprintln!("velo: save {}: {e}", path.display());
+        let duty = std::env::var("VELO_SAVE_DUTY")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(10)
+            .clamp(1, 100) as u32;
+        std::thread::spawn(move || {
+            let mut cost = std::time::Duration::ZERO;
+            loop {
+                std::thread::sleep(every.max(cost * (100 / duty).saturating_sub(1)));
+                if store.take_dirty() {
+                    let started = std::time::Instant::now();
+                    if let Err(e) = store.save_to(&path) {
+                        eprintln!("velo: save {}: {e}", path.display());
+                    }
+                    cost = started.elapsed();
                 }
             }
         });

@@ -782,3 +782,38 @@ fn openapi_document() {
     assert!(text.contains(r#""name":"x-team","in":"header""#), "{text}");
     assert!(text.contains(r#""/gone/{id}""#), "{text}");
 }
+
+#[test]
+fn autosave_writes_and_keeps_up() {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("velo-autosave-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let store = velo::Store::new();
+    let s = Server::new(compile(SRC, Some(store.clone())).unwrap()).unwrap();
+    store.autosave(path.clone(), Duration::from_millis(20));
+
+    call(&s, "POST", "/users", r#"{"name":"first"}"#);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(raw) = std::fs::read(&path) {
+            if String::from_utf8_lossy(&raw).contains("first") {
+                break;
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "autosave never wrote {path:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    call(&s, "POST", "/users", r#"{"name":"second"}"#);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(raw) = std::fs::read(&path) {
+            if String::from_utf8_lossy(&raw).contains("second") {
+                break;
+            }
+        }
+        assert!(std::time::Instant::now() < deadline, "second write never saved");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = std::fs::remove_file(&path);
+}
