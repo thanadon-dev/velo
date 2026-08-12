@@ -40,6 +40,30 @@ impl Value {
         }
     }
 
+    pub fn get_ref(&self, key: &str) -> Option<&Value> {
+        match self {
+            Value::Obj(o) | Value::Row(o, _) => o.iter().find(|(k, _)| &**k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    pub fn key_eq(&self, want: &str) -> bool {
+        match self {
+            Value::Str(s) => &**s == want,
+            Value::Null => want.is_empty(),
+            Value::Bool(true) => want == "true",
+            Value::Bool(false) => want == "false",
+            Value::Num(n) => {
+                let mut buf = [0u8; 32];
+                let mut out = Vec::new();
+                let _ = &mut buf;
+                write_number(&mut out, *n);
+                out == want.as_bytes()
+            }
+            other => other.as_key() == want,
+        }
+    }
+
     pub fn as_key(&self) -> String {
         match self {
             Value::Str(s) => s.to_string(),

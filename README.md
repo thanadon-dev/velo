@@ -1,6 +1,6 @@
 # Velo
 
-**v0.17.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.17.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -37,6 +37,7 @@ CLI:
 | `velo new <file>` | write a starter file |
 | `velo version` | print version |
 | `velobench [-c n] [-d secs] [-p depth] [-m method] [-b body] <url>` | built-in keep-alive load generator |
+| `velomicro [rows]` | microbenchmark of the dispatch path, no sockets |
 
 ## Language
 
@@ -73,7 +74,7 @@ Built-in store (`db.<collection>.<op>`):
 | `count()` | number | |
 | `find(key)` | row | 404 |
 | `first(field, value)` | first matching row | 404 |
-| `where(field, value)` | array of matching rows | `[]` |
+| `where(field, value)` | array of matching rows, linear scan | `[]` |
 | `page(offset, limit)` | slice of rows, `limit` 0 means "to the end" | `[]` |
 | `order(field)` | rows sorted by `field`, `"-field"` for descending | `[]` |
 | `create(value)` | the stored row; `id` is generated unless the value carries one | 400 on an empty body, 409 on a duplicate `id` |
@@ -142,6 +143,7 @@ Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothin
 | `src/date.rs` | `Date` header formatting |
 | `src/main.rs` | CLI |
 | `src/bin/velobench.rs` | load generator |
+| `src/bin/velomicro.rs` | in-process dispatch microbenchmark, `velomicro [rows]` |
 
 ## Design
 
@@ -173,7 +175,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.17.0. The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.17.1. The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — this is client-bound, both processes fight for the same 4 cores:
 
@@ -189,15 +191,17 @@ Load generator: `velobench` (ships in this repo, thread per connection, keep-ali
 | `/users/page` (20 of 200) | slice + render | 54 500 |
 | `/users/sorted` | cached sort | 49 900 |
 
-`-c 8 -p 32`, pipelined — this is what the server itself can do:
+`-c 8 -p 32`, pipelined — this is what the server itself can do, with 500 rows in `users`:
 
 | route | req/s |
 | --- | --- |
-| `/health` | 1 111 000 |
-| `/users/:id` | 1 037 000 |
-| `/stats` | 393 000 |
-| `/users` (200 rows) | 141 000 (1.2 GB/s) |
-| `/users/sorted` | 120 000 |
+| `/users/:id` | 968 000 |
+| `/health` | 867 000 |
+| `/users/by/team` (1 of 500 matches) | 82 000 |
+| `/users` (500 rows, 18 kB) | 62 000 |
+| `/users/sorted` (cached sort) | 56 000 |
+
+In-process, no sockets (`velomicro 500`): `find` 0.23 us, `all` 0.35 us, `order` 0.64 us, `where` 7.1 us per call.
 
 Connection scaling (`/health`), server RSS while serving:
 
@@ -266,6 +270,8 @@ WantedBy=default.target
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.17.1** — `where` and `first` compare fields without allocating a string per row and `order` extracts each sort key once: `where` over HTTP went from 2.4k to 82k req/s on a 500-row collection. Added `velomicro`, an in-process dispatch benchmark.
 
 **v0.17.0** — optional `ETag` / `If-None-Match` (`VELO_ETAG=1`): 200 `GET` and `HEAD` responses carry an FNV tag of the body and a matching conditional request answers 304 without the body.
 

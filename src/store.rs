@@ -38,12 +38,14 @@ impl Snapshot {
             Some(f) => (f, true),
             None => (field, false),
         };
-        let mut rows: Vec<Value> = self.rows.as_ref().clone();
-        rows.sort_by(|a, b| {
-            let (x, y) = (a.get(key), b.get(key));
-            let ord = match (&x, &y) {
-                (Value::Num(m), Value::Num(n)) => m.partial_cmp(n).unwrap_or(Ordering2::Equal),
-                _ => x.as_key().cmp(&y.as_key()),
+        let mut keyed: Vec<(SortKey, &Value)> =
+            self.rows.iter().map(|r| (sort_key(r.get_ref(key)), r)).collect();
+        keyed.sort_by(|(a, _), (b, _)| {
+            let ord = match (a, b) {
+                (SortKey::Num(m), SortKey::Num(n)) => m.partial_cmp(n).unwrap_or(Ordering2::Equal),
+                (SortKey::Num(_), _) => Ordering2::Less,
+                (_, SortKey::Num(_)) => Ordering2::Greater,
+                (SortKey::Text(m), SortKey::Text(n)) => m.cmp(n),
             };
             if desc {
                 ord.reverse()
@@ -51,8 +53,15 @@ impl Snapshot {
                 ord
             }
         });
-        let mut out = Vec::with_capacity(rows.len() * 64 + 2);
-        Value::Arr(Arc::new(rows)).write_json(&mut out);
+        let mut out = Vec::with_capacity(self.rows.len() * 64 + 2);
+        out.push(b'[');
+        for (i, (_, row)) in keyed.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            row.write_json(&mut out);
+        }
+        out.push(b']');
         let json: Arc<[u8]> = Arc::from(out.as_slice());
         let mut cache = self.sorted.lock().unwrap();
         if cache.len() >= SORT_CACHE_MAX {
@@ -124,13 +133,13 @@ impl Collection {
     pub fn filter(&self, field: &str, want: &str) -> Value {
         let s = self.snap.read().unwrap();
         let rows: Vec<Value> =
-            s.rows.iter().filter(|r| r.get(field).as_key() == want).cloned().collect();
+            s.rows.iter().filter(|r| field_eq(r, field, want)).cloned().collect();
         Value::Arr(Arc::new(rows))
     }
 
     pub fn first(&self, field: &str, want: &str) -> Option<Value> {
         let s = self.snap.read().unwrap();
-        s.rows.iter().find(|r| r.get(field).as_key() == want).cloned()
+        s.rows.iter().find(|r| field_eq(r, field, want)).cloned()
     }
 
     pub fn page(&self, offset: usize, limit: usize) -> Value {
@@ -308,6 +317,26 @@ impl Store {
                 }
             }
         });
+    }
+}
+
+enum SortKey {
+    Num(f64),
+    Text(String),
+}
+
+fn sort_key(v: Option<&Value>) -> SortKey {
+    match v {
+        Some(Value::Num(n)) => SortKey::Num(*n),
+        Some(other) => SortKey::Text(other.as_key()),
+        None => SortKey::Text(String::new()),
+    }
+}
+
+fn field_eq(row: &Value, field: &str, want: &str) -> bool {
+    match row.get_ref(field) {
+        Some(v) => v.key_eq(want),
+        None => want.is_empty(),
     }
 }
 
