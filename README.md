@@ -1,6 +1,6 @@
 # Velo
 
-**v0.32.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.32.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -256,7 +256,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.32.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.32.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -325,7 +325,7 @@ cargo test
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, `--watch` restarting on a change and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
-`tests/fuzz.rs` adds six deterministic robustness tests: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, 400 connections carrying byte-level mutations of otherwise valid requests (every answer must still be a well-formed status line), and oversized header and body requests. They also cover slow drip-feeding clients. They assert the process never panics and that the server still answers a normal request afterwards.
+`tests/fuzz.rs` adds six deterministic robustness tests: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, 400 connections carrying byte-level mutations of otherwise valid requests (every answer must still be a well-formed status line), and oversized header and body requests. They also cover slow drip-feeding clients. `VELO_FUZZ_ROUNDS` raises the iteration counts for a longer hunt; 40 000 compiler mutations and 4 000 mutated requests have been run clean. They assert the process never panics and that the server still answers a normal request afterwards.
 
 ## CI
 
@@ -356,6 +356,8 @@ cargo test
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.32.1** — fuzz iteration counts are configurable with `VELO_FUZZ_ROUNDS`; an extended run (40 000 compiler mutations, 4 000 mutated requests) found only a divide-by-zero in the fuzz harness itself, now fixed.
 
 **v0.32.0** — a request body that is not JSON is retried as `application/x-www-form-urlencoded`, so HTML forms and `curl --data-urlencode` work without changing a route.
 

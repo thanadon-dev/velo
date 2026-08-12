@@ -12,6 +12,10 @@ GET  /q           => { a: query.a, n: len(query.a) }
 GET  /sorted      => db.users.order(query.by)
 "#;
 
+fn iterations(default: usize) -> usize {
+    std::env::var("VELO_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
 struct Rng(u64);
 
 impl Rng {
@@ -27,15 +31,19 @@ impl Rng {
     }
 
     fn below(&mut self, n: usize) -> usize {
+        if n == 0 {
+            return 0;
+        }
         (self.next() % n as u64) as usize
     }
 }
 
 #[test]
 fn compiler_survives_mutated_sources() {
+    let rounds = iterations(2000);
     let mut rng = Rng(0x5eed_1234_abcd_0001);
     let base = SRC.as_bytes();
-    for _ in 0..2000 {
+    for _ in 0..rounds {
         let mut src = base.to_vec();
         for _ in 0..1 + rng.below(6) {
             let at = rng.below(src.len());
@@ -56,8 +64,9 @@ fn compiler_survives_mutated_sources() {
 
 #[test]
 fn compiler_survives_random_bytes() {
+    let rounds = iterations(2000);
     let mut rng = Rng(0xfeed_0000_0000_beef);
-    for _ in 0..2000 {
+    for _ in 0..rounds {
         let len = rng.below(64);
         let bytes: Vec<u8> = (0..len).map(|_| rng.byte()).collect();
         let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -197,9 +206,12 @@ fn mutated_valid_requests_never_break_the_server() {
     ];
 
     let mut rng = Rng(0x000a_11ce_5eed_0007);
-    for round in 0..400 {
+    for round in 0..iterations(400) {
         let mut req = seeds[rng.below(seeds.len())].as_bytes().to_vec();
         for _ in 0..1 + rng.below(4) {
+            if req.is_empty() {
+                break;
+            }
             let at = rng.below(req.len());
             match rng.below(4) {
                 0 => req[at] = rng.byte(),
@@ -209,7 +221,7 @@ fn mutated_valid_requests_never_break_the_server() {
                 2 => req.insert(at, rng.byte()),
                 _ => {
                     let end = (at + 1 + rng.below(8)).min(req.len());
-                    req.truncate(end);
+                    req.truncate(end.max(1));
                 }
             }
         }
