@@ -468,3 +468,62 @@ fn serves_on_a_unix_socket() {
     assert!(!sock.exists(), "socket file left behind");
     let _ = std::fs::remove_file(&app);
 }
+
+#[test]
+fn documented_knobs_and_operations_exist() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+
+    let mut sources = String::new();
+    for dir in ["src", "src/bin", "tests"] {
+        for entry in std::fs::read_dir(root.join(dir)).unwrap().flatten() {
+            if entry.path().extension().is_some_and(|e| e == "rs") {
+                sources.push_str(&std::fs::read_to_string(entry.path()).unwrap());
+            }
+        }
+    }
+
+    let mut documented: Vec<String> = Vec::new();
+    let mut rest = readme.as_str();
+    while let Some(at) = rest.find("`VELO_") {
+        rest = &rest[at + 1..];
+        let name: String =
+            rest.chars().take_while(|c| c.is_ascii_uppercase() || *c == '_').collect();
+        if !documented.contains(&name) {
+            documented.push(name);
+        }
+    }
+    assert!(documented.len() > 10, "README lost its environment table");
+    for name in &documented {
+        assert!(sources.contains(name.as_str()), "{name} is documented but not used anywhere");
+    }
+
+    let program = "\
+GET /a1 => db.x.all()\n\
+GET /a2 => db.x.count()\n\
+GET /a3 => db.x.find(\"1\")\n\
+GET /a4 => db.x.first(\"k\", \"v\")\n\
+GET /a5 => db.x.where(\"k\", \"v\")\n\
+GET /a6 => db.x.search(\"k\", \"v\")\n\
+GET /a7 => db.x.order(\"k\")\n\
+GET /a8 => db.x.page(0, 10)\n\
+GET /a9 => { s: db.x.sum(\"n\"), a: db.x.avg(\"n\"), l: db.x.min(\"n\"), h: db.x.max(\"n\") }\n\
+POST /a10 => db.x.create(body)\n\
+PUT /a11/:id => db.x.update(id, body)\n\
+PUT /a12/:id => db.x.upsert(id, body)\n\
+DELETE /a13/:id => db.x.delete(id)\n\
+DELETE /a14 => db.x.delete_where(\"k\", \"v\")\n\
+DELETE /a15 => db.x.clear()\n\
+GET /b1 => { now: now(), id: uuid(), n: len(\"abc\"), home: env(\"HOME\"), at: date(now()) }\n\
+GET /b2 => openapi()\n\
+GET /c1 => { m: 1 + 2 * 3, d: 10 / 4, cmp: 2 < 3, both: 1 == 1 and 2 != 3 }\n\
+GET /c2/:id => { id: id, q: query.z, h: header.x_test, doubled: id * 2 } : 200\n\
+POST /c3 => body.name when body.name and header.x_key else 400\n";
+
+    let path = tmp("everything.velo");
+    write(&path, program);
+    let out = Command::new(BIN).arg("check").arg(&path).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("20 routes"));
+    let _ = std::fs::remove_file(&path);
+}
