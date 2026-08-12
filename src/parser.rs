@@ -73,6 +73,7 @@ impl Method {
 pub struct Program {
     pub routes: Vec<Route>,
     pub store: Arc<Store>,
+    pub includes: Vec<String>,
 }
 
 pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> {
@@ -91,13 +92,20 @@ pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> 
     };
     p.advance().map_err(|e| with_source(src, e))?;
     let mut routes = Vec::new();
+    let mut includes = Vec::new();
     while p.tok.kind != Kind::Eof {
+        if p.tok.kind == Kind::Ident && p.tok.text == "include" {
+            p.advance().map_err(|e| with_source(src, e))?;
+            let file = p.expect(Kind::Str).map_err(|e| with_source(src, e))?;
+            includes.push(file.text);
+            continue;
+        }
         routes.push(p.route().map_err(|e| with_source(src, e))?);
     }
-    if routes.is_empty() {
+    if routes.is_empty() && includes.is_empty() {
         return Err("no routes defined".to_string());
     }
-    let mut prog = Program { routes, store };
+    let mut prog = Program { routes, store, includes };
     bake_openapi(&mut prog);
     Ok(prog)
 }

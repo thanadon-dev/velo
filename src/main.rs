@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::exit;
 use std::time::Duration;
-use velo::{compile, Server, Store, VERSION};
+use velo::{compile_file, Server, Store, VERSION};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -42,19 +42,18 @@ fn flag(args: &[String], name: &str) -> Option<String> {
     args.get(i + 1).cloned()
 }
 
-fn src(args: &[String]) -> String {
+fn program(args: &[String], store: Option<std::sync::Arc<Store>>) -> velo::Program {
     let Some(path) = args.get(2) else { usage(2) };
-    match std::fs::read_to_string(path) {
-        Ok(s) => s,
+    match compile_file(std::path::Path::new(path), store) {
+        Ok(p) => p,
         Err(e) => {
-            eprintln!("velo: {path}: {e}");
+            eprintln!("velo: {e}");
             exit(1)
         }
     }
 }
 
 fn run(args: &[String]) {
-    let source = src(args);
     let data = flag(args, "--data").or_else(|| std::env::var("VELO_DATA").ok()).map(PathBuf::from);
     let addr = args
         .get(3)
@@ -65,13 +64,7 @@ fn run(args: &[String]) {
     let addr =
         if let Some(port) = addr.strip_prefix(':') { format!("0.0.0.0:{port}") } else { addr };
     let store = Store::new();
-    let prog = match compile(&source, Some(store.clone())) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("velo: {e}");
-            exit(1)
-        }
-    };
+    let prog = program(args, Some(store.clone()));
     if let Some(path) = &data {
         if let Err(e) = store.load_file(path) {
             eprintln!("velo: {}: {e}", path.display());
@@ -129,29 +122,21 @@ fn new(args: &[String]) {
 }
 
 fn openapi(args: &[String]) {
-    let source = src(args);
     let path = args.get(2).cloned().unwrap_or_default();
     let title = std::path::Path::new(&path)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("velo api")
         .to_string();
-    match compile(&source, None) {
-        Ok(p) => {
-            let doc = velo::openapi::document(&p, &title, VERSION);
-            println!("{}", String::from_utf8_lossy(&doc));
-        }
-        Err(e) => {
-            eprintln!("velo: {e}");
-            exit(1)
-        }
-    }
+    let p = program(args, None);
+    let doc = velo::openapi::document(&p, &title, VERSION);
+    println!("{}", String::from_utf8_lossy(&doc));
 }
 
 fn check(args: &[String]) {
-    let source = src(args);
-    match compile(&source, None) {
-        Ok(p) => println!("ok: {} routes", p.routes.len()),
+    let prog = program(args, None);
+    match Server::new(prog) {
+        Ok(s) => println!("ok: {} routes", s.routes.len()),
         Err(e) => {
             eprintln!("velo: {e}");
             exit(1)
@@ -160,33 +145,17 @@ fn check(args: &[String]) {
 }
 
 fn routes(args: &[String]) {
-    let source = src(args);
-    match compile(&source, None) {
-        Ok(p) => {
-            for r in &p.routes {
-                let kind = match (&r.konst, r.uses_body, r.uses_query) {
-                    (Some(_), _, _) => "const",
-                    (None, true, _) => "body",
-                    (None, _, true) => "query",
-                    _ => "dynamic",
-                };
-                let guard = match &r.guard {
-                    Some(_) => format!("guard {}", r.guard_status),
-                    None => String::new(),
-                };
-                println!(
-                    "{:<7} {:<28} {:<8} {:<4} {}",
-                    r.method.name(),
-                    r.pattern,
-                    kind,
-                    r.status,
-                    guard
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("velo: {e}");
-            exit(1)
-        }
+    for r in &program(args, None).routes {
+        let kind = match (&r.konst, r.uses_body, r.uses_query) {
+            (Some(_), _, _) => "const",
+            (None, true, _) => "body",
+            (None, _, true) => "query",
+            _ => "dynamic",
+        };
+        let guard = match &r.guard {
+            Some(_) => format!("guard {}", r.guard_status),
+            None => String::new(),
+        };
+        println!("{:<7} {:<28} {:<8} {:<4} {}", r.method.name(), r.pattern, kind, r.status, guard);
     }
 }

@@ -220,3 +220,48 @@ fn metrics_track_latency_and_bytes() {
     stop(&mut child, "-TERM");
     let _ = std::fs::remove_file(&app);
 }
+
+#[test]
+fn includes_merge_files_and_ignore_cycles() {
+    let dir = tmp("inc");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    write(
+        &dir.join("app.velo"),
+        "include \"parts/users.velo\"\ninclude \"parts/posts.velo\"\n\nGET /health => \"ok\"\n",
+    );
+    write(
+        &dir.join("parts/users.velo"),
+        "GET /users => db.users.all()\nPOST /users => db.users.create(body)\n",
+    );
+    write(&dir.join("parts/posts.velo"), "GET /posts => db.posts.all()\ninclude \"users.velo\"\n");
+
+    let out = Command::new(BIN).arg("routes").arg(dir.join("app.velo")).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(text.lines().count(), 4, "{text}");
+    for path in ["/health", "/users", "/posts"] {
+        assert!(text.contains(path), "{text}");
+    }
+
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(dir.join("app.velo"))
+        .arg(format!("127.0.0.1:{port}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(get(port, "/health").ends_with("ok"));
+    assert!(post(port, "/users", r#"{"name":"a"}"#).contains(r#""id":1"#));
+    assert!(get(port, "/posts").ends_with("[]"));
+    stop(&mut child, "-TERM");
+
+    write(&dir.join("broken.velo"), "include \"nope.velo\"\nGET /a => 1\n");
+    let out = Command::new(BIN).arg("check").arg(dir.join("broken.velo")).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nope.velo"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
