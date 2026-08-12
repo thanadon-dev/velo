@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
+use std::time::Duration;
 use velo::http::Ctype;
 use velo::value::parse_json;
 use velo::{compile, Server, Value};
@@ -628,4 +629,25 @@ fn metrics_endpoint() {
 
     let plain = server();
     assert_eq!(call(&plain, "GET", "/_metrics", "").0, 404);
+}
+
+#[test]
+fn expect_continue_is_answered() {
+    let port = spawn();
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(
+        b"POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 15\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+    )
+    .unwrap();
+    let mut buf = [0u8; 128];
+    let n = c.read(&mut buf).unwrap();
+    let interim = String::from_utf8_lossy(&buf[..n]).to_string();
+    assert!(interim.starts_with("HTTP/1.1 100 Continue\r\n\r\n"), "{interim}");
+
+    c.write_all(b"{\"name\":\"mark\"}").unwrap();
+    let mut rest = String::new();
+    c.read_to_string(&mut rest).unwrap();
+    assert!(rest.starts_with("HTTP/1.1 201 Created"), "{rest}");
+    assert!(rest.ends_with(r#"{"id":1,"name":"mark"}"#), "{rest}");
 }

@@ -21,6 +21,7 @@ struct Head {
     content_len: usize,
     keep_alive: bool,
     head_only: bool,
+    expects: bool,
     error: Option<u16>,
 }
 
@@ -39,6 +40,7 @@ fn parse_head(buf: &[u8]) -> Option<Head> {
     let mut content_len = 0usize;
     let mut seen_len = false;
     let mut chunked = false;
+    let mut expects = false;
     let mut pos = line_end + 1;
     while pos < end {
         let nl = match buf[pos..end].iter().position(|&c| c == b'\n') {
@@ -64,6 +66,8 @@ fn parse_head(buf: &[u8]) -> Option<Head> {
             } else if contains_ignore_case(val, b"keep-alive") {
                 keep_alive = true;
             }
+        } else if eq_ignore_case(name, b"expect") {
+            expects = contains_ignore_case(val, b"100-continue");
         } else if eq_ignore_case(name, b"transfer-encoding")
             && contains_ignore_case(val, b"chunked")
         {
@@ -85,6 +89,7 @@ fn parse_head(buf: &[u8]) -> Option<Head> {
         content_len: if error.is_some() { 0 } else { content_len },
         keep_alive: keep_alive && error.is_none(),
         head_only,
+        expects,
         error,
     })
 }
@@ -97,6 +102,7 @@ fn bad(end: usize, code: u16) -> Head {
         content_len: 0,
         keep_alive: false,
         head_only: false,
+        expects: false,
         error: Some(code),
     }
 }
@@ -201,6 +207,7 @@ struct Conn {
     body: Vec<u8>,
     closing: bool,
     want_out: bool,
+    continued: bool,
     served: bool,
     opened: Instant,
     last: Instant,
@@ -217,6 +224,7 @@ impl Conn {
             body: Vec::with_capacity(512),
             closing: false,
             want_out: false,
+            continued: false,
             served: false,
             opened: Instant::now(),
             last: Instant::now(),
@@ -289,6 +297,10 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         };
         let need = head.head_end + head.content_len;
         if c.inbuf.len() - c.start < need {
+            if head.expects && !c.continued && head.error.is_none() {
+                c.out.extend_from_slice(b"HTTP/1.1 100 Continue\r\n\r\n");
+                c.continued = true;
+            }
             c.compact();
             return;
         }
@@ -316,6 +328,7 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         c.body = body;
         c.start += need;
         c.served = true;
+        c.continued = false;
         if !head.keep_alive {
             c.closing = true;
             c.compact();
