@@ -199,6 +199,32 @@ pub fn write_string(out: &mut Vec<u8>, s: &str) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonError;
 
+type Interner = std::cell::RefCell<std::collections::HashMap<Box<str>, Arc<str>>>;
+
+thread_local! {
+    static KEYS: Interner = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+const INTERN_MAX: usize = 512;
+
+pub fn intern(name: &str) -> Arc<str> {
+    if name.len() > 64 {
+        return Arc::from(name);
+    }
+    KEYS.with(|keys| {
+        let mut keys = keys.borrow_mut();
+        if let Some(hit) = keys.get(name) {
+            return hit.clone();
+        }
+        if keys.len() >= INTERN_MAX {
+            keys.clear();
+        }
+        let shared: Arc<str> = Arc::from(name);
+        keys.insert(Box::from(name), shared.clone());
+        shared
+    })
+}
+
 pub fn parse_json(b: &[u8]) -> Result<Value, JsonError> {
     let mut p = P { b, i: 0 };
     p.ws();
@@ -258,7 +284,7 @@ impl<'a> P<'a> {
         }
         loop {
             self.ws();
-            let k = self.string()?;
+            let k = self.key()?;
             self.ws();
             if self.i >= self.b.len() || self.b[self.i] != b':' {
                 return Err(JsonError);
@@ -300,6 +326,21 @@ impl<'a> P<'a> {
                 _ => return Err(JsonError),
             }
         }
+    }
+
+    fn key(&mut self) -> Result<Arc<str>, JsonError> {
+        if self.i < self.b.len() && self.b[self.i] == b'"' {
+            let start = self.i + 1;
+            if let Some(end) = self.b[start..].iter().position(|&c| c == b'"' || c == b'\\') {
+                if self.b[start + end] == b'"' {
+                    let name =
+                        std::str::from_utf8(&self.b[start..start + end]).map_err(|_| JsonError)?;
+                    self.i = start + end + 1;
+                    return Ok(intern(name));
+                }
+            }
+        }
+        self.string()
     }
 
     fn string(&mut self) -> Result<Arc<str>, JsonError> {
