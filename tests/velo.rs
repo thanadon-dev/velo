@@ -1189,3 +1189,21 @@ fn form_encoded_bodies_are_accepted() {
     assert_eq!(call(&s, "POST", "/users", "=novalue").0, 400);
     assert_eq!(call(&s, "POST", "/name", "name=fromform"), (201, "fromform".into(), TEXT));
 }
+
+#[test]
+fn extra_headers_are_parsed_and_validated() {
+    let render =
+        |spec: &str| String::from_utf8(velo::http::extra_headers(Some(spec.into()))).unwrap();
+    assert_eq!(render("X-A: 1"), "X-A: 1\r\n");
+    assert_eq!(render("X-A: 1; X-B: two"), "X-A: 1\r\nX-B: two\r\n");
+    assert_eq!(render("X-A: 1\nX-B: two\n"), "X-A: 1\r\nX-B: two\r\n");
+    assert_eq!(
+        render("Cache-Control: public, max-age=60"),
+        "Cache-Control: public, max-age=60\r\n"
+    );
+    assert_eq!(render("no colon here"), "");
+    assert_eq!(render("Bad Name: 1"), "");
+    assert_eq!(render("X-A: with\rinjection"), "");
+    assert_eq!(render(""), "");
+    assert_eq!(String::from_utf8(velo::http::extra_headers(None)).unwrap(), "");
+}

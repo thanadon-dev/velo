@@ -91,7 +91,11 @@ impl Server {
             keepalive_secs: env_usize("VELO_KEEPALIVE", 60) as u64,
             header_secs: env_usize("VELO_HEADER_TIMEOUT", 10) as u64,
             workers: env_usize("VELO_WORKERS", cpus).max(1),
-            extra_headers: cors_headers(&cors),
+            extra_headers: {
+                let mut h = cors_headers(&cors);
+                h.extend_from_slice(&extra_headers(std::env::var("VELO_HEADERS").ok()));
+                h
+            },
             cors: cors.is_some(),
             log: std::env::var("VELO_LOG").map(|v| v != "0").unwrap_or(false),
             log_json: std::env::var("VELO_LOG").map(|v| v == "json").unwrap_or(false),
@@ -371,6 +375,35 @@ pub fn parse_headers(raw: &[u8]) -> Value {
         fields.push((Arc::from(name.as_str()), Value::str(value)));
     }
     Value::obj(fields)
+}
+
+pub fn extra_headers(spec: Option<String>) -> Vec<u8> {
+    let mut out = Vec::new();
+    let Some(spec) = spec else { return out };
+    for line in spec.split(['\n', ';']) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            eprintln!("velo: ignoring header without a colon: {line:?}");
+            continue;
+        };
+        let (name, value) = (name.trim(), value.trim());
+        if name.is_empty() || name.contains(|c: char| c.is_control() || c == ' ') {
+            eprintln!("velo: ignoring bad header name: {name:?}");
+            continue;
+        }
+        if value.contains(|c: char| c.is_control()) {
+            eprintln!("velo: ignoring bad header value for {name:?}");
+            continue;
+        }
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(value.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out
 }
 
 fn cors_headers(origin: &Option<String>) -> Vec<u8> {
