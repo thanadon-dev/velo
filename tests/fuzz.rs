@@ -178,3 +178,67 @@ fn slow_clients_are_dropped() {
     srv.shutdown();
     h.join().unwrap().unwrap();
 }
+
+#[test]
+fn mutated_valid_requests_never_break_the_server() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let srv = Server::new(compile(SRC, None).unwrap()).unwrap();
+    let bg = srv.clone();
+    let h = std::thread::spawn(move || bg.serve(listener));
+
+    let seeds: [&str; 6] = [
+        "GET /health HTTP/1.1\r\nHost: x\r\n\r\n",
+        "GET /users/12?full=1 HTTP/1.1\r\nHost: x\r\nAccept: */*\r\n\r\n",
+        "POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 15\r\n\r\n{\"name\":\"mark\"}",
+        "POST /users HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 2\r\n\r\n{}",
+        "HEAD /q?a=1 HTTP/1.1\r\nHost: x\r\nIf-None-Match: \"abc\"\r\n\r\n",
+        "GET /sorted?by=name HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n",
+    ];
+
+    let mut rng = Rng(0xa11ce_5eed_0007);
+    for round in 0..400 {
+        let mut req = seeds[rng.below(seeds.len())].as_bytes().to_vec();
+        for _ in 0..1 + rng.below(4) {
+            let at = rng.below(req.len());
+            match rng.below(4) {
+                0 => req[at] = rng.byte(),
+                1 => {
+                    req.remove(at);
+                }
+                2 => req.insert(at, rng.byte()),
+                _ => {
+                    let end = (at + 1 + rng.below(8)).min(req.len());
+                    req.truncate(end);
+                }
+            }
+        }
+        let Ok(mut c) = TcpStream::connect(("127.0.0.1", port)) else { continue };
+        c.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+        c.set_write_timeout(Some(Duration::from_millis(200))).unwrap();
+        let _ = c.write_all(&req);
+        let mut buf = [0u8; 4096];
+        if let Ok(n) = c.read(&mut buf) {
+            if n > 0 {
+                let head = String::from_utf8_lossy(&buf[..n]);
+                assert!(
+                    head.starts_with("HTTP/1.1 "),
+                    "round {round}: answered {head:?} to {:?}",
+                    String::from_utf8_lossy(&req)
+                );
+                let code: u16 = head[9..12].parse().unwrap_or(0);
+                assert!((100..=599).contains(&code), "round {round}: status {code}");
+            }
+        }
+    }
+
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+    let mut out = String::new();
+    c.read_to_string(&mut out).unwrap();
+    assert!(out.ends_with("ok"), "{out}");
+
+    srv.shutdown();
+    h.join().unwrap().unwrap();
+}
