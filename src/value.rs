@@ -199,10 +199,16 @@ pub fn write_string(out: &mut Vec<u8>, s: &str) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JsonError;
 
-type Interner = std::cell::RefCell<std::collections::HashMap<Box<str>, Arc<str>>>;
+type Interner = std::cell::RefCell<
+    std::collections::HashMap<
+        Box<str>,
+        Arc<str>,
+        std::hash::BuildHasherDefault<crate::router::Fnv>,
+    >,
+>;
 
 thread_local! {
-    static KEYS: Interner = std::cell::RefCell::new(std::collections::HashMap::new());
+    static KEYS: Interner = std::cell::RefCell::new(std::collections::HashMap::default());
 }
 
 const INTERN_MAX: usize = 512;

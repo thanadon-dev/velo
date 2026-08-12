@@ -492,7 +492,7 @@ impl Collection {
         let keyed = match &value {
             Value::Obj(o) | Value::Row(o, _) => {
                 let mut fields: Obj = Vec::with_capacity(o.len() + 1);
-                fields.push((Arc::from("id"), id_value(id)));
+                fields.push((crate::value::intern("id"), id_value(id)));
                 for (k, v) in o.iter() {
                     if &**k != "id" {
                         fields.push((k.clone(), v.clone()));
@@ -501,8 +501,8 @@ impl Collection {
                 Value::row(fields)
             }
             other => Value::row(vec![
-                (Arc::from("id"), id_value(id)),
-                (Arc::from("value"), other.clone()),
+                (crate::value::intern("id"), id_value(id)),
+                (crate::value::intern("value"), other.clone()),
             ]),
         };
         self.create(keyed).unwrap_or(value)
@@ -708,7 +708,7 @@ fn with_id(v: Value, id: f64) -> Value {
     match v {
         Value::Obj(o) | Value::Row(o, _) => {
             let mut row: Obj = Vec::with_capacity(o.len() + 1);
-            row.push((Arc::from("id"), Value::Num(id)));
+            row.push((crate::value::intern("id"), Value::Num(id)));
             for (k, val) in o.iter() {
                 if &**k != "id" {
                     row.push((k.clone(), val.clone()));
@@ -716,7 +716,10 @@ fn with_id(v: Value, id: f64) -> Value {
             }
             Value::row(row)
         }
-        other => Value::row(vec![(Arc::from("id"), Value::Num(id)), (Arc::from("value"), other)]),
+        other => Value::row(vec![
+            (crate::value::intern("id"), Value::Num(id)),
+            (crate::value::intern("value"), other),
+        ]),
     }
 }
 

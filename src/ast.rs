@@ -252,7 +252,7 @@ impl Expr {
                         None => col.delete(&k.eval(c)?.as_key()),
                     };
                     if hit {
-                        Ok(Value::obj(vec![(Arc::from("deleted"), Value::Bool(true))]))
+                        Ok(Value::obj(vec![(crate::value::intern("deleted"), Value::Bool(true))]))
                     } else {
                         Err(NOT_FOUND)
                     }
@@ -309,7 +309,7 @@ pub fn apply(op: BinOp, l: &Value, r: &Value) -> Value {
 }
 
 fn deleted(n: usize) -> Value {
-    Value::obj(vec![(Arc::from("deleted"), Value::Num(n as f64))])
+    Value::obj(vec![(crate::value::intern("deleted"), Value::Num(n as f64))])
 }
 
 pub fn truthy(v: &Value) -> bool {
