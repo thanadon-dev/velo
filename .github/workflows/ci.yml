@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt clippy
+          rustup target add x86_64-unknown-linux-musl
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Release build
+        run: cargo build --release
+      - name: Smoke test
+        run: |
+          ./target/x86_64-unknown-linux-musl/release/velo check examples/api.velo
+          ./target/x86_64-unknown-linux-musl/release/velo run examples/api.velo 127.0.0.1:8099 &
+          sleep 2
+          test "$(curl -sf localhost:8099/health)" = ok
+          curl -sf -XPOST localhost:8099/users -d '{"name":"ci"}' | grep -q '"id":1'
+          ./target/x86_64-unknown-linux-musl/release/velobench -c 8 -d 2 http://127.0.0.1:8099/health
