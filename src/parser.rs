@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 pub use crate::ast::{
     call_builtin, decode_param, parse_query, percent_decode, truthy, BinOp, Builtin, Ctx, Err_,
-    Expr, Op, BAD_BODY, CONFLICT, MAX_PARAMS, NOT_FOUND,
+    Expr, Op, Stage, Tail, BAD_BODY, CONFLICT, MAX_PARAMS, NOT_FOUND,
 };
 
 pub struct Route {
@@ -539,13 +539,7 @@ impl<'a> Parser<'a> {
         Ok(cur)
     }
 
-    fn db_call(&mut self, line: usize) -> Result<Expr, String> {
-        let at_col = self.tok.col;
-        self.expect(Kind::Dot)?;
-        let name = self.expect(Kind::Ident)?;
-        let col = self.store.collection(&name.text);
-        self.expect(Kind::Dot)?;
-        let op = self.expect(Kind::Ident)?;
+    fn call_args(&mut self) -> Result<Vec<Expr>, String> {
         self.expect(Kind::LParen)?;
         let mut args = Vec::new();
         while self.tok.kind != Kind::RParen {
@@ -555,100 +549,231 @@ impl<'a> Parser<'a> {
             }
         }
         self.advance()?;
+        Ok(args)
+    }
+
+    fn db_call(&mut self, line: usize) -> Result<Expr, String> {
+        let at_col = self.tok.col;
+        self.expect(Kind::Dot)?;
+        let name = self.expect(Kind::Ident)?;
+        let col = self.store.collection(&name.text);
+        self.expect(Kind::Dot)?;
+        let mut op = self.expect(Kind::Ident)?;
+        let mut calls: Vec<(String, Vec<Expr>)> = Vec::new();
+        let mut field = None;
+        loop {
+            let args = self.call_args()?;
+            calls.push((op.text.clone(), args));
+            if self.tok.kind != Kind::Dot {
+                break;
+            }
+            self.advance()?;
+            let next = self.expect(Kind::Ident)?;
+            if self.tok.kind != Kind::LParen {
+                field = Some(next.text);
+                break;
+            }
+            op = next;
+        }
+        let op = if calls.len() == 1 {
+            let (op, args) = calls.pop().unwrap();
+            single_op(&name.text, &op, args, line, at_col)?
+        } else {
+            chain_op(&name.text, calls, line, at_col)?
+        };
+        let expr = Expr::Db(col, op);
+        match field {
+            Some(f) => {
+                let base = Expr::Field(Box::new(expr), Arc::from(f.as_str()));
+                self.fields(base)
+            }
+            None => Ok(expr),
+        }
+    }
+}
+
+fn single_op(
+    coll: &str,
+    op: &str,
+    args: Vec<Expr>,
+    line: usize,
+    at_col: usize,
+) -> Result<Op, String> {
+    let n = args.len();
+    let want = |k: usize| -> Result<(), String> {
+        if n != k {
+            return Err(format!(
+                "line {}:{}: db.{}.{} expects {} argument(s), got {}",
+                line, at_col, coll, op, k, n
+            ));
+        }
+        Ok(())
+    };
+    let mut args = args.into_iter();
+    let op = match op {
+        "all" => {
+            want(0)?;
+            Op::All
+        }
+        "count" => {
+            want(0)?;
+            Op::Count
+        }
+        "find" => {
+            want(1)?;
+            Op::Find(Box::new(args.next().unwrap()))
+        }
+        "page" => {
+            want(2)?;
+            let o = Box::new(args.next().unwrap());
+            Op::Page(o, Box::new(args.next().unwrap()))
+        }
+        "order" => {
+            want(1)?;
+            Op::Order(Box::new(args.next().unwrap()))
+        }
+        "first" => {
+            want(2)?;
+            let f = Box::new(args.next().unwrap());
+            Op::First(f, Box::new(args.next().unwrap()))
+        }
+        "sum" | "avg" | "min" | "max" => {
+            want(1)?;
+            Op::Aggregate(agg_of(op), Box::new(args.next().unwrap()))
+        }
+        "search" => {
+            want(2)?;
+            let f = Box::new(args.next().unwrap());
+            Op::Search(f, Box::new(args.next().unwrap()))
+        }
+        "where" => {
+            want(2)?;
+            let f = Box::new(args.next().unwrap());
+            Op::Where(f, Box::new(args.next().unwrap()))
+        }
+        "create" => {
+            want(1)?;
+            Op::Create(Box::new(args.next().unwrap()))
+        }
+        "update" => {
+            want(2)?;
+            let k = Box::new(args.next().unwrap());
+            Op::Update(k, Box::new(args.next().unwrap()))
+        }
+        "clear" => {
+            want(0)?;
+            Op::Clear
+        }
+        "delete_where" => {
+            want(2)?;
+            let f = Box::new(args.next().unwrap());
+            Op::DeleteWhere(f, Box::new(args.next().unwrap()))
+        }
+        "upsert" => {
+            want(2)?;
+            let k = Box::new(args.next().unwrap());
+            Op::Upsert(k, Box::new(args.next().unwrap()))
+        }
+        "delete" => {
+            want(1)?;
+            Op::Delete(Box::new(args.next().unwrap()))
+        }
+        other => {
+            return Err(format!(
+                "line {}:{}: unknown operation db.{}.{}",
+                line, at_col, coll, other
+            ))
+        }
+    };
+    Ok(op)
+}
+
+fn agg_of(op: &str) -> crate::store::Agg {
+    match op {
+        "sum" => crate::store::Agg::Sum,
+        "avg" => crate::store::Agg::Avg,
+        "min" => crate::store::Agg::Min,
+        _ => crate::store::Agg::Max,
+    }
+}
+
+fn chain_op(
+    coll: &str,
+    calls: Vec<(String, Vec<Expr>)>,
+    line: usize,
+    at_col: usize,
+) -> Result<Op, String> {
+    let mut stages = Vec::new();
+    let mut tail = Tail::List;
+    let mut closed = false;
+    for (op, args) in calls {
+        if closed {
+            return Err(format!(
+                "line {}:{}: db.{}: nothing can follow the final step, got .{}()",
+                line, at_col, coll, op
+            ));
+        }
         let n = args.len();
         let want = |k: usize| -> Result<(), String> {
             if n != k {
                 return Err(format!(
                     "line {}:{}: db.{}.{} expects {} argument(s), got {}",
-                    line, at_col, name.text, op.text, k, n
+                    line, at_col, coll, op, k, n
                 ));
             }
             Ok(())
         };
         let mut args = args.into_iter();
-        let op = match op.text.as_str() {
-            "all" => {
-                want(0)?;
-                Op::All
-            }
-            "count" => {
-                want(0)?;
-                Op::Count
-            }
-            "find" => {
-                want(1)?;
-                Op::Find(Box::new(args.next().unwrap()))
-            }
-            "page" => {
-                want(2)?;
-                let o = Box::new(args.next().unwrap());
-                Op::Page(o, Box::new(args.next().unwrap()))
-            }
-            "order" => {
-                want(1)?;
-                Op::Order(Box::new(args.next().unwrap()))
-            }
-            "first" => {
+        match op.as_str() {
+            "all" => want(0)?,
+            "where" => {
                 want(2)?;
                 let f = Box::new(args.next().unwrap());
-                Op::First(f, Box::new(args.next().unwrap()))
-            }
-            "sum" | "avg" | "min" | "max" => {
-                want(1)?;
-                let agg = match op.text.as_str() {
-                    "sum" => crate::store::Agg::Sum,
-                    "avg" => crate::store::Agg::Avg,
-                    "min" => crate::store::Agg::Min,
-                    _ => crate::store::Agg::Max,
-                };
-                Op::Aggregate(agg, Box::new(args.next().unwrap()))
+                stages.push(Stage::Where(f, Box::new(args.next().unwrap())));
             }
             "search" => {
                 want(2)?;
                 let f = Box::new(args.next().unwrap());
-                Op::Search(f, Box::new(args.next().unwrap()))
+                stages.push(Stage::Search(f, Box::new(args.next().unwrap())));
             }
-            "where" => {
-                want(2)?;
-                let f = Box::new(args.next().unwrap());
-                Op::Where(f, Box::new(args.next().unwrap()))
-            }
-            "create" => {
+            "order" => {
                 want(1)?;
-                Op::Create(Box::new(args.next().unwrap()))
+                stages.push(Stage::Order(Box::new(args.next().unwrap())));
             }
-            "update" => {
+            "page" => {
                 want(2)?;
-                let k = Box::new(args.next().unwrap());
-                Op::Update(k, Box::new(args.next().unwrap()))
+                let o = Box::new(args.next().unwrap());
+                stages.push(Stage::Page(o, Box::new(args.next().unwrap())));
             }
-            "clear" => {
+            "count" => {
                 want(0)?;
-                Op::Clear
+                tail = Tail::Count;
+                closed = true;
             }
-            "delete_where" => {
-                want(2)?;
-                let f = Box::new(args.next().unwrap());
-                Op::DeleteWhere(f, Box::new(args.next().unwrap()))
-            }
-            "upsert" => {
-                want(2)?;
-                let k = Box::new(args.next().unwrap());
-                Op::Upsert(k, Box::new(args.next().unwrap()))
-            }
-            "delete" => {
+            "sum" | "avg" | "min" | "max" => {
                 want(1)?;
-                Op::Delete(Box::new(args.next().unwrap()))
+                tail = Tail::Agg(agg_of(&op), Box::new(args.next().unwrap()));
+                closed = true;
+            }
+            "first" => {
+                if n == 2 {
+                    let f = Box::new(args.next().unwrap());
+                    stages.push(Stage::Where(f, Box::new(args.next().unwrap())));
+                } else {
+                    want(0)?;
+                }
+                tail = Tail::First;
+                closed = true;
             }
             other => {
                 return Err(format!(
-                    "line {}:{}: unknown operation db.{}.{}",
-                    line, at_col, name.text, other
+                    "line {}:{}: db.{}.{} cannot be part of a chain",
+                    line, at_col, coll, other
                 ))
             }
-        };
-        Ok(Expr::Db(col, op))
+        }
     }
+    Ok(Op::Chain(stages, tail))
 }
 
 fn pattern_params(pattern: &str, line: usize) -> Result<Vec<String>, String> {

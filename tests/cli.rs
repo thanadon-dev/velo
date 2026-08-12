@@ -518,13 +518,17 @@ GET /b1 => { now: now(), id: uuid(), n: len(\"abc\"), home: env(\"HOME\"), at: d
 GET /b2 => openapi()\n\
 GET /c1 => { m: 1 + 2 * 3, d: 10 / 4, cmp: 2 < 3, both: 1 == 1 and 2 != 3 }\n\
 GET /c2/:id => { id: id, q: query.z, h: header.x_test, doubled: id * 2 } : 200\n\
-POST /c3 => body.name when body.name and header.x_key else 400\n";
+POST /c3 => body.name when body.name and header.x_key else 400\n\
+GET /d1 => db.x.where(\"k\", \"v\").order(\"-n\").page(0, 20)\n\
+GET /d2 => db.x.search(\"k\", \"v\").count()\n\
+GET /d3 => db.x.where(\"k\", \"v\").sum(\"n\")\n\
+GET /d4 => db.x.where(\"k\", \"v\").order(\"n\").first()\n";
 
     let path = tmp("everything.velo");
     write(&path, program);
     let out = Command::new(BIN).arg("check").arg(&path).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("20 routes"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("24 routes"));
     let _ = std::fs::remove_file(&path);
 }
 

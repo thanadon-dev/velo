@@ -1,6 +1,6 @@
 # Velo
 
-**v1.0.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.1.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -102,6 +102,7 @@ Built-in store (`db.<collection>.<op>`):
 | `find(key)` | row | 404 |
 | `first(field, value)` | first matching row | 404 |
 | `where(field, value)` | array of matching rows; linear scan, cached per field and value | `[]` |
+| chained steps | `where`, `search`, `order` and `page` compose; see below | |
 | `page(offset, limit)` | slice of rows, `limit` 0 means "to the end" | `[]` |
 | `search(field, text)` | rows whose `field` contains `text`, case-insensitive | `[]` |
 | `order(field)` | rows sorted by `field`, `"-field"` for descending | `[]` |
@@ -111,6 +112,24 @@ Built-in store (`db.<collection>.<op>`):
 | `delete(key)` | `{"deleted":true}` | 404 |
 | `delete_where(field, value)` | `{"deleted":n}` | `{"deleted":0}` |
 | `clear()` | `{"deleted":n}`, resets generated ids | `{"deleted":0}` |
+
+Read operations chain, so one line can filter, sort and page:
+
+```velo
+GET /users/top   => db.users.where("team", query.team).order("-score").page(0, 20)
+GET /users/hits  => db.users.search("name", query.q).count()
+GET /users/spend => db.users.where("team", query.team).sum("score")
+GET /users/best  => db.users.where("team", query.team).order("-score").first()
+```
+
+`where`, `search`, `order` and `page` are steps and may repeat in any order. `count()`, `sum/avg/min/max(field)` and `first()` end a chain and nothing may follow them; `first()` answers 404 when the chain is empty. A chained result is cached like a single call, keyed on the whole chain, and thrown away when the collection changes. `first()` is the one shape that is not cached: it scans instead, and a trailing `order` picks the extreme row in one pass rather than sorting.
+
+A row's field can be read directly:
+
+```velo
+GET /users/:id/name => db.users.find(id).name
+GET /leader         => db.users.order("-score").first().name
+```
 
 Built-in functions:
 
@@ -305,7 +324,7 @@ Verified on this machine: a client running 20 keep-alive connections through two
 - **Router.** Per-method exact map (FNV-hashed) for static paths, a segment tree for `:param` paths. Params are borrowed slices of the request line, never copied.
 - **Values.** `Value` is an enum with `Arc` payloads, so returning a whole collection is a refcount bump, not a deep copy. JSON is written straight into the connection's output buffer.
 - **Object routes render straight into the socket buffer.** A route whose body is an object or array literal is written directly as JSON bytes; no intermediate `Value` tree is built per request.
-- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and up to 32 sort orders and filters, inside a byte budget; all of it is rebuilt only when the collection is written to. Each worker also keeps a thread-local map of the results it has already seen, tagged with a collection version, so a cache hit costs an atomic load and a local lookup instead of a lock shared by every worker. The thread-local view holds pointers to the same bytes, and is bounded by both an entry count and `VELO_LOCAL_CACHE_BYTES` so superseded results cannot pile up. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. Inserting a row appends to the cached list JSON in place when nothing else is holding it, only when the list was read since the last write, and only while that list stays under `VELO_APPEND_MAX`. Past that size an insert simply drops the cache, because copying a multi-megabyte list on every write is far worse than re-rendering it on the next read. Rendering happens outside the collection lock: a reader copies the live row handles under a brief lock, releases it, then renders, and the result is only cached if the collection did not change meanwhile. Writers never wait behind a long render, and never pay a copy-on-write of the row list because no reader holds it.
+- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and up to 32 sort orders and filters, inside a byte budget; all of it is rebuilt only when the collection is written to. Each worker also keeps a thread-local map of the results it has already seen, tagged with a collection version, so a cache hit costs an atomic load and a local lookup instead of a lock shared by every worker. The thread-local view holds pointers to the same bytes, and is bounded by both an entry count and `VELO_LOCAL_CACHE_BYTES` so superseded results cannot pile up. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. Inserting a row appends to the cached list JSON in place when nothing else is holding it and the list was read since the last write, at any size. When a reader is holding those bytes the insert has to copy them instead, and `VELO_APPEND_MAX` caps that: past it the insert drops the cache, because copying a multi-megabyte list on every write is far worse than re-rendering it on the next read. Chained reads are cached the same way, keyed on the whole chain. Rendering happens outside the collection lock: a reader copies the live row handles under a brief lock, releases it, then renders, and the result is only cached if the collection did not change meanwhile. Writers never wait behind a long render, and never pay a copy-on-write of the row list because no reader holds it.
 
 Filters, sorts, searches, and aggregates work the same way. On a large collection under a constant write load their caches are invalidated as fast as they are built, so each such read costs a full scan; that is the shape of the query, not a lock problem. Use `find`, `first`, or `page` when a collection gets big. A write-only burst therefore keeps its O(1) insert, and an alternating write/read workload neither re-renders nor recopies the list. The cost is holding rows twice in memory.
 - **No allocation for key lookups.** `db.users.find(id)` on a plain path param hashes the slice of the request line directly; nothing is copied unless the param is percent-encoded.
@@ -333,7 +352,7 @@ Env knobs:
 | `VELO_LOG` | off | one line per request on stderr: `1` for text, `json` for one JSON object per line |
 | `VELO_METRICS` | off | path that answers a metrics JSON, e.g. `/_metrics` |
 | `VELO_TITLE` | `velo api` | title used by `openapi()` |
-| `VELO_APPEND_MAX` | 512 kB | above this, an insert drops the cached list instead of extending it |
+| `VELO_APPEND_MAX` | 512 kB | above this, an insert being read concurrently drops the cached list instead of copying it |
 | `VELO_CACHE_BYTES` | 8 MB | budget for the shared rendered-result cache; exceeding it clears it |
 | `VELO_LOCAL_CACHE_BYTES` | 1 MB | per-worker budget for its thread-local view of those results |
 | `VELO_RATE` | off | requests per second allowed per client; over it answers 429 |
@@ -342,7 +361,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v1.0.0. The `users` collection holds 500 rows (21 kB as JSON).
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v1.1.0. The `users` collection holds 500 rows (21 kB as JSON).
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -355,6 +374,9 @@ Load generator: `velobench` (ships in this repo, thread per connection, keep-ali
 | `/users/sorted` | cached sort | 60 800 | 0.66 ms |
 | `/users/by/team` | cached filter | 54 200 | 0.74 ms |
 | `POST /users` | JSON parse + insert | 51 700 | 0.73 ms |
+| `/users/top` | chain: filter, sort, page 20 | 58 800 | 0.63 ms |
+| `/users/top/count` | chain: filter, count | 60 700 | 0.61 ms |
+| `/users/top/one` | chain: filter, best row | 33 900 | 1.15 ms |
 
 `-c 8 -p 32`, pipelined — what the server itself can do:
 
@@ -378,7 +400,10 @@ In-process, no sockets, one thread (`velomicro <rows>`). `bench/baseline.json` r
 | `create` + `delete` | 2.9 us | 3.0 us |
 | `all` (cached) | 6.3 us | 50 us |
 | `order` (cached) | 6.6 us | 53 us |
-| `create` then read the whole list | 7.8 us | 62 us |
+| `create` then read the whole list | 7.8 us | 57 us |
+| `where` + `order` + `page` chain (cached) | 2.4 us | 2.5 us |
+
+A chain costs about what a single cached filter costs, and stays flat as the collection grows, because only the result of the whole chain is rendered and cached. `first()` is the exception: it scans on every request, which is why `/users/top/one` sits at half the throughput of the others.
 
 `find`, `create`, `delete`, and cached filters stay flat. Anything that hands back the whole collection is bound by the bytes it copies.
 
@@ -391,6 +416,8 @@ Mixed read/write load on a 186 000-row collection, one reader looping over a who
 | `/users` (cached list) | 154 req/s | 15 500 req/s |
 | `/users/by/team` (filter) | 1 091 req/s | 33 500 req/s |
 | `/users/sorted` (sort) | 779 req/s | 32 900 req/s |
+
+At a larger scale, 554 000 rows and a 40 MB list, the same shape now runs at 26 800 writes/s with a reader looping `GET /users` against 46 800 with no reader at all. Before v1.1.0 a list that size was past `VELO_APPEND_MAX`, so every insert threw the cached list away and every read rebuilt all 40 MB.
 
 Write tail latency in that test fell with it: the worst insert went from 1 150 ms to 49 ms on the sort case. Writes with no reader at all run at about 41 000 req/s, so a heavy reader now costs roughly 20% of write throughput instead of 98%.
 
@@ -444,7 +471,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-89 tests (66 integration + 14 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+96 tests (72 integration + 14 CLI + 6 fuzz + 4 unit): const folding, CRUD, chained reads, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -493,6 +520,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.1.0** — read operations chain: `db.users.where("team", query.t).order("-score").page(0, 20)`, ending in a list, `count()`, an aggregate, or `first()`. A chain is cached as one result keyed on every step, so it costs about what a single filter costs and stays flat as the collection grows. A row's field can now be read straight off a call, as in `db.users.find(id).name`. Separately, inserting into a large collection no longer throws the cached list away: `VELO_APPEND_MAX` now only limits the copy a concurrent reader forces, so a 20 000-row collection under write-then-read load went from 3 200 us to 57 us per cycle.
 
 **v1.0.0** — the surface is settled and the engine has been measured, soaked, and fuzzed, so this is the first version promising not to break what is documented above. The language (routes, params, query, headers, body, arithmetic, comparisons, guards, includes, `file()`, `openapi()`), the store (CRUD, filters, search, sort, paging, aggregates, bulk deletes, snapshots), and the runtime knobs are stable; anything added from here is additive. Ninety tests, a deterministic fuzz suite, a performance guard, and a Go baseline for scale.
 

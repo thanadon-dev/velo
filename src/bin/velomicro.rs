@@ -92,6 +92,7 @@ fn main() {
                GET /w => db.users.where(\"team\", query.t)\n\
                GET /o => db.users.order(\"name\")\n\
                GET /f => db.users.find(\"1\")\n\
+               GET /c => db.users.where(\"team\", query.t).order(\"name\").page(0, 20)\n\
                POST /w => db.users.create(body)\n\
                DELETE /d/:id => db.users.delete(id)\n";
     let store = velo::Store::new();
@@ -147,7 +148,13 @@ fn main() {
         let per = t0.elapsed().as_secs_f64() / n as f64;
         report.add("write_then_list", per, out.len());
     }
-    for (name, path) in [("all", "/u"), ("where", "/w?t=rare"), ("order", "/o"), ("find", "/f")] {
+    for (name, path) in [
+        ("all", "/u"),
+        ("where", "/w?t=rare"),
+        ("order", "/o"),
+        ("find", "/f"),
+        ("chain", "/c?t=x"),
+    ] {
         let t0 = Instant::now();
         let n = 20_000;
         let mut out = Vec::new();

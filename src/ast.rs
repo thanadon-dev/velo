@@ -83,6 +83,20 @@ pub enum Builtin {
     Env,
 }
 
+pub enum Stage {
+    Where(Box<Expr>, Box<Expr>),
+    Search(Box<Expr>, Box<Expr>),
+    Order(Box<Expr>),
+    Page(Box<Expr>, Box<Expr>),
+}
+
+pub enum Tail {
+    List,
+    Count,
+    Agg(Agg, Box<Expr>),
+    First,
+}
+
 pub enum Op {
     All,
     Count,
@@ -99,6 +113,7 @@ pub enum Op {
     Delete(Box<Expr>),
     Clear,
     DeleteWhere(Box<Expr>, Box<Expr>),
+    Chain(Vec<Stage>, Tail),
 }
 
 impl Expr {
@@ -246,6 +261,31 @@ impl Expr {
                     let field = f.eval(c)?.as_key();
                     let want = v.eval(c)?.as_key();
                     Ok(deleted(col.delete_where(&field, &want)))
+                }
+                Op::Chain(stages, tail) => {
+                    let mut plan = Vec::with_capacity(stages.len());
+                    for s in stages {
+                        plan.push(match s {
+                            Stage::Where(f, v) => {
+                                crate::store::Stage::Where(f.eval(c)?.as_key(), v.eval(c)?.as_key())
+                            }
+                            Stage::Search(f, v) => crate::store::Stage::Search(
+                                f.eval(c)?.as_key(),
+                                v.eval(c)?.as_key(),
+                            ),
+                            Stage::Order(f) => crate::store::Stage::Order(f.eval(c)?.as_key()),
+                            Stage::Page(o, l) => crate::store::Stage::Page(
+                                num_arg(&o.eval(c)?),
+                                num_arg(&l.eval(c)?),
+                            ),
+                        });
+                    }
+                    match tail {
+                        Tail::List => Ok(col.query(&plan)),
+                        Tail::Count => Ok(col.query_count(&plan)),
+                        Tail::Agg(agg, f) => Ok(col.query_agg(&plan, *agg, &f.eval(c)?.as_key())),
+                        Tail::First => col.query_first(&plan).ok_or(NOT_FOUND),
+                    }
                 }
                 Op::Delete(k) => {
                     let hit = match fast_key(k, c) {

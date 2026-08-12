@@ -84,6 +84,9 @@ impl Snapshot {
             self.all_json = Some(old);
             return;
         }
+        if old.len() > append_max() {
+            return;
+        }
         let mut out = Vec::with_capacity(old.len() * 2);
         out.extend_from_slice(&old[..old.len() - 1]);
         if old.len() > 2 {
@@ -339,6 +342,40 @@ impl Collection {
         self.derived("o", field, "", |rows| sorted_json(rows, field))
     }
 
+    pub fn query(&self, stages: &[Stage]) -> Value {
+        let key = chain_key(stages);
+        self.derived("q", &key, "", |rows| rows_json(&run_stages(rows, stages)))
+    }
+
+    pub fn query_count(&self, stages: &[Stage]) -> Value {
+        let key = chain_key(stages);
+        self.derived("qc", &key, "", |rows| {
+            let mut out = Vec::with_capacity(12);
+            crate::value::write_i64(&mut out, run_stages(rows, stages).len() as i64);
+            Arc::new(out)
+        })
+    }
+
+    pub fn query_agg(&self, stages: &[Stage], op: Agg, field: &str) -> Value {
+        let key = format!("{}{}", op.name(), chain_key(stages));
+        self.derived("qa", &key, field, |rows| {
+            aggregate_over(run_stages(rows, stages).into_iter(), op, field)
+        })
+    }
+
+    pub fn query_first(&self, stages: &[Stage]) -> Option<Value> {
+        let (head, pick) = match stages.split_last() {
+            Some((Stage::Order(field), rest)) => (rest, Some(field.as_str())),
+            _ => (stages, None),
+        };
+        let s = self.snap.read().unwrap();
+        let rows = run_stages(&s.rows, head);
+        match pick {
+            Some(field) => extreme(&rows, field),
+            None => rows.first().map(|r| (*r).clone()),
+        }
+    }
+
     pub fn create(&self, v: Value) -> Option<Value> {
         let given = match v.get("id") {
             Value::Null => None,
@@ -365,8 +402,7 @@ impl Collection {
         rows.push(row.clone());
         let idx = rows.len() - 1;
         s.by_id.insert(key, idx);
-        let appendable = s.list_used.load(Ordering::Relaxed)
-            && s.all_json.as_ref().is_some_and(|j| j.len() <= append_max());
+        let appendable = s.list_used.load(Ordering::Relaxed);
         let reuse = appendable.then(|| s.all_json.take()).flatten();
         s.invalidate();
         s.all_json = reuse;
@@ -645,10 +681,85 @@ fn searched_json(rows: &[Value], field: &str, needle: &str) -> Arc<Vec<u8>> {
     Arc::new(out)
 }
 
+pub enum Stage {
+    Where(String, String),
+    Search(String, String),
+    Order(String),
+    Page(usize, usize),
+}
+
+fn push_part(key: &mut String, part: &str) {
+    use std::fmt::Write;
+    let _ = write!(key, "{}:{part}", part.len());
+}
+
+fn chain_key(stages: &[Stage]) -> String {
+    use std::fmt::Write;
+    let mut key = String::with_capacity(32);
+    for stage in stages {
+        match stage {
+            Stage::Where(f, v) => {
+                key.push('w');
+                push_part(&mut key, f);
+                push_part(&mut key, v);
+            }
+            Stage::Search(f, v) => {
+                key.push('s');
+                push_part(&mut key, f);
+                push_part(&mut key, v);
+            }
+            Stage::Order(f) => {
+                key.push('o');
+                push_part(&mut key, f);
+            }
+            Stage::Page(o, l) => {
+                let _ = write!(key, "p{o}:{l}");
+            }
+        }
+    }
+    key
+}
+
+fn run_stages<'a>(rows: &'a [Value], stages: &[Stage]) -> Vec<&'a Value> {
+    let mut cur: Vec<&Value> = live(rows).collect();
+    for stage in stages {
+        match stage {
+            Stage::Where(f, v) => cur.retain(|r| field_eq(r, f, v)),
+            Stage::Search(f, needle) => {
+                let lower = needle.to_lowercase();
+                cur.retain(|r| field_has(r, f, &lower));
+            }
+            Stage::Order(f) => sort_rows(&mut cur, f),
+            Stage::Page(offset, limit) => {
+                let take = if *limit == 0 { usize::MAX } else { *limit };
+                cur = cur.into_iter().skip(*offset).take(take).collect();
+            }
+        }
+    }
+    cur
+}
+
+fn rows_json(rows: &[&Value]) -> Arc<Vec<u8>> {
+    let mut out = Vec::with_capacity(rows.len() * 64 + 2);
+    out.push(b'[');
+    for (i, row) in rows.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        row.write_json(&mut out);
+    }
+    out.push(b']');
+    Arc::new(out)
+}
+
 fn aggregate_json(rows: &[Value], op: Agg, field: &str) -> Arc<Vec<u8>> {
+    aggregate_over(live(rows), op, field)
+}
+
+fn aggregate_over<'a>(rows: impl Iterator<Item = &'a Value>, op: Agg, field: &str) -> Arc<Vec<u8>> {
     let mut acc: Option<f64> = None;
     let mut n = 0u64;
-    for row in live(rows) {
+    for row in rows {
         let Some(Value::Num(v)) = row.get_ref(field) else { continue };
         n += 1;
         acc = Some(match (acc, op) {
@@ -668,36 +779,58 @@ fn aggregate_json(rows: &[Value], op: Agg, field: &str) -> Arc<Vec<u8>> {
     Arc::new(out)
 }
 
-fn sorted_json(rows: &[Value], field: &str) -> Arc<Vec<u8>> {
+fn cmp_keys(a: &SortKey, b: &SortKey) -> Ordering2 {
+    match (a, b) {
+        (SortKey::Num(m), SortKey::Num(n)) => m.partial_cmp(n).unwrap_or(Ordering2::Equal),
+        (SortKey::Num(_), _) => Ordering2::Less,
+        (_, SortKey::Num(_)) => Ordering2::Greater,
+        (SortKey::Text(m), SortKey::Text(n)) => m.cmp(n),
+    }
+}
+
+fn extreme(rows: &[&Value], field: &str) -> Option<Value> {
+    let (sort_field, desc) = match field.strip_prefix('-') {
+        Some(f) => (f, true),
+        None => (field, false),
+    };
+    let want = if desc { Ordering2::Greater } else { Ordering2::Less };
+    let mut best: Option<(SortKey, &Value)> = None;
+    for row in rows {
+        let key = sort_key(row.get_ref(sort_field));
+        let better = match &best {
+            Some((seen, _)) => cmp_keys(&key, seen) == want,
+            None => true,
+        };
+        if better {
+            best = Some((key, row));
+        }
+    }
+    best.map(|(_, row)| row.clone())
+}
+
+fn sort_rows(rows: &mut Vec<&Value>, field: &str) {
     let (sort_field, desc) = match field.strip_prefix('-') {
         Some(f) => (f, true),
         None => (field, false),
     };
     let mut keyed: Vec<(SortKey, &Value)> =
-        live(rows).map(|r| (sort_key(r.get_ref(sort_field)), r)).collect();
+        rows.iter().map(|r| (sort_key(r.get_ref(sort_field)), *r)).collect();
     keyed.sort_by(|(a, _), (b, _)| {
-        let ord = match (a, b) {
-            (SortKey::Num(m), SortKey::Num(n)) => m.partial_cmp(n).unwrap_or(Ordering2::Equal),
-            (SortKey::Num(_), _) => Ordering2::Less,
-            (_, SortKey::Num(_)) => Ordering2::Greater,
-            (SortKey::Text(m), SortKey::Text(n)) => m.cmp(n),
-        };
+        let ord = cmp_keys(a, b);
         if desc {
             ord.reverse()
         } else {
             ord
         }
     });
-    let mut out = Vec::with_capacity(rows.len() * 64 + 2);
-    out.push(b'[');
-    for (i, (_, row)) in keyed.iter().enumerate() {
-        if i > 0 {
-            out.push(b',');
-        }
-        row.write_json(&mut out);
-    }
-    out.push(b']');
-    Arc::new(out)
+    rows.clear();
+    rows.extend(keyed.into_iter().map(|(_, row)| row));
+}
+
+fn sorted_json(rows: &[Value], field: &str) -> Arc<Vec<u8>> {
+    let mut cur: Vec<&Value> = live(rows).collect();
+    sort_rows(&mut cur, field);
+    rows_json(&cur)
 }
 
 fn id_value(id: &str) -> Value {

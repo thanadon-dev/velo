@@ -1421,3 +1421,150 @@ fn protocol_edge_cases() {
     let res = ask("OPTIONS * HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     assert!(res.starts_with("HTTP/1.1 404"), "{res}");
 }
+
+const CHAIN_SRC: &str = r#"
+POST /users        => db.users.create(body)
+GET  /team         => db.users.where("team", query.t).order("name")
+GET  /page         => db.users.where("team", query.t).order("-score").page(query.o, query.n)
+GET  /howmany      => db.users.where("team", query.t).count()
+GET  /score        => db.users.where("team", query.t).sum("score")
+GET  /best         => db.users.order("-score").first()
+GET  /named        => db.users.order("name").first("team", query.t)
+GET  /hunt         => db.users.search("name", query.q).page(0, 2)
+GET  /topname      => db.users.order("-score").first().name
+GET  /one/:id      => db.users.find(id).name
+GET  /every        => db.users.all().where("team", query.t).count()
+"#;
+
+fn chain_server() -> Arc<Server> {
+    let s = Server::new(compile(CHAIN_SRC, None).unwrap()).unwrap();
+    for (name, team, score) in [
+        ("ann", "red", 5),
+        ("bob", "blue", 9),
+        ("cid", "red", 7),
+        ("dan", "red", 1),
+        ("eve", "blue", 3),
+    ] {
+        let body = format!(r#"{{"name":"{name}","team":"{team}","score":{score}}}"#);
+        assert_eq!(call(&s, "POST", "/users", &body).0, 201);
+    }
+    s
+}
+
+fn names(body: &str) -> Vec<String> {
+    match parse_json(body.as_bytes()).unwrap() {
+        Value::Arr(rows) => rows.iter().map(|r| r.get("name").as_key()).collect(),
+        other => panic!("not a list: {other:?}"),
+    }
+}
+
+#[test]
+fn chain_filters_then_sorts_and_pages() {
+    let s = chain_server();
+    assert_eq!(names(&call(&s, "GET", "/team?t=red", "").1), ["ann", "cid", "dan"]);
+    assert_eq!(names(&call(&s, "GET", "/page?t=red&o=0&n=2", "").1), ["cid", "ann"]);
+    assert_eq!(names(&call(&s, "GET", "/page?t=red&o=1&n=2", "").1), ["ann", "dan"]);
+    assert_eq!(names(&call(&s, "GET", "/page?t=red&o=9&n=2", "").1), [] as [String; 0]);
+    assert_eq!(names(&call(&s, "GET", "/hunt?q=n", "").1), ["ann", "dan"]);
+}
+
+#[test]
+fn chain_terminals() {
+    let s = chain_server();
+    assert_eq!(call(&s, "GET", "/howmany?t=red", "").1, "3");
+    assert_eq!(call(&s, "GET", "/howmany?t=none", "").1, "0");
+    assert_eq!(call(&s, "GET", "/every?t=blue", "").1, "2");
+    assert_eq!(call(&s, "GET", "/score?t=red", "").1, "13");
+    assert_eq!(call(&s, "GET", "/score?t=none", "").1, "0");
+    assert_eq!(call(&s, "GET", "/best", "").1, r#"{"id":2,"name":"bob","team":"blue","score":9}"#);
+    assert_eq!(
+        call(&s, "GET", "/named?t=red", "").1,
+        r#"{"id":1,"name":"ann","team":"red","score":5}"#
+    );
+    assert_eq!(call(&s, "GET", "/named?t=green", "").0, 404);
+}
+
+#[test]
+fn chain_reads_are_invalidated_by_writes() {
+    let s = chain_server();
+    assert_eq!(call(&s, "GET", "/howmany?t=red", "").1, "3");
+    assert_eq!(names(&call(&s, "GET", "/team?t=red", "").1), ["ann", "cid", "dan"]);
+    assert_eq!(call(&s, "POST", "/users", r#"{"name":"abe","team":"red","score":4}"#).0, 201);
+    assert_eq!(call(&s, "GET", "/howmany?t=red", "").1, "4");
+    assert_eq!(names(&call(&s, "GET", "/team?t=red", "").1), ["abe", "ann", "cid", "dan"]);
+    assert_eq!(call(&s, "GET", "/score?t=red", "").1, "17");
+}
+
+#[test]
+fn chain_cache_keys_do_not_collide() {
+    let s = Server::new(compile("GET /w => db.k.where(query.f, query.v).count()", None).unwrap())
+        .unwrap();
+    let col = s.store.collection("k");
+    for v in [r#"{"a":"1:x","b":"y"}"#, r#"{"a":"1","b":":xy"}"#] {
+        col.create(parse_json(v.as_bytes()).unwrap()).unwrap();
+    }
+    assert_eq!(call(&s, "GET", "/w?f=a&v=1:x", "").1, "1");
+    assert_eq!(call(&s, "GET", "/w?f=a&v=1", "").1, "1");
+    assert_eq!(call(&s, "GET", "/w?f=b&v=y", "").1, "1");
+    assert_eq!(call(&s, "GET", "/w?f=b&v=:xy", "").1, "1");
+    assert_eq!(call(&s, "GET", "/w?f=b&v=nope", "").1, "0");
+}
+
+#[test]
+fn field_access_after_db_call() {
+    let s = chain_server();
+    assert_eq!(call(&s, "GET", "/topname", "").1, "bob");
+    assert_eq!(call(&s, "GET", "/one/3", "").1, "cid");
+    assert_eq!(call(&s, "GET", "/one/99", "").0, 404);
+}
+
+#[test]
+fn chain_compile_errors() {
+    assert!(compile(r#"GET /a => db.x.create(body).where("a", "b")"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.where("a", "b").delete("1")"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.count().order("a")"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.where("a").count()"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.where("a", "b").nope()"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.where("a", "b").page(0, 5)"#, None).is_ok());
+}
+
+#[test]
+fn big_lists_keep_their_cache_across_writes() {
+    let store = velo::Store::new();
+    let s = Server::new(compile(SRC, Some(store.clone())).unwrap()).unwrap();
+    let pad = "p".repeat(200);
+    for i in 0..3000 {
+        call(&s, "POST", "/users", &format!(r#"{{"name":"n{i}","pad":"{pad}"}}"#));
+    }
+    let listed = call(&s, "GET", "/users", "").1;
+    assert!(listed.len() > 512 << 10, "test needs a list past VELO_APPEND_MAX: {}", listed.len());
+
+    for i in 0..10 {
+        call(&s, "POST", "/users", &format!(r#"{{"name":"late{i}","pad":"{pad}"}}"#));
+        let seen = call(&s, "GET", "/users", "").1;
+        assert_eq!(seen.matches(r#""name""#).count(), 3001 + i);
+        assert!(seen.contains(&format!(r#""name":"late{i}""#)), "missing the row just written");
+    }
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":3010}"#);
+}
+
+#[test]
+fn a_reader_holding_the_list_still_sees_later_writes() {
+    let store = velo::Store::new();
+    let s = Server::new(compile(SRC, Some(store.clone())).unwrap()).unwrap();
+    let users = store.collection("users");
+    for i in 0..20 {
+        call(&s, "POST", "/users", &format!(r#"{{"name":"n{i}"}}"#));
+    }
+    let held = users.all();
+    let before = match &held {
+        Value::Raw(bytes) => String::from_utf8(bytes.as_ref().clone()).unwrap(),
+        other => panic!("expected rendered bytes, got {other:?}"),
+    };
+    call(&s, "POST", "/users", r#"{"name":"after"}"#);
+    let seen = call(&s, "GET", "/users", "").1;
+    assert_eq!(before.matches(r#""name""#).count(), 20);
+    assert_eq!(seen.matches(r#""name""#).count(), 21);
+    assert!(seen.contains(r#""name":"after""#));
+    drop(held);
+}
