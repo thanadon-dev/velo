@@ -158,7 +158,10 @@ impl Server {
         if rt.uses_body && !raw_body.is_empty() {
             match crate::value::parse_json(raw_body) {
                 Ok(v) => ctx.body = v,
-                Err(_) => return self.fail(crate::parser::BAD_BODY, out),
+                Err(_) => match form_body(raw_body) {
+                    Some(v) => ctx.body = v,
+                    None => return self.fail(crate::parser::BAD_BODY, out),
+                },
             }
         }
         if let Some(g) = &rt.guard {
@@ -276,6 +279,17 @@ impl Server {
         }
         res
     }
+}
+
+pub fn form_body(raw: &[u8]) -> Option<Value> {
+    let text = std::str::from_utf8(raw).ok()?;
+    if !text.contains('=') || text.starts_with('{') || text.starts_with('[') {
+        return None;
+    }
+    if text.split('&').any(|pair| pair.is_empty() || pair.starts_with('=')) {
+        return None;
+    }
+    Some(crate::parser::parse_query(text))
 }
 
 pub fn etag_of(body: &[u8]) -> u64 {

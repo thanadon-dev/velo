@@ -1173,3 +1173,19 @@ fn drip_fed_headers_still_parse() {
     assert!(out.ends_with("ok"), "{out}");
     assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
 }
+
+#[test]
+fn form_encoded_bodies_are_accepted() {
+    let s = server();
+    let (status, body, _) = call(&s, "POST", "/users", "name=mark&team=red");
+    assert_eq!((status, body), (201, r#"{"id":1,"name":"mark","team":"red"}"#.to_string()));
+
+    let (_, body, _) = call(&s, "POST", "/users", "name=a+b&note=%E0%B9%84%E0%B8%97%E0%B8%A2");
+    assert_eq!(body, "{\"id\":2,\"name\":\"a b\",\"note\":\"ไทย\"}");
+
+    assert_eq!(call(&s, "POST", "/users", r#"{"name":"json"}"#).0, 201);
+    assert_eq!(call(&s, "POST", "/users", "not a body").0, 400);
+    assert_eq!(call(&s, "POST", "/users", "{oops").0, 400);
+    assert_eq!(call(&s, "POST", "/users", "=novalue").0, 400);
+    assert_eq!(call(&s, "POST", "/name", "name=fromform"), (201, "fromform".into(), Ctype::Text));
+}
