@@ -1,6 +1,6 @@
 # Velo
 
-**v0.38.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.39.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -41,7 +41,7 @@ CLI:
 | `velo new <file>` | write a starter file |
 | `velo version` | print version |
 | `velobench [-c n] [-d secs] [-p depth] [-m method] [-b body] <url>` | built-in keep-alive load generator |
-| `velomicro [rows]` | microbenchmark of the dispatch path, no sockets |
+| `velomicro [rows] [--json] [--check <baseline>]` | microbenchmark of the dispatch path; `--check` fails when an operation is far slower than `bench/baseline.json` |
 
 ## Language
 
@@ -284,7 +284,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.38.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.39.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -308,7 +308,7 @@ Load generator: `velobench` (ships in this repo, thread per connection, keep-ali
 | `/users/sorted` | 158 000 |
 | `/users/by/team` | 131 000 |
 
-In-process, no sockets, one thread (`velomicro <rows>`):
+In-process, no sockets, one thread (`velomicro <rows>`). `bench/baseline.json` records these on this machine, and `velomicro --check` fails the build if any of them regresses past `VELO_PERF_LIMIT` (3x by default) — that guard exists because a cache-key mistake once made `order` 200x slower while every test stayed green:
 
 | operation | 500 rows | 20 000 rows |
 | --- | --- | --- |
@@ -370,7 +370,7 @@ cargo test
 
 ## CI
 
-`./check.sh` is the gate: `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the full test suite, a release build, both examples compiled, and a boot smoke test with a short benchmark. `.github/workflows/ci.yml` runs exactly the same steps on push.
+`./check.sh` is the gate: `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the full test suite, a release build, all three examples compiled, a performance guard against `bench/baseline.json`, and a boot smoke test with a short benchmark. `.github/workflows/ci.yml` runs exactly the same steps on push.
 
 ## Layout
 
@@ -397,6 +397,8 @@ cargo test
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.39.0** — `velomicro --json` and `velomicro --check <baseline>`: the microbenchmark can now fail the build when an operation regresses past a multiple of the recorded baseline. `check.sh` runs it.
 
 **v0.38.0** — conditions combine with short-circuiting `and` / `or`. The keyword that sets a failed guard's status moved from `or` to `else` to free `or` for boolean use: `when body.name else 400`.
 

@@ -1,0 +1,9 @@
+{
+  "write": 2.234,
+  "create_delete": 2.948,
+  "write_then_list": 7.814,
+  "all": 4.857,
+  "where": 1.12,
+  "order": 6.622,
+  "find": 0.231
+}
