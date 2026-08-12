@@ -143,3 +143,38 @@ fn oversized_requests_are_refused() {
     srv.shutdown();
     h.join().unwrap().unwrap();
 }
+
+#[test]
+fn slow_clients_are_dropped() {
+    std::env::set_var("VELO_HEADER_TIMEOUT", "1");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let srv = Server::new(compile(SRC, None).unwrap()).unwrap();
+    assert_eq!(srv.header_secs, 1);
+    let bg = srv.clone();
+    let h = std::thread::spawn(move || bg.serve(listener));
+    std::env::remove_var("VELO_HEADER_TIMEOUT");
+
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    c.write_all(b"GET /health HTTP/1.1\r\n").unwrap();
+    for _ in 0..6 {
+        std::thread::sleep(Duration::from_millis(400));
+        if c.write_all(b"X-Drip: 1\r\n").is_err() {
+            break;
+        }
+    }
+    let mut out = String::new();
+    let _ = c.read_to_string(&mut out);
+    assert!(out.is_empty(), "slow client should be dropped, got {out}");
+
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+    let mut out = String::new();
+    c.read_to_string(&mut out).unwrap();
+    assert!(out.ends_with("ok"), "{out}");
+
+    srv.shutdown();
+    h.join().unwrap().unwrap();
+}

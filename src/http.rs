@@ -46,6 +46,7 @@ pub struct Server {
     pub store: Arc<Store>,
     pub max_conns: usize,
     pub keepalive_secs: u64,
+    pub header_secs: u64,
     pub workers: usize,
     pub extra_headers: Vec<u8>,
     pub cors: bool,
@@ -64,6 +65,7 @@ impl Server {
             store: prog.store,
             max_conns: env_usize("VELO_MAX_CONNS", 65536),
             keepalive_secs: env_usize("VELO_KEEPALIVE", 60) as u64,
+            header_secs: env_usize("VELO_HEADER_TIMEOUT", 10) as u64,
             workers: env_usize("VELO_WORKERS", cpus).max(1),
             extra_headers: cors_headers(&cors),
             cors: cors.is_some(),
@@ -439,6 +441,8 @@ struct Conn {
     body: Vec<u8>,
     closing: bool,
     want_out: bool,
+    served: bool,
+    opened: Instant,
     last: Instant,
 }
 
@@ -453,6 +457,8 @@ impl Conn {
             body: Vec::with_capacity(512),
             closing: false,
             want_out: false,
+            served: false,
+            opened: Instant::now(),
             last: Instant::now(),
         }
     }
@@ -549,6 +555,7 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         }
         c.body = body;
         c.start += need;
+        c.served = true;
         if !head.keep_alive {
             c.closing = true;
             c.compact();
@@ -571,6 +578,7 @@ fn worker(srv: &Server, listener: &TcpListener) -> std::io::Result<()> {
     let mut dead: Vec<u64> = Vec::new();
     let mut last_sweep = Instant::now();
     let idle = Duration::from_secs(srv.keepalive_secs.max(1));
+    let opening = Duration::from_secs(srv.header_secs.max(1));
     let mut headers = response_headers(srv);
     let mut header_age = Instant::now();
 
@@ -630,7 +638,9 @@ fn worker(srv: &Server, listener: &TcpListener) -> std::io::Result<()> {
         if last_sweep.elapsed() >= SWEEP {
             last_sweep = Instant::now();
             conns.retain(|_, c| {
-                if c.last.elapsed() < idle {
+                let alive =
+                    if c.served { c.last.elapsed() < idle } else { c.opened.elapsed() < opening };
+                if alive {
                     return true;
                 }
                 let _ = ep.remove(&c.stream);
