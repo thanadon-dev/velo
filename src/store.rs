@@ -228,7 +228,10 @@ impl Collection {
         let json = match shared {
             Some(json) => json,
             None => {
-                let rows = self.snap.read().unwrap().rows.clone();
+                let rows: Vec<Value> = {
+                    let s = self.snap.read().unwrap();
+                    s.live().cloned().collect()
+                };
                 let json = build(&rows);
                 if self.version.load(Ordering::Acquire) == version {
                     with_key4(&tag, kind, a, b, |key| {
@@ -286,7 +289,22 @@ impl Collection {
                 return Value::Raw(json);
             }
         }
-        let json = self.snap.read().unwrap().json();
+        let json = {
+            let rows: Vec<Value> = {
+                let s = self.snap.read().unwrap();
+                s.live().cloned().collect()
+            };
+            let mut out = Vec::with_capacity(rows.len() * 64 + 2);
+            out.push(b'[');
+            for (n, row) in rows.iter().enumerate() {
+                if n > 0 {
+                    out.push(b',');
+                }
+                row.write_json(&mut out);
+            }
+            out.push(b']');
+            Arc::new(out)
+        };
         let mut s = self.snap.write().unwrap();
         if self.version.load(Ordering::Acquire) == version && s.all_json.is_none() {
             s.all_json = Some(json.clone());

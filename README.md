@@ -1,6 +1,6 @@
 # Velo
 
-**v0.50.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.51.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -278,7 +278,7 @@ Verified on this machine: a client running 20 keep-alive connections through two
 - **Router.** Per-method exact map (FNV-hashed) for static paths, a segment tree for `:param` paths. Params are borrowed slices of the request line, never copied.
 - **Values.** `Value` is an enum with `Arc` payloads, so returning a whole collection is a refcount bump, not a deep copy. JSON is written straight into the connection's output buffer.
 - **Object routes render straight into the socket buffer.** A route whose body is an object or array literal is written directly as JSON bytes; no intermediate `Value` tree is built per request.
-- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and up to 32 sort orders and filters, inside a byte budget; all of it is rebuilt only when the collection is written to. Each worker also keeps a thread-local map of the results it has already seen, tagged with a collection version, so a cache hit costs an atomic load and a local lookup instead of a lock shared by every worker. The thread-local view holds pointers to the same bytes, and is bounded by both an entry count and `VELO_LOCAL_CACHE_BYTES` so superseded results cannot pile up. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. Inserting a row appends to the cached list JSON in place when nothing else is holding it, only when the list was read since the last write, and only while that list stays under `VELO_APPEND_MAX`. Past that size an insert simply drops the cache, because copying a multi-megabyte list on every write is far worse than re-rendering it on the next read. Rendering happens outside the collection lock — a reader takes a cheap `Arc` snapshot of the rows, releases the lock, then renders — and the result is only cached if the collection did not change meanwhile. Writers therefore never wait behind a long render.
+- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and up to 32 sort orders and filters, inside a byte budget; all of it is rebuilt only when the collection is written to. Each worker also keeps a thread-local map of the results it has already seen, tagged with a collection version, so a cache hit costs an atomic load and a local lookup instead of a lock shared by every worker. The thread-local view holds pointers to the same bytes, and is bounded by both an entry count and `VELO_LOCAL_CACHE_BYTES` so superseded results cannot pile up. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. Inserting a row appends to the cached list JSON in place when nothing else is holding it, only when the list was read since the last write, and only while that list stays under `VELO_APPEND_MAX`. Past that size an insert simply drops the cache, because copying a multi-megabyte list on every write is far worse than re-rendering it on the next read. Rendering happens outside the collection lock: a reader copies the live row handles under a brief lock, releases it, then renders, and the result is only cached if the collection did not change meanwhile. Writers never wait behind a long render, and never pay a copy-on-write of the row list because no reader holds it.
 
 Filters, sorts, searches, and aggregates work the same way. On a large collection under a constant write load their caches are invalidated as fast as they are built, so each such read costs a full scan; that is the shape of the query, not a lock problem. Use `find`, `first`, or `page` when a collection gets big. A write-only burst therefore keeps its O(1) insert, and an alternating write/read workload neither re-renders nor recopies the list. The cost is holding rows twice in memory.
 - **No allocation for key lookups.** `db.users.find(id)` on a plain path param hashes the slice of the request line directly; nothing is copied unless the param is percent-encoded.
@@ -315,7 +315,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.50.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.51.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -361,9 +361,11 @@ Mixed read/write load on a 186 000-row collection, one reader looping over a who
 
 | reader | writes before | writes after |
 | --- | --- | --- |
-| `/users` (cached list) | 154 req/s | 15 000 req/s |
-| `/users/by/team` (filter) | 1 091 req/s | 15 482 req/s |
-| `/users/sorted` (sort) | 779 req/s | 21 568 req/s |
+| `/users` (cached list) | 154 req/s | 15 500 req/s |
+| `/users/by/team` (filter) | 1 091 req/s | 33 500 req/s |
+| `/users/sorted` (sort) | 779 req/s | 32 900 req/s |
+
+Write tail latency in that test fell with it: the worst insert went from 1 150 ms to 49 ms on the sort case. Writes with no reader at all run at about 41 000 req/s, so a heavy reader now costs roughly 20% of write throughput instead of 98%.
 
 A soak run (mixed reads and writes, millions of requests) holds steady: read-only load keeps RSS at 1.17 MB across 3.6 M requests, and memory otherwise tracks the data, not the traffic.
 
@@ -463,6 +465,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.51.0** — readers copy the row handles they need under a brief lock instead of holding an `Arc` for the whole render, so an insert never triggers a copy-on-write of a large row list: writes under a heavy reader went from 15 500-21 600 to 32 900-33 500 req/s and the worst insert from 1 150 ms to 49 ms.
 
 **v0.50.1** — a test now compiles a program that exercises every documented store operation and built-in, and checks that every `VELO_*` knob named in this file exists in the code. Documentation cannot drift silently.
 
