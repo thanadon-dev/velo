@@ -1,4 +1,4 @@
-use crate::store::Collection;
+use crate::store::{Agg, Collection};
 use crate::value::Value;
 use std::sync::Arc;
 
@@ -73,6 +73,7 @@ pub enum Op {
     Find(Box<Expr>),
     Where(Box<Expr>, Box<Expr>),
     Search(Box<Expr>, Box<Expr>),
+    Aggregate(Agg, Box<Expr>),
     First(Box<Expr>, Box<Expr>),
     Order(Box<Expr>),
     Page(Box<Expr>, Box<Expr>),
@@ -133,6 +134,7 @@ impl Expr {
                     let want = v.eval(c)?.as_key();
                     col.first(&field, &want).ok_or(NOT_FOUND)
                 }
+                Op::Aggregate(agg, f) => Ok(col.aggregate(*agg, &f.eval(c)?.as_key())),
                 Op::Search(f, v) => {
                     let field = f.eval(c)?.as_key();
                     let needle = v.eval(c)?.as_key();

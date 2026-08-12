@@ -1,6 +1,6 @@
 GET  /health              => "ok"
 GET  /openapi.json        => openapi()
-GET  /version             => { name: "velo", version: "0.23.1" }
+GET  /version             => { name: "velo", version: "0.24.0" }
 
 GET  /users               => db.users.all()
 GET  /users/:id           => db.users.find(id)
@@ -19,6 +19,7 @@ GET  /posts/:id           => db.posts.find(id)
 GET  /posts/of/:author    => db.posts.where("author", author)
 
 GET  /stats               => { users: db.users.count(), posts: db.posts.count() }
+GET  /scores              => { total: db.users.sum("score"), avg: db.users.avg("score"), best: db.users.max("score") }
 GET  /teams/:tid/members/:mid => { team: tid, member: mid }
 GET  /search              => { q: query.q, page: query.page }
 POST /events              => db.events.create({ id: uuid(), at: now(), data: body })

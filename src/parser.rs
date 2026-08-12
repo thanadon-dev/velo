@@ -448,6 +448,16 @@ impl<'a> Parser<'a> {
                 let f = Box::new(args.next().unwrap());
                 Op::First(f, Box::new(args.next().unwrap()))
             }
+            "sum" | "avg" | "min" | "max" => {
+                want(1)?;
+                let agg = match op.text.as_str() {
+                    "sum" => crate::store::Agg::Sum,
+                    "avg" => crate::store::Agg::Avg,
+                    "min" => crate::store::Agg::Min,
+                    _ => crate::store::Agg::Max,
+                };
+                Op::Aggregate(agg, Box::new(args.next().unwrap()))
+            }
             "search" => {
                 want(2)?;
                 let f = Box::new(args.next().unwrap());

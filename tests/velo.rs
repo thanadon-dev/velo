@@ -20,6 +20,7 @@ POST /name            => body.name
 GET  /list            => [1, 2, "three", true, null]
 GET  /search          => db.users.where("name", query.name)
 GET  /find            => db.users.search("name", query.q)
+GET  /totals          => { n: db.users.count(), sum: db.users.sum("score"), avg: db.users.avg("score"), lo: db.users.min("score"), hi: db.users.max("score") }
 GET  /q               => { limit: query.limit, tag: query.tag }
 GET  /raw/:v          => { v: v }
 DELETE /gone/:id      => { id: id } : 204
@@ -972,4 +973,26 @@ fn concurrent_reads_and_writes_stay_consistent() {
     assert_eq!(all.matches(r#""name":"a""#).count(), 800);
     assert_eq!(call(&s, "GET", "/search?name=a", "").1, all);
     assert_eq!(call(&s, "GET", "/sorted", "").1.matches(r#""id""#).count(), 800);
+}
+
+#[test]
+fn aggregations() {
+    let s = server();
+    assert_eq!(
+        call(&s, "GET", "/totals", "").1,
+        r#"{"n":0,"sum":0,"avg":null,"lo":null,"hi":null}"#
+    );
+    call(&s, "POST", "/users", r#"{"name":"a","score":10}"#);
+    call(&s, "POST", "/users", r#"{"name":"b","score":5}"#);
+    call(&s, "POST", "/users", r#"{"name":"c","score":6}"#);
+    call(&s, "POST", "/users", r#"{"name":"d"}"#);
+    assert_eq!(call(&s, "GET", "/totals", "").1, r#"{"n":4,"sum":21,"avg":7,"lo":5,"hi":10}"#);
+    assert_eq!(call(&s, "GET", "/totals", "").1, call(&s, "GET", "/totals", "").1);
+    call(&s, "POST", "/users", r#"{"name":"e","score":100}"#);
+    assert_eq!(
+        call(&s, "GET", "/totals", "").1,
+        r#"{"n":5,"sum":121,"avg":30.25,"lo":5,"hi":100}"#
+    );
+    call(&s, "DELETE", "/users/5", "");
+    assert_eq!(call(&s, "GET", "/totals", "").1, r#"{"n":4,"sum":21,"avg":7,"lo":5,"hi":10}"#);
 }

@@ -87,6 +87,33 @@ impl Snapshot {
         self.store_cached(key, Arc::from(out.as_slice()))
     }
 
+    fn aggregate_json(&self, op: Agg, field: &str) -> Arc<[u8]> {
+        let key = format!("a\0{}\0{field}", op.name());
+        if let Some(hit) = self.cached(&key) {
+            return hit;
+        }
+        let mut acc: Option<f64> = None;
+        let mut n = 0u64;
+        for row in self.rows.iter() {
+            let Some(Value::Num(v)) = row.get_ref(field) else { continue };
+            n += 1;
+            acc = Some(match (acc, op) {
+                (None, _) => *v,
+                (Some(a), Agg::Sum | Agg::Avg) => a + v,
+                (Some(a), Agg::Min) => a.min(*v),
+                (Some(a), Agg::Max) => a.max(*v),
+            });
+        }
+        let mut out = Vec::with_capacity(24);
+        match (acc, op) {
+            (Some(a), Agg::Avg) => crate::value::write_number(&mut out, a / n as f64),
+            (Some(a), _) => crate::value::write_number(&mut out, a),
+            (None, Agg::Sum) => out.extend_from_slice(b"0"),
+            (None, _) => out.extend_from_slice(b"null"),
+        }
+        self.store_cached(key, Arc::from(out.as_slice()))
+    }
+
     fn sorted_json(&self, field: &str) -> Arc<[u8]> {
         let key = format!("o\0{field}");
         if let Some(hit) = self.cached(&key) {
@@ -200,6 +227,10 @@ impl Collection {
             None => Vec::new(),
         };
         Value::Arr(Arc::new(rows))
+    }
+
+    pub fn aggregate(&self, op: Agg, field: &str) -> Value {
+        Value::Raw(self.snap.read().unwrap().aggregate_json(op, field))
     }
 
     pub fn search(&self, field: &str, needle: &str) -> Value {
@@ -380,6 +411,25 @@ impl Store {
                 }
             }
         });
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Agg {
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+impl Agg {
+    fn name(self) -> &'static str {
+        match self {
+            Agg::Sum => "sum",
+            Agg::Avg => "avg",
+            Agg::Min => "min",
+            Agg::Max => "max",
+        }
     }
 }
 

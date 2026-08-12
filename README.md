@@ -1,6 +1,6 @@
 # Velo
 
-**v0.23.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.24.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -75,7 +75,10 @@ Built-in store (`db.<collection>.<op>`):
 | op | returns | on miss |
 | --- | --- | --- |
 | `all()` | array of rows | |
-| `count()` | number | |
+| `count()` | number |
+| `sum(field)` | sum of numeric values in `field`, `0` when there are none |
+| `avg(field)` | mean of numeric values, `null` when there are none |
+| `min(field)` / `max(field)` | smallest / largest numeric value, `null` when there are none | |
 | `find(key)` | row | 404 |
 | `first(field, value)` | first matching row | 404 |
 | `where(field, value)` | array of matching rows; linear scan, cached per field and value | `[]` |
@@ -97,6 +100,7 @@ Built-in functions:
 | `openapi()` | this API's OpenAPI 3.0 document, rendered once at compile time |
 
 ```velo
+GET  /scores     => { total: db.orders.sum("amount"), avg: db.orders.avg("amount") }
 POST /events     => db.events.create({ id: uuid(), at: now(), data: body })
 GET  /users/mine => db.users.where("team", header.x_team)
 ```
@@ -210,7 +214,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.23.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.24.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -263,7 +267,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-62 tests (49 integration + 5 CLI + 5 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, and search caches from five reader threads while four writers insert, then checks the final data is consistent.
+63 tests (50 integration + 5 CLI + 5 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -317,6 +321,8 @@ WantedBy=default.target
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.24.0** — aggregations: `sum`, `avg`, `min`, `max` over a numeric field, cached and invalidated with the other derived results. Non-numeric and missing values are skipped.
 
 **v0.23.1** — stress test covering cache invalidation under concurrent reads and writes.
 
