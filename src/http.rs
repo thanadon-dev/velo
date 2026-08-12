@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 pub const MAX_BODY: usize = 1 << 20;
 const RATE_SHARDS: usize = 16;
+type RateShard = HashMap<String, (Instant, u32), BuildHasherDefault<Fnv>>;
 const RATE_KEYS_MAX: usize = 4096;
 pub const MAX_HEAD: usize = 8 << 10;
 
@@ -52,7 +53,7 @@ pub struct Server {
     pub etag: bool,
     pub rate: u32,
     pub real_ip_header: Option<String>,
-    limiter: Vec<Mutex<HashMap<String, (Instant, u32), BuildHasherDefault<Fnv>>>>,
+    limiter: Vec<Mutex<RateShard>>,
     started: Instant,
     requests: AtomicU64,
     failures: AtomicU64,
