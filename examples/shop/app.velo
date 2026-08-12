@@ -1,0 +1,6 @@
+include "parts/catalog.velo"
+include "parts/orders.velo"
+include "parts/admin.velo"
+
+GET /health       => "ok"
+GET /openapi.json => openapi()

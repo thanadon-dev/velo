@@ -10,6 +10,7 @@ cargo build --release
 
 "$BIN/velo" check examples/api.velo
 "$BIN/velo" check examples/todo.velo
+"$BIN/velo" check examples/shop/app.velo
 "$BIN/velo" run examples/api.velo "$ADDR" &
 PID=$!
 sleep 1

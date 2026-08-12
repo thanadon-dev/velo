@@ -110,7 +110,7 @@ pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> 
     Ok(prog)
 }
 
-fn bake_openapi(prog: &mut Program) {
+pub fn bake_openapi(prog: &mut Program) {
     let is_doc = |r: &Route| matches!(&r.expr, Expr::Call(Builtin::Openapi, _));
     if !prog.routes.iter().any(is_doc) {
         return;

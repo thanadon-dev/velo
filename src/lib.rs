@@ -31,6 +31,7 @@ pub fn compile_file(
     if prog.routes.is_empty() {
         return Err("no routes defined".to_string());
     }
+    parser::bake_openapi(&mut prog);
     Ok(prog)
 }
 

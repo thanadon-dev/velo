@@ -265,3 +265,38 @@ fn includes_merge_files_and_ignore_cycles() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn openapi_covers_included_files() {
+    let dir = tmp("incdoc");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write(
+        &dir.join("app.velo"),
+        "include \"more.velo\"\nGET /docs => openapi()\nGET /health => \"ok\"\n",
+    );
+    write(&dir.join("more.velo"), "GET /users/:id => db.users.find(id)\n");
+
+    let out = Command::new(BIN).arg("openapi").arg(dir.join("app.velo")).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("/users/{id}"), "{text}");
+
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(dir.join("app.velo"))
+        .arg(format!("127.0.0.1:{port}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let res = get(port, "/docs");
+    let body = res.split("\r\n\r\n").nth(1).unwrap_or_default().to_string();
+    let doc = velo::value::parse_json(body.as_bytes()).expect(&res);
+    let paths = doc.get("paths");
+    for p in ["/users/{id}", "/health", "/docs"] {
+        assert!(matches!(paths.get(p), velo::Value::Obj(_)), "{p} missing from {body}");
+    }
+    stop(&mut child, "-TERM");
+    let _ = std::fs::remove_dir_all(&dir);
+}

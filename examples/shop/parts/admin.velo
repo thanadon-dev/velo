@@ -1,0 +1,2 @@
+GET /admin/revenue          => { orders: db.orders.count(), total: db.orders.sum("amount"), avg: db.orders.avg("amount"), largest: db.orders.max("amount") } when header.authorization == env("ADMIN_TOKEN")
+GET /admin/products         => db.products.all() when header.authorization == env("ADMIN_TOKEN")

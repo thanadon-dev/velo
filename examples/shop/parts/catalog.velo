@@ -1,0 +1,6 @@
+GET  /products              => db.products.order("name")
+GET  /products/:id          => db.products.find(id)
+GET  /products/search       => db.products.search("name", query.q)
+GET  /products/by/:tag      => db.products.where("tag", tag)
+POST /products              => db.products.create(body) when body.name or 400
+PUT  /products/:id          => db.products.update(id, body)
