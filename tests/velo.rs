@@ -1294,3 +1294,33 @@ fn boolean_guards() {
     let s3 = Server::new(compile("GET /a => 1 when 1 == 2 or 3 > 9", None).unwrap()).unwrap();
     assert_eq!(call(&s3, "GET", "/a", "").0, 401);
 }
+
+#[test]
+fn shutdown_drains_in_flight_connections() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let s = server();
+    let bg = s.clone();
+    let h = std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
+
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    let mut buf = [0u8; 512];
+    let n = c.read(&mut buf).unwrap();
+    let first = String::from_utf8_lossy(&buf[..n]).to_string();
+    assert!(first.contains("Connection: keep-alive"), "{first}");
+
+    s.shutdown();
+    c.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    let mut rest = String::new();
+    c.read_to_string(&mut rest).unwrap();
+    assert!(rest.starts_with("HTTP/1.1 200 OK"), "in-flight request dropped: {rest:?}");
+    assert!(rest.contains("Connection: close"), "{rest}");
+    assert!(rest.ends_with("ok"), "{rest}");
+
+    let started = std::time::Instant::now();
+    h.join().unwrap().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    assert!(TcpStream::connect(("127.0.0.1", port)).is_err() || s.stopping());
+}

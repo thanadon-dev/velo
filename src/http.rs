@@ -58,6 +58,7 @@ pub struct Server {
     pub max_conns: usize,
     pub keepalive_secs: u64,
     pub header_secs: u64,
+    pub drain_ms: u64,
     pub workers: usize,
     pub extra_headers: Vec<u8>,
     pub cors: bool,
@@ -90,6 +91,7 @@ impl Server {
             max_conns: env_usize("VELO_MAX_CONNS", 65536),
             keepalive_secs: env_usize("VELO_KEEPALIVE", 60) as u64,
             header_secs: env_usize("VELO_HEADER_TIMEOUT", 10) as u64,
+            drain_ms: env_usize("VELO_DRAIN_MS", 2000) as u64,
             workers: env_usize("VELO_WORKERS", cpus).max(1),
             extra_headers: {
                 let mut h = cors_headers(&cors);

@@ -402,15 +402,16 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         if srv.log {
             srv.log_line(method, path, status, body.len(), micros);
         }
+        let keep_alive = head.keep_alive && !srv.stopping();
         let tag = if srv.etag && status == 200 && (method == "GET" || method == "HEAD") {
             Some(crate::http::etag_of(&body))
         } else {
             None
         };
         if tag.is_some() && tag == head.none_match {
-            write_head_tagged(&mut c.out, 304, ct, 0, head.keep_alive, headers, tag);
+            write_head_tagged(&mut c.out, 304, ct, 0, keep_alive, headers, tag);
         } else {
-            write_head_tagged(&mut c.out, status, ct, body.len(), head.keep_alive, headers, tag);
+            write_head_tagged(&mut c.out, status, ct, body.len(), keep_alive, headers, tag);
             if !head.head_only && !empty_status(status) {
                 c.out.extend_from_slice(&body);
             }
@@ -420,7 +421,7 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         c.scanned = 0;
         c.served = true;
         c.continued = false;
-        if !head.keep_alive {
+        if !keep_alive {
             c.closing = true;
             c.compact();
             return;
@@ -446,8 +447,18 @@ pub(crate) fn worker(srv: &Server, listener: &Listener) -> std::io::Result<()> {
     let mut headers = response_headers(srv);
     let mut header_age = Instant::now();
 
-    while !srv.stopping() {
-        let n = ep.wait(&mut events, 250)?;
+    let mut draining: Option<Instant> = None;
+    loop {
+        if srv.stopping() && draining.is_none() {
+            let _ = ep.remove(listener);
+            draining = Some(Instant::now());
+        }
+        if let Some(started) = draining {
+            if conns.is_empty() || started.elapsed() >= Duration::from_millis(srv.drain_ms.max(1)) {
+                break;
+            }
+        }
+        let n = ep.wait(&mut events, if draining.is_some() { 20 } else { 250 })?;
         if header_age.elapsed() >= Duration::from_secs(1) {
             headers = response_headers(srv);
             header_age = Instant::now();

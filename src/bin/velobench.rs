@@ -160,6 +160,7 @@ fn worker(
     let mut counter = Counter::default();
     let mut local_done = 0u64;
     let mut local_bytes = 0u64;
+    let mut closed = false;
     while !stop.load(Ordering::Relaxed) {
         let t0 = Instant::now();
         if s.write_all(&batch).is_err() {
@@ -170,7 +171,10 @@ fn worker(
         while seen < a.pipeline {
             match s.read(&mut buf) {
                 Ok(0) => {
-                    errors.fetch_add(1, Ordering::Relaxed);
+                    if !counter.at_boundary() {
+                        errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                    closed = true;
                     break;
                 }
                 Ok(n) => {
@@ -183,7 +187,7 @@ fn worker(
                 }
             }
         }
-        if seen == 0 {
+        if seen == 0 || closed || counter.server_closing {
             break;
         }
         let us = t0.elapsed().as_micros() as u64 / a.pipeline as u64;
@@ -201,6 +205,20 @@ fn worker(
 struct Counter {
     head: Vec<u8>,
     body_left: usize,
+    server_closing: bool,
+}
+
+impl Counter {
+    fn note_close(&mut self, head: &[u8]) {
+        let lower: Vec<u8> = head.iter().map(|c| c.to_ascii_lowercase()).collect();
+        if find(&lower, b"connection: close").is_some() {
+            self.server_closing = true;
+        }
+    }
+
+    fn at_boundary(&self) -> bool {
+        self.head.is_empty() && self.body_left == 0
+    }
 }
 
 impl Counter {
@@ -222,6 +240,7 @@ impl Counter {
                     return done;
                 };
                 let len = content_length(&chunk[..end]);
+                self.note_close(&chunk[..end]);
                 chunk = &chunk[end + 4..];
                 if len == 0 {
                     done += 1;
@@ -237,6 +256,7 @@ impl Counter {
             let consumed = chunk.len() - (self.head.len() - (end + 4));
             chunk = &chunk[consumed..];
             let len = content_length(&self.head[..end]);
+            self.note_close(&self.head[..end].to_vec());
             self.head.clear();
             if len == 0 {
                 done += 1;
