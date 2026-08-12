@@ -148,7 +148,18 @@ fn routes(args: &[String]) {
                     (None, _, true) => "query",
                     _ => "dynamic",
                 };
-                println!("{:<7} {:<28} {:<8} {}", r.method.name(), r.pattern, kind, r.status);
+                let guard = match &r.guard {
+                    Some(_) => format!("guard {}", r.guard_status),
+                    None => String::new(),
+                };
+                println!(
+                    "{:<7} {:<28} {:<8} {:<4} {}",
+                    r.method.name(),
+                    r.pattern,
+                    kind,
+                    r.status,
+                    guard
+                );
             }
         }
         Err(e) => {
