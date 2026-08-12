@@ -74,6 +74,7 @@ pub struct Program {
     pub routes: Vec<Route>,
     pub store: Arc<Store>,
     pub includes: Vec<String>,
+    pub sources: Vec<std::path::PathBuf>,
 }
 
 pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> {
@@ -105,7 +106,7 @@ pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> 
     if routes.is_empty() && includes.is_empty() {
         return Err("no routes defined".to_string());
     }
-    let mut prog = Program { routes, store, includes };
+    let mut prog = Program { routes, store, includes, sources: Vec::new() };
     bake_openapi(&mut prog);
     Ok(prog)
 }

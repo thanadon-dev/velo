@@ -7,6 +7,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(String::as_str).unwrap_or("");
     match cmd {
+        "run" if args.iter().any(|a| a == "--watch") => watch(&args),
         "run" => run(&args),
         "check" => check(&args),
         "routes" => routes(&args),
@@ -26,7 +27,7 @@ fn usage(code: i32) -> ! {
         "velo {VERSION}\n\
          \n\
          usage:\n\
-         \x20 velo run <file.velo> [addr] [--data file.json]\n\
+         \x20 velo run <file.velo> [addr] [--data file.json] [--watch]\n\
          \x20                               start the server (default :8080, env VELO_ADDR)\n\
          \x20 velo check <file.velo>        compile only, report errors\n\
          \x20 velo routes <file.velo>       list compiled routes\n\
@@ -50,6 +51,61 @@ fn program(args: &[String], store: Option<std::sync::Arc<Store>>) -> velo::Progr
             eprintln!("velo: {e}");
             exit(1)
         }
+    }
+}
+
+extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+fn watch(args: &[String]) {
+    let child_args: Vec<String> =
+        args.iter().skip(1).filter(|a| a.as_str() != "--watch").cloned().collect();
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            eprintln!("velo: {e}");
+            exit(1)
+        }
+    };
+    let Some(main_file) = args.get(2).cloned() else { usage(2) };
+    let sources = |current: &Vec<PathBuf>| -> Vec<PathBuf> {
+        match compile_file(std::path::Path::new(&main_file), None) {
+            Ok(p) => p.sources,
+            Err(_) if !current.is_empty() => current.clone(),
+            Err(_) => vec![PathBuf::from(&main_file)],
+        }
+    };
+    let stamps = |paths: &[PathBuf]| -> Vec<Option<std::time::SystemTime>> {
+        paths.iter().map(|p| std::fs::metadata(p).ok().and_then(|m| m.modified().ok())).collect()
+    };
+
+    let mut watched = sources(&Vec::new());
+    println!("velo {VERSION} watching {} file(s)", watched.len());
+    loop {
+        let child = std::process::Command::new(&exe).args(&child_args).spawn();
+        let mut child = match child {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("velo: {e}");
+                None
+            }
+        };
+        let mut before = stamps(&watched);
+        loop {
+            std::thread::sleep(Duration::from_millis(400));
+            let now = stamps(&watched);
+            if now != before {
+                before = now;
+                println!("velo: change detected, restarting");
+                break;
+            }
+        }
+        if let Some(child) = child.as_mut() {
+            unsafe { kill(child.id() as i32, 15) };
+            let _ = child.wait();
+        }
+        watched = sources(&watched);
     }
 }
 

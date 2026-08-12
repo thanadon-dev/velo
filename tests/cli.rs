@@ -300,3 +300,46 @@ fn openapi_covers_included_files() {
     stop(&mut child, "-TERM");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn watch_restarts_on_change() {
+    let app = tmp("watch.velo");
+    write(&app, "GET /health => \"ok\"\nGET /v => \"one\"\n");
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--watch")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    assert!(get(port, "/v").ends_with("one"));
+
+    write(&app, "GET /health => \"ok\"\nGET /v => \"two\"\n");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if get(port, "/v").ends_with("two") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "watch never picked up the change");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    write(&app, "GET /v => oops(\n");
+    std::thread::sleep(Duration::from_millis(1200));
+    write(&app, "GET /health => \"ok\"\nGET /v => \"three\"\n");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if get(port, "/v").ends_with("three") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "watch died on a broken file");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    stop(&mut child, "-TERM");
+    let _ = std::fs::remove_file(&app);
+}

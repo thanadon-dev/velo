@@ -1,6 +1,6 @@
 # Velo
 
-**v0.29.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.30.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -34,7 +34,7 @@ CLI:
 
 | command | what it does |
 | --- | --- |
-| `velo run <file> [addr] [--data f.json]` | start the server (default `:8080`, env `VELO_ADDR`, `VELO_DATA`) |
+| `velo run <file> [addr] [--data f.json] [--watch]` | start the server (default `:8080`, env `VELO_ADDR`, `VELO_DATA`) |
 | `velo check <file>` | compile only, report errors with the offending source line |
 | `velo routes <file>` | list compiled routes, their kind, status, and guard |
 | `velo openapi <file>` | print an OpenAPI 3.0 document for the routes |
@@ -161,6 +161,16 @@ GET /openapi.json => openapi()
 
 `VELO_TITLE` sets the document title.
 
+## Watch mode
+
+`--watch` supervises the server and restarts it whenever the route file or anything it includes changes:
+
+```sh
+velo run examples/shop/app.velo :8080 --watch
+```
+
+Restarts go through `SIGTERM`, so a `--data` snapshot is flushed first. A file that fails to compile leaves the supervisor running: it prints the error, keeps watching, and starts again on the next save.
+
 ## Persistence
 
 The store is in memory. Pass `--data file.json` (or set `VELO_DATA`) and velo loads that file at boot and writes it back whenever the data changed, at most once every `VELO_SAVE_MS` milliseconds (default 200):
@@ -246,7 +256,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.29.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.30.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -311,9 +321,9 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-72 tests (55 integration + 8 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+73 tests (55 integration + 9 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
-`tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
+`tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, `--watch` restarting on a change and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
 `tests/fuzz.rs` adds six deterministic robustness tests: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, 400 connections carrying byte-level mutations of otherwise valid requests (every answer must still be a well-formed status line), and oversized header and body requests. They also cover slow drip-feeding clients. They assert the process never panics and that the server still answers a normal request afterwards.
 
@@ -346,6 +356,8 @@ cargo test
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.30.0** — `velo run --watch` restarts the server when the route file or any included file changes, stopping the old process with `SIGTERM` so snapshots flush, and surviving files that fail to compile.
 
 **v0.29.1** — `openapi()` and `velo openapi` now describe included files too; the document is built after the merge. Added `examples/shop/`, a four-file API using `include`.
 

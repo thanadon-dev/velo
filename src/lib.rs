@@ -26,7 +26,12 @@ pub fn compile_file(
 ) -> Result<Program, String> {
     let store = store.unwrap_or_default();
     let mut seen = Vec::new();
-    let mut prog = Program { routes: Vec::new(), store: store.clone(), includes: Vec::new() };
+    let mut prog = Program {
+        routes: Vec::new(),
+        store: store.clone(),
+        includes: Vec::new(),
+        sources: Vec::new(),
+    };
     load_into(&mut prog, path, &store, &mut seen)?;
     if prog.routes.is_empty() {
         return Err("no routes defined".to_string());
@@ -46,6 +51,7 @@ fn load_into(
         return Ok(());
     }
     seen.push(full.clone());
+    prog.sources.push(full.clone());
     if seen.len() > 32 {
         return Err(format!("{}: include nesting too deep", path.display()));
     }
