@@ -3,7 +3,7 @@ use std::cmp::Ordering as Ordering2;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 const CACHE_MAX: usize = 32;
 
@@ -35,7 +35,8 @@ fn cache_budget() -> usize {
 struct Snapshot {
     rows: Arc<Vec<Value>>,
     by_id: HashMap<String, usize>,
-    all_json: OnceLock<Arc<[u8]>>,
+    all_json: Option<Arc<[u8]>>,
+    list_used: bool,
     cache: RwLock<HashMap<String, Arc<[u8]>>>,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -43,17 +44,39 @@ struct Snapshot {
 
 impl Snapshot {
     fn json(&self) -> Arc<[u8]> {
-        self.all_json
-            .get_or_init(|| {
-                let mut out = Vec::with_capacity(self.rows.len() * 64 + 2);
-                Value::Arr(self.rows.clone()).write_json(&mut out);
-                Arc::from(out.as_slice())
-            })
-            .clone()
+        if let Some(json) = &self.all_json {
+            return json.clone();
+        }
+        let mut out = Vec::with_capacity(self.rows.len() * 64 + 2);
+        Value::Arr(self.rows.clone()).write_json(&mut out);
+        Arc::from(out.as_slice())
+    }
+
+    fn json_cached(&mut self) -> Arc<[u8]> {
+        let json = self.json();
+        self.all_json = Some(json.clone());
+        self.list_used = true;
+        json
+    }
+
+    fn append_json(&mut self, row: &Value) {
+        let Some(old) = self.all_json.take() else { return };
+        if old.len() < 2 {
+            return;
+        }
+        let mut out = Vec::with_capacity(old.len() + 96);
+        out.extend_from_slice(&old[..old.len() - 1]);
+        if old.len() > 2 {
+            out.push(b',');
+        }
+        row.write_json(&mut out);
+        out.push(b']');
+        self.all_json = Some(Arc::from(out.as_slice()));
     }
 
     fn invalidate(&mut self) {
-        self.all_json = OnceLock::new();
+        self.all_json = None;
+        self.list_used = false;
         self.cache.get_mut().unwrap().clear();
     }
 
@@ -205,7 +228,8 @@ impl Collection {
             snap: RwLock::new(Snapshot {
                 rows: Arc::new(Vec::new()),
                 by_id: HashMap::new(),
-                all_json: OnceLock::new(),
+                all_json: None,
+                list_used: false,
                 cache: RwLock::new(HashMap::new()),
                 hits: AtomicU64::new(0),
                 misses: AtomicU64::new(0),
@@ -223,6 +247,18 @@ impl Collection {
         self.version.fetch_add(1, Ordering::Release);
     }
 
+    fn tag(&self) -> String {
+        let mut out = String::with_capacity(8);
+        let mut v = self.id;
+        loop {
+            out.push((b'a' + (v % 26) as u8) as char);
+            v /= 26;
+            if v == 0 {
+                return out;
+            }
+        }
+    }
+
     fn derived(
         &self,
         kind: &str,
@@ -231,21 +267,8 @@ impl Collection {
         build: impl FnOnce(&Snapshot) -> Arc<[u8]>,
     ) -> Value {
         let version = self.version.load(Ordering::Acquire);
-        let mut id = [0u8; 20];
-        let idn = {
-            let mut n = 0;
-            let mut v = self.id;
-            loop {
-                id[n] = b'a' + (v % 26) as u8;
-                n += 1;
-                v /= 26;
-                if v == 0 {
-                    break n;
-                }
-            }
-        };
-        let tag = std::str::from_utf8(&id[..idn]).unwrap_or("x");
-        let json = with_key4(tag, kind, a, b, |key| {
+        let tag = self.tag();
+        let json = with_key4(&tag, kind, a, b, |key| {
             let hit = LOCAL_CACHE.with(|c| {
                 c.borrow().get(key).and_then(|(v, json)| (*v == version).then(|| json.clone()))
             });
@@ -289,7 +312,28 @@ impl Collection {
     }
 
     pub fn all(&self) -> Value {
-        self.derived("l", "", "", |s| s.json())
+        let version = self.version.load(Ordering::Acquire);
+        let key_hit = with_key4(&self.tag(), "l", "", "", |key| {
+            LOCAL_CACHE
+                .with(|c| c.borrow().get(key).and_then(|(v, j)| (*v == version).then(|| j.clone())))
+        });
+        if let Some(json) = key_hit {
+            return Value::Raw(json);
+        }
+        let json = self.snap.write().unwrap().json_cached();
+        with_key4(&self.tag(), "l", "", "", |key| {
+            LOCAL_CACHE.with(|c| {
+                let mut c = c.borrow_mut();
+                let used: usize = c.values().map(|(_, v)| v.len()).sum();
+                if c.len() >= LOCAL_CACHE_MAX || used + json.len() > local_budget() {
+                    c.clear();
+                }
+                if json.len() <= local_budget() {
+                    c.insert(key.to_string(), (version, json.clone()));
+                }
+            })
+        });
+        Value::Raw(json)
     }
 
     pub fn count(&self) -> usize {
@@ -364,7 +408,11 @@ impl Collection {
         rows.push(row.clone());
         let idx = rows.len() - 1;
         s.by_id.insert(key, idx);
+        let reuse = s.list_used.then(|| s.all_json.take()).flatten();
         s.invalidate();
+        s.all_json = reuse;
+        s.append_json(&row);
+        s.list_used = false;
         self.bump();
         self.touch();
         Some(row)

@@ -1053,3 +1053,58 @@ fn local_cache_respects_its_budget() {
     assert_eq!(after, before, "small results still cache locally");
     std::env::remove_var("VELO_LOCAL_CACHE_BYTES");
 }
+
+#[test]
+fn incremental_list_matches_a_rebuild() {
+    let a = server();
+    let b = server();
+    for i in 0..25 {
+        let body = format!(r#"{{"name":"n{i}","team":"t{}"}}"#, i % 3);
+        call(&a, "POST", "/users", &body);
+        call(&b, "POST", "/users", &body);
+        call(&a, "GET", "/users", "");
+    }
+    assert_eq!(call(&a, "GET", "/users", "").1, call(&b, "GET", "/users", "").1);
+
+    call(&a, "DELETE", "/users/3", "");
+    call(&b, "DELETE", "/users/3", "");
+    call(&a, "GET", "/users", "");
+    call(&a, "POST", "/users", r#"{"name":"after"}"#);
+    call(&b, "POST", "/users", r#"{"name":"after"}"#);
+    assert_eq!(call(&a, "GET", "/users", "").1, call(&b, "GET", "/users", "").1);
+
+    call(&a, "PUT", "/users/2", r#"{"name":"edited"}"#);
+    call(&b, "PUT", "/users/2", r#"{"name":"edited"}"#);
+    let listed = call(&a, "GET", "/users", "").1;
+    assert_eq!(listed, call(&b, "GET", "/users", "").1);
+    assert!(listed.contains("edited"), "{listed}");
+    assert!(!listed.contains(r#""name":"n1""#), "{listed}");
+
+    let fresh = server();
+    assert_eq!(call(&fresh, "GET", "/users", "").1, "[]");
+    call(&fresh, "GET", "/users", "");
+    call(&fresh, "POST", "/users", r#"{"name":"only"}"#);
+    assert_eq!(call(&fresh, "GET", "/users", "").1, r#"[{"id":1,"name":"only"}]"#);
+}
+
+#[test]
+fn write_heavy_bursts_do_not_rebuild_the_list() {
+    let store = velo::Store::new();
+    let s = Server::new(compile(SRC, Some(store.clone())).unwrap()).unwrap();
+    let users = store.collection("users");
+    call(&s, "GET", "/users", "");
+    for i in 0..50 {
+        call(&s, "POST", "/users", &format!(r#"{{"name":"w{i}"}}"#));
+    }
+    let listed = call(&s, "GET", "/users", "").1;
+    assert_eq!(listed.matches(r#""name""#).count(), 50);
+
+    for i in 0..20 {
+        call(&s, "POST", "/users", &format!(r#"{{"name":"r{i}"}}"#));
+        let seen = call(&s, "GET", "/users", "").1;
+        assert_eq!(seen.matches(r#""name""#).count(), 51 + i);
+    }
+    let (_, misses) = users.cache_stats();
+    call(&s, "GET", "/users", "");
+    assert_eq!(users.cache_stats().1, misses, "list reads must not touch the shared cache");
+}
