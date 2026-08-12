@@ -1740,3 +1740,122 @@ fn builtin_arity_is_checked() {
     assert!(compile(r#"GET /a => trim()"#, None).is_err());
     assert!(compile(r#"GET /a => upper(query.x)"#, None).is_ok());
 }
+
+const STRESS_SRC: &str = r#"
+POST /users     => db.users.create(body)
+DELETE /users/:id => db.users.delete(id)
+GET  /all       => db.users.all()
+GET  /page      => db.users.where("team", query.t).order("score").page(0, 5)
+GET  /howmany   => db.users.where("team", query.t).count()
+GET  /list      => db.users.where("team", query.t)
+GET  /high      => db.users.where("score", ">=", query.n).count()
+GET  /best      => db.users.where("team", query.t).order("-score").first()
+GET  /total     => db.users.where("team", query.t).sum("score")
+GET  /stats     => { users: db.users.count() }
+"#;
+
+#[test]
+fn chained_reads_stay_consistent_under_writes() {
+    let s = Server::new(compile(STRESS_SRC, None).unwrap()).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for i in 0..200 {
+        let body = format!(r#"{{"name":"s{i}","team":"t{}","score":{}}}"#, i % 3, i % 50);
+        assert_eq!(call(&s, "POST", "/users", &body).0, 201);
+    }
+
+    let readers: Vec<_> =
+        ["/page?t=t0", "/howmany?t=t1", "/high?n=25", "/best?t=t2", "/total?t=t0"]
+            .iter()
+            .map(|path| {
+                let (s, stop, path) = (s.clone(), stop.clone(), path.to_string());
+                std::thread::spawn(move || {
+                    let mut seen = 0u64;
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        let mut out = Vec::new();
+                        let (status, _) = s.dispatch("GET", &path, b"", &mut out);
+                        assert!(status == 200 || status == 404, "{path} answered {status}");
+                        let body = String::from_utf8(out).unwrap();
+                        if status == 404 {
+                            seen += 1;
+                            continue;
+                        }
+                        let value = parse_json(body.as_bytes())
+                            .unwrap_or_else(|e| panic!("{path} sent {body}: {e:?}"));
+                        if let Value::Arr(rows) = &value {
+                            assert!(rows.len() <= 5, "{path} paged past its limit");
+                            let mut last = f64::MIN;
+                            for row in rows.iter() {
+                                assert_eq!(row.get("team").as_key(), "t0", "{path} leaked a row");
+                                let score = match row.get("score") {
+                                    Value::Num(n) => n,
+                                    other => panic!("{path} row without a score: {other:?}"),
+                                };
+                                assert!(score >= last, "{path} came back unsorted");
+                                last = score;
+                            }
+                        }
+                        seen += 1;
+                    }
+                    seen
+                })
+            })
+            .collect();
+
+    let writers: Vec<_> = (0..3)
+        .map(|w| {
+            let s = s.clone();
+            std::thread::spawn(move || {
+                for i in 0..150 {
+                    let mut out = Vec::new();
+                    let body =
+                        format!(r#"{{"name":"w{w}x{i}","team":"t{}","score":{}}}"#, i % 3, i % 50);
+                    assert_eq!(s.dispatch("POST", "/users", body.as_bytes(), &mut out).0, 201);
+                }
+            })
+        })
+        .collect();
+
+    let deleter = {
+        let s = s.clone();
+        std::thread::spawn(move || {
+            for id in 1..=100 {
+                let mut out = Vec::new();
+                s.dispatch("DELETE", &format!("/users/{id}"), b"", &mut out);
+            }
+        })
+    };
+
+    for w in writers {
+        w.join().unwrap();
+    }
+    deleter.join().unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let reads: u64 = readers.into_iter().map(|r| r.join().unwrap()).sum();
+    assert!(reads > 100, "readers barely ran: {reads}");
+
+    let all = match parse_json(call(&s, "GET", "/all", "").1.as_bytes()).unwrap() {
+        Value::Arr(rows) => rows.as_ref().clone(),
+        other => panic!("not a list: {other:?}"),
+    };
+    assert_eq!(all.len(), 550, "200 seeded + 450 written - 100 deleted");
+    for team in ["t0", "t1", "t2"] {
+        let mine: Vec<&Value> = all.iter().filter(|r| r.get("team").as_key() == team).collect();
+        let sum: f64 = mine
+            .iter()
+            .map(|r| match r.get("score") {
+                Value::Num(n) => n,
+                _ => 0.0,
+            })
+            .sum();
+        let path = format!("/howmany?t={team}");
+        assert_eq!(call(&s, "GET", &path, "").1, mine.len().to_string(), "count for {team}");
+        let path = format!("/total?t={team}");
+        assert_eq!(call(&s, "GET", &path, "").1, format!("{sum}"), "sum for {team}");
+        let path = format!("/list?t={team}");
+        let listed = names(&call(&s, "GET", &path, "").1);
+        assert_eq!(listed.len(), mine.len(), "list for {team}");
+    }
+    let over: usize =
+        all.iter().filter(|r| matches!(r.get("score"), Value::Num(n) if n >= 25.0)).count();
+    assert_eq!(call(&s, "GET", "/high?n=25", "").1, over.to_string());
+}
