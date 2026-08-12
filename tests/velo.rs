@@ -755,3 +755,30 @@ fn cache_respects_byte_budget() {
     assert_eq!(call(&s, "GET", "/search?name=n3", "").1, one);
     std::env::remove_var("VELO_CACHE_BYTES");
 }
+
+#[test]
+fn openapi_document() {
+    let prog = compile(SRC, None).unwrap();
+    let doc = velo::openapi::document(&prog, "test api", "9.9.9");
+    let text = String::from_utf8(doc.clone()).unwrap();
+    let v = velo::value::parse_json(&doc).expect(&text);
+
+    assert_eq!(v.get("openapi").as_key(), "3.0.3");
+    assert_eq!(v.get("info").get("title").as_key(), "test api");
+    assert_eq!(v.get("info").get("version").as_key(), "9.9.9");
+
+    let paths = v.get("paths");
+    let by_id = paths.get("/users/{id}");
+    assert!(matches!(by_id.get("get"), Value::Obj(_)), "{text}");
+    assert_eq!(by_id.get("get").get("operationId").as_key(), "get_users_by_id");
+    assert!(text.contains(r#""name":"id","in":"path","required":true"#), "{text}");
+    assert!(matches!(by_id.get("get").get("responses").get("404"), Value::Obj(_)), "{text}");
+
+    let post = paths.get("/users").get("post");
+    assert!(matches!(post.get("requestBody"), Value::Obj(_)), "{text}");
+    assert!(matches!(post.get("responses").get("201"), Value::Obj(_)), "{text}");
+
+    assert!(text.contains(r#""name":"limit","in":"query""#), "{text}");
+    assert!(text.contains(r#""name":"x-team","in":"header""#), "{text}");
+    assert!(text.contains(r#""/gone/{id}""#), "{text}");
+}

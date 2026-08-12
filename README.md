@@ -1,6 +1,6 @@
 # Velo
 
-**v0.18.2** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.19.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -33,7 +33,8 @@ CLI:
 | --- | --- |
 | `velo run <file> [addr] [--data f.json]` | start the server (default `:8080`, env `VELO_ADDR`, `VELO_DATA`) |
 | `velo check <file>` | compile only, report errors with the offending source line |
-| `velo routes <file>` | list compiled routes and which ones fold to constants |
+| `velo routes <file>` | list compiled routes, their kind, status, and guard |
+| `velo openapi <file>` | print an OpenAPI 3.0 document for the routes |
 | `velo new <file>` | write a starter file |
 | `velo version` | print version |
 | `velobench [-c n] [-d secs] [-p depth] [-m method] [-b body] <url>` | built-in keep-alive load generator |
@@ -126,6 +127,14 @@ GET  /root  => db.audit.all() when header.x_key == env("ROOT_KEY") or 403
 
 `examples/todo.velo` is a complete todo API using uuid keys, timestamps, sorting, and filters.
 
+## OpenAPI
+
+`velo openapi app.velo` prints an OpenAPI 3.0 document built from the compiled routes: paths with `{param}` placeholders, path/query/header parameters taken from what each route actually reads, request bodies for routes that use `body`, and the status codes each route can answer including guard failures.
+
+```sh
+velo openapi examples/todo.velo > openapi.json
+```
+
 ## Persistence
 
 The store is in memory. Pass `--data file.json` (or set `VELO_DATA`) and velo loads that file at boot and writes it back whenever the data changed, at most once every `VELO_SAVE_MS` milliseconds (default 200):
@@ -149,6 +158,7 @@ Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothin
 | `src/serve.rs` | request parsing, connection state, the epoll loop |
 | `src/value.rs` | `Value`, JSON reader and writer |
 | `src/date.rs` | `Date` header formatting |
+| `src/openapi.rs` | OpenAPI 3.0 document generation |
 | `src/main.rs` | CLI |
 | `src/bin/velobench.rs` | load generator |
 | `src/bin/velomicro.rs` | in-process dispatch microbenchmark, `velomicro [rows]` |
@@ -184,7 +194,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.18.2. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.19.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -237,7 +247,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-50 tests (42 integration + 5 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
+51 tests (43 integration + 5 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes.
 
 `tests/fuzz.rs` adds four deterministic robustness tests: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, and oversized header and body requests. They also cover slow drip-feeding clients. They assert the process never panics and that the server still answers a normal request afterwards.
 
@@ -281,6 +291,8 @@ WantedBy=default.target
 `.cargo/config.toml` targets `x86_64-unknown-linux-musl` with `rust-lld`, so the build needs no system C toolchain. Remove that file to build against glibc with `cc`.
 
 ## Changelog
+
+**v0.19.0** — `velo openapi` generates an OpenAPI 3.0 document from the compiled routes. The compiler now records which query and header fields each route reads, so the document lists real parameters instead of guesses.
 
 **v0.18.2** — the render caches now respect a byte budget (`VELO_CACHE_BYTES`, 8 MB by default) instead of only an entry count, so 32 large lists cannot quietly hold hundreds of megabytes.
 

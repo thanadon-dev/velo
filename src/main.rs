@@ -10,6 +10,7 @@ fn main() {
         "run" => run(&args),
         "check" => check(&args),
         "routes" => routes(&args),
+        "openapi" => openapi(&args),
         "new" => new(&args),
         "version" | "--version" | "-v" => println!("velo {VERSION}"),
         "help" | "--help" | "-h" | "" => usage(0),
@@ -29,6 +30,7 @@ fn usage(code: i32) -> ! {
          \x20                               start the server (default :8080, env VELO_ADDR)\n\
          \x20 velo check <file.velo>        compile only, report errors\n\
          \x20 velo routes <file.velo>       list compiled routes\n\
+         \x20 velo openapi <file.velo>      print an OpenAPI 3 document\n\
          \x20 velo new <file.velo>          write a starter file\n\
          \x20 velo version                  print version"
     );
@@ -124,6 +126,26 @@ fn new(args: &[String]) {
         exit(1)
     }
     println!("wrote {path}, run it with: velo run {path} :8080");
+}
+
+fn openapi(args: &[String]) {
+    let source = src(args);
+    let path = args.get(2).cloned().unwrap_or_default();
+    let title = std::path::Path::new(&path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("velo api")
+        .to_string();
+    match compile(&source, None) {
+        Ok(p) => {
+            let doc = velo::openapi::document(&p, &title, VERSION);
+            println!("{}", String::from_utf8_lossy(&doc));
+        }
+        Err(e) => {
+            eprintln!("velo: {e}");
+            exit(1)
+        }
+    }
 }
 
 fn check(args: &[String]) {

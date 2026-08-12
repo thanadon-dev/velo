@@ -19,6 +19,8 @@ pub struct Route {
     pub uses_body: bool,
     pub uses_query: bool,
     pub uses_header: bool,
+    pub query_fields: Vec<String>,
+    pub header_fields: Vec<String>,
     pub guard: Option<Expr>,
     pub guard_status: u16,
     pub line: usize,
@@ -84,6 +86,8 @@ pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> 
         body: false,
         query: false,
         header: false,
+        query_fields: Vec::new(),
+        header_fields: Vec::new(),
     };
     p.advance().map_err(|e| with_source(src, e))?;
     let mut routes = Vec::new();
@@ -94,6 +98,12 @@ pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> 
         return Err("no routes defined".to_string());
     }
     Ok(Program { routes, store })
+}
+
+fn remember(list: &mut Vec<String>, name: &str) {
+    if !list.iter().any(|n| n == name) {
+        list.push(name.to_string());
+    }
 }
 
 fn with_source(src: &str, err: String) -> String {
@@ -115,6 +125,8 @@ struct Parser<'a> {
     body: bool,
     query: bool,
     header: bool,
+    query_fields: Vec<String>,
+    header_fields: Vec<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -156,6 +168,8 @@ impl<'a> Parser<'a> {
         self.body = false;
         self.query = false;
         self.header = false;
+        self.query_fields.clear();
+        self.header_fields.clear();
         let expr = self.expr()?;
         let mut status = if method == Method::Post { 201 } else { 200 };
         if self.tok.kind == Kind::Colon {
@@ -211,6 +225,8 @@ impl<'a> Parser<'a> {
             uses_body: self.body,
             uses_query: self.query,
             uses_header: self.header,
+            query_fields: std::mem::take(&mut self.query_fields),
+            header_fields: std::mem::take(&mut self.header_fields),
             guard,
             guard_status,
             line,
@@ -293,12 +309,20 @@ impl<'a> Parser<'a> {
             "query" => {
                 self.pure = false;
                 self.query = true;
-                return self.fields(Expr::Query);
+                let e = self.fields(Expr::Query)?;
+                if let Expr::Field(_, name) = &e {
+                    remember(&mut self.query_fields, name);
+                }
+                return Ok(e);
             }
             "header" => {
                 self.pure = false;
                 self.header = true;
-                return self.fields(Expr::Header);
+                let e = self.fields(Expr::Header)?;
+                if let Expr::Field(_, name) = &e {
+                    remember(&mut self.header_fields, name);
+                }
+                return Ok(e);
             }
             _ => {}
         }

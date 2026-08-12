@@ -3,6 +3,7 @@ pub mod date;
 pub mod epoll;
 pub mod http;
 pub mod lexer;
+pub mod openapi;
 pub mod parser;
 pub mod router;
 pub mod serve;
