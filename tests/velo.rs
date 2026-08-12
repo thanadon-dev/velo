@@ -603,6 +603,12 @@ fn first_and_client_ids() {
     assert_eq!(call(&s, "GET", "/keyed/u-1", "").1, r#"{"id":"u-1","name":"x"}"#);
     assert_eq!(call(&s, "POST", "/keyed", r#"{"id":"u-1","name":"dup"}"#).0, 409);
     assert_eq!(call(&s, "POST", "/keyed", r#"{"name":"auto"}"#).1, r#"{"id":1,"name":"auto"}"#);
+
+    let s = server();
+    assert_eq!(call(&s, "POST", "/keyed", r#"{"id":1,"name":"taken"}"#).0, 201);
+    assert_eq!(call(&s, "POST", "/keyed", r#"{"name":"auto"}"#).1, r#"{"id":2,"name":"auto"}"#);
+    assert_eq!(call(&s, "GET", "/keyed/1", "").1, r#"{"id":1,"name":"taken"}"#);
+    assert_eq!(call(&s, "GET", "/keyed/2", "").1, r#"{"id":2,"name":"auto"}"#);
 }
 
 #[test]

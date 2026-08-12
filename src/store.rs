@@ -155,15 +155,21 @@ impl Collection {
         };
         let (key, row) = match given {
             Some(key) => (key, as_row(v)),
-            None => {
-                let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-                (id.to_string(), with_id(v, id as f64))
-            }
+            None => (String::new(), v),
         };
         let mut s = self.snap.write().unwrap();
-        if s.by_id.contains_key(&key) {
-            return None;
-        }
+        let (key, row) = if key.is_empty() {
+            let mut id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+            while s.by_id.contains_key(&id.to_string()) {
+                id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+            }
+            (id.to_string(), with_id(row, id as f64))
+        } else {
+            if s.by_id.contains_key(&key) {
+                return None;
+            }
+            (key, row)
+        };
         let rows = Arc::make_mut(&mut s.rows);
         rows.push(row.clone());
         let idx = rows.len() - 1;
