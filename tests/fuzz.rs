@@ -196,7 +196,7 @@ fn mutated_valid_requests_never_break_the_server() {
         "GET /sorted?by=name HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n",
     ];
 
-    let mut rng = Rng(0xa11ce_5eed_0007);
+    let mut rng = Rng(0x000a_11ce_5eed_0007);
     for round in 0..400 {
         let mut req = seeds[rng.below(seeds.len())].as_bytes().to_vec();
         for _ in 0..1 + rng.below(4) {
