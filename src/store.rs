@@ -183,6 +183,10 @@ thread_local! {
 
 const LOCAL_CACHE_MAX: usize = 64;
 
+fn local_budget() -> usize {
+    std::env::var("VELO_LOCAL_CACHE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(1 << 20)
+}
+
 pub struct Collection {
     pub name: String,
     id: u64,
@@ -251,10 +255,13 @@ impl Collection {
             let json = build(&self.snap.read().unwrap());
             LOCAL_CACHE.with(|c| {
                 let mut c = c.borrow_mut();
-                if c.len() >= LOCAL_CACHE_MAX {
+                let used: usize = c.values().map(|(_, v)| v.len()).sum();
+                if c.len() >= LOCAL_CACHE_MAX || used + json.len() > local_budget() {
                     c.clear();
                 }
-                c.insert(key.to_string(), (version, json.clone()));
+                if json.len() <= local_budget() {
+                    c.insert(key.to_string(), (version, json.clone()));
+                }
             });
             json
         });

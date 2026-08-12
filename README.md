@@ -1,6 +1,6 @@
 # Velo
 
-**v0.25.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.25.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -185,7 +185,7 @@ Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothin
 - **Router.** Per-method exact map (FNV-hashed) for static paths, a segment tree for `:param` paths. Params are borrowed slices of the request line, never copied.
 - **Values.** `Value` is an enum with `Arc` payloads, so returning a whole collection is a refcount bump, not a deep copy. JSON is written straight into the connection's output buffer.
 - **Object routes render straight into the socket buffer.** A route whose body is an object or array literal is written directly as JSON bytes; no intermediate `Value` tree is built per request.
-- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and up to 32 sort orders and filters, inside a byte budget; all of it is rebuilt only when the collection is written to. Each worker also keeps a thread-local map of the results it has already seen, tagged with a collection version, so a cache hit costs an atomic load and a local lookup instead of a lock shared by every worker. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. The cost is holding rows twice in memory.
+- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and up to 32 sort orders and filters, inside a byte budget; all of it is rebuilt only when the collection is written to. Each worker also keeps a thread-local map of the results it has already seen, tagged with a collection version, so a cache hit costs an atomic load and a local lookup instead of a lock shared by every worker. The thread-local view holds pointers to the same bytes, and is bounded by both an entry count and `VELO_LOCAL_CACHE_BYTES` so superseded results cannot pile up. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. The cost is holding rows twice in memory.
 - **No allocation for key lookups.** `db.users.find(id)` on a plain path param hashes the slice of the request line directly; nothing is copied unless the param is percent-encoded.
 - **Store.** Copy-on-write snapshot behind an `RwLock`; readers clone an `Arc<Vec<Value>>` and release the lock immediately.
 - **HTTP.** Hand-written HTTP/1.1: keep-alive by default, request pipelining, per-connection read/write/body buffers reused across requests, batched writes. A connection stops rendering further pipelined requests once 256 kB of response bytes are waiting, so a client cannot make the server buffer an unbounded amount by pipelining requests for large lists; it resumes as soon as the socket drains. `Date` is formatted once per second per worker, not per response. `Expect: 100-continue` gets its interim response as soon as the headers arrive. Chunked bodies are refused with 411, conflicting `Content-Length` headers with 400, oversized bodies with 413, oversized headers with 431.
@@ -208,14 +208,15 @@ Env knobs:
 | `VELO_LOG` | off | one line per request on stderr; costs about 75% of throughput, so keep it for development |
 | `VELO_METRICS` | off | path that answers a metrics JSON, e.g. `/_metrics` |
 | `VELO_TITLE` | `velo api` | title used by `openapi()` |
-| `VELO_CACHE_BYTES` | 8 MB | budget for rendered list, sort, and filter caches; exceeding it clears them |
+| `VELO_CACHE_BYTES` | 8 MB | budget for the shared rendered-result cache; exceeding it clears it |
+| `VELO_LOCAL_CACHE_BYTES` | 1 MB | per-worker budget for its thread-local view of those results |
 | `VELO_RATE` | off | requests per second allowed per client; over it answers 429 |
 | `VELO_REAL_IP_HEADER` | off | header holding the client IP behind a proxy, e.g. `CF-Connecting-IP`; without it the socket address is used |
 | `VELO_ETAG` | off | send `ETag` on 200 `GET`/`HEAD` responses and answer 304 to a matching `If-None-Match` |
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.25.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.25.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -266,7 +267,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-64 tests (51 integration + 5 CLI + 5 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+65 tests (52 integration + 5 CLI + 5 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -320,6 +321,8 @@ WantedBy=default.target
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.25.1** — the per-worker cache view is bounded by bytes as well as entries, so invalidated large results are released instead of being held by every worker until 64 entries accumulate.
 
 **v0.25.0** — two evaluation changes: object and array routes render straight into the output buffer instead of building a `Value` tree (`/stats` 417k to 785k req/s pipelined), and each worker keeps a thread-local, version-tagged view of the derived caches so hits no longer serialize on one lock (`order` 55k to 158k, `where` 50k to 131k req/s).
 

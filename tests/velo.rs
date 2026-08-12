@@ -1028,3 +1028,25 @@ fn derived_results_hit_the_cache() {
     reads(&s);
     assert_eq!(users.cache_stats().1, rebuilt, "second read after a write must be cached");
 }
+
+#[test]
+fn local_cache_respects_its_budget() {
+    std::env::set_var("VELO_LOCAL_CACHE_BYTES", "300");
+    let store = velo::Store::new();
+    let s = Server::new(compile(SRC, Some(store.clone())).unwrap()).unwrap();
+    let users = store.collection("users");
+    for i in 0..40 {
+        call(&s, "POST", "/users", &format!(r#"{{"name":"n{i}"}}"#));
+    }
+    let big = call(&s, "GET", "/users", "").1;
+    assert!(big.len() > 300);
+    assert_eq!(call(&s, "GET", "/users", "").1, big);
+
+    let small = call(&s, "GET", "/search?name=n7", "").1;
+    assert_eq!(small, r#"[{"id":8,"name":"n7"}]"#);
+    let (_, before) = users.cache_stats();
+    assert_eq!(call(&s, "GET", "/search?name=n7", "").1, small);
+    let (_, after) = users.cache_stats();
+    assert_eq!(after, before, "small results still cache locally");
+    std::env::remove_var("VELO_LOCAL_CACHE_BYTES");
+}
