@@ -69,6 +69,24 @@ impl Snapshot {
         self.store_cached(key, Arc::from(out.as_slice()))
     }
 
+    fn searched_json(&self, field: &str, needle: &str) -> Arc<[u8]> {
+        let key = format!("s\0{field}\0{needle}");
+        if let Some(hit) = self.cached(&key) {
+            return hit;
+        }
+        let lower = needle.to_lowercase();
+        let mut out = Vec::with_capacity(256);
+        out.push(b'[');
+        for (n, row) in self.rows.iter().filter(|r| field_has(r, field, &lower)).enumerate() {
+            if n > 0 {
+                out.push(b',');
+            }
+            row.write_json(&mut out);
+        }
+        out.push(b']');
+        self.store_cached(key, Arc::from(out.as_slice()))
+    }
+
     fn sorted_json(&self, field: &str) -> Arc<[u8]> {
         let key = format!("o\0{field}");
         if let Some(hit) = self.cached(&key) {
@@ -182,6 +200,10 @@ impl Collection {
             None => Vec::new(),
         };
         Value::Arr(Arc::new(rows))
+    }
+
+    pub fn search(&self, field: &str, needle: &str) -> Value {
+        Value::Raw(self.snap.read().unwrap().searched_json(field, needle))
     }
 
     pub fn order(&self, field: &str) -> Value {
@@ -371,6 +393,14 @@ fn sort_key(v: Option<&Value>) -> SortKey {
         Some(Value::Num(n)) => SortKey::Num(*n),
         Some(other) => SortKey::Text(other.as_key()),
         None => SortKey::Text(String::new()),
+    }
+}
+
+fn field_has(row: &Value, field: &str, lower_needle: &str) -> bool {
+    match row.get_ref(field) {
+        Some(Value::Str(s)) => s.to_lowercase().contains(lower_needle),
+        Some(other) => other.as_key().to_lowercase().contains(lower_needle),
+        None => lower_needle.is_empty(),
     }
 }
 

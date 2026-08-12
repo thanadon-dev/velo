@@ -448,6 +448,11 @@ impl<'a> Parser<'a> {
                 let f = Box::new(args.next().unwrap());
                 Op::First(f, Box::new(args.next().unwrap()))
             }
+            "search" => {
+                want(2)?;
+                let f = Box::new(args.next().unwrap());
+                Op::Search(f, Box::new(args.next().unwrap()))
+            }
             "where" => {
                 want(2)?;
                 let f = Box::new(args.next().unwrap());

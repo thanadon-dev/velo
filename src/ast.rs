@@ -72,6 +72,7 @@ pub enum Op {
     Count,
     Find(Box<Expr>),
     Where(Box<Expr>, Box<Expr>),
+    Search(Box<Expr>, Box<Expr>),
     First(Box<Expr>, Box<Expr>),
     Order(Box<Expr>),
     Page(Box<Expr>, Box<Expr>),
@@ -131,6 +132,11 @@ impl Expr {
                     let field = f.eval(c)?.as_key();
                     let want = v.eval(c)?.as_key();
                     col.first(&field, &want).ok_or(NOT_FOUND)
+                }
+                Op::Search(f, v) => {
+                    let field = f.eval(c)?.as_key();
+                    let needle = v.eval(c)?.as_key();
+                    Ok(col.search(&field, &needle))
                 }
                 Op::Where(f, v) => {
                     let field = f.eval(c)?.as_key();

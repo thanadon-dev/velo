@@ -8,4 +8,5 @@ DELETE /todos/:id           => db.todos.delete(id) : 204
 
 GET    /todos/open          => db.todos.where("done", false)
 GET    /todos/by/:text      => db.todos.first("text", text)
+GET    /todos/search        => db.todos.search("text", query.q)
 GET    /todos/count         => { open: len(db.todos.where("done", false)), all: db.todos.count() }

@@ -19,6 +19,7 @@ GET  /echo/:a/x/:b    => { a: a, b: b }
 POST /name            => body.name
 GET  /list            => [1, 2, "three", true, null]
 GET  /search          => db.users.where("name", query.name)
+GET  /find            => db.users.search("name", query.q)
 GET  /q               => { limit: query.limit, tag: query.tag }
 GET  /raw/:v          => { v: v }
 DELETE /gone/:id      => { id: id } : 204
@@ -900,4 +901,25 @@ fn deep_pipelining_returns_every_response() {
     assert_eq!(text.matches("HTTP/1.1 200 OK").count(), 100, "{} bytes", out.len());
     assert_eq!(text.matches("user-59").count(), 100);
     s.shutdown();
+}
+
+#[test]
+fn search_matches_substrings() {
+    let s = server();
+    call(&s, "POST", "/users", r#"{"name":"Alice Smith"}"#);
+    call(&s, "POST", "/users", r#"{"name":"bob smithers"}"#);
+    call(&s, "POST", "/users", r#"{"name":"carol"}"#);
+
+    let hits = call(&s, "GET", "/find?q=smith", "").1;
+    assert!(hits.contains("Alice Smith"), "{hits}");
+    assert!(hits.contains("bob smithers"), "{hits}");
+    assert!(!hits.contains("carol"), "{hits}");
+
+    assert_eq!(call(&s, "GET", "/find?q=SMITH", "").1, hits);
+    assert_eq!(call(&s, "GET", "/find?q=zzz", "").1, "[]");
+    assert_eq!(call(&s, "GET", "/find?q=carol", "").1.matches(r#""id""#).count(), 1);
+
+    assert_eq!(call(&s, "GET", "/find?q=smith", "").1, hits);
+    call(&s, "POST", "/users", r#"{"name":"dave smith"}"#);
+    assert!(call(&s, "GET", "/find?q=smith", "").1.contains("dave smith"));
 }
