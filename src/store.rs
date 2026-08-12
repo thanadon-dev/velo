@@ -7,6 +7,27 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 const CACHE_MAX: usize = 32;
 
+fn with_key<R>(prefix: &str, a: &str, b: &str, f: impl FnOnce(&str) -> R) -> R {
+    with_key4("", prefix, a, b, f)
+}
+
+fn with_key4<R>(tag: &str, prefix: &str, a: &str, b: &str, f: impl FnOnce(&str) -> R) -> R {
+    let mut buf = [0u8; 224];
+    let need = tag.len() + prefix.len() + a.len() + b.len() + 3;
+    if need > buf.len() {
+        return f(&format!("{tag}\0{prefix}\0{a}\0{b}"));
+    }
+    let mut n = 0;
+    for part in [tag, "\0", prefix, "\0", a, "\0", b] {
+        buf[n..n + part.len()].copy_from_slice(part.as_bytes());
+        n += part.len();
+    }
+    match std::str::from_utf8(&buf[..n]) {
+        Ok(key) => f(key),
+        Err(_) => f(&format!("{tag}\0{prefix}\0{a}\0{b}")),
+    }
+}
+
 fn cache_budget() -> usize {
     std::env::var("VELO_CACHE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(8 << 20)
 }
@@ -15,7 +36,9 @@ struct Snapshot {
     rows: Arc<Vec<Value>>,
     by_id: HashMap<String, usize>,
     all_json: OnceLock<Arc<[u8]>>,
-    cache: Mutex<HashMap<String, Arc<[u8]>>>,
+    cache: RwLock<HashMap<String, Arc<[u8]>>>,
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 impl Snapshot {
@@ -35,26 +58,28 @@ impl Snapshot {
     }
 
     fn cached(&self, key: &str) -> Option<Arc<[u8]>> {
-        self.cache.lock().unwrap().get(key).cloned()
+        let hit = self.cache.read().unwrap().get(key).cloned();
+        let counter = if hit.is_some() { &self.hits } else { &self.misses };
+        counter.fetch_add(1, Ordering::Relaxed);
+        hit
     }
 
-    fn store_cached(&self, key: String, json: Arc<[u8]>) -> Arc<[u8]> {
+    fn store_cached(&self, key: &str, json: Arc<[u8]>) -> Arc<[u8]> {
         let budget = cache_budget();
         if json.len() > budget {
             return json;
         }
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.write().unwrap();
         let used: usize = cache.values().map(|v| v.len()).sum();
         if cache.len() >= CACHE_MAX || used + json.len() > budget {
             cache.clear();
         }
-        cache.insert(key, json.clone());
+        cache.insert(key.to_string(), json.clone());
         json
     }
 
     fn filtered_json(&self, field: &str, want: &str) -> Arc<[u8]> {
-        let key = format!("w\0{field}\0{want}");
-        if let Some(hit) = self.cached(&key) {
+        if let Some(hit) = with_key("w", field, want, |k| self.cached(k)) {
             return hit;
         }
         let mut out = Vec::with_capacity(256);
@@ -66,12 +91,11 @@ impl Snapshot {
             row.write_json(&mut out);
         }
         out.push(b']');
-        self.store_cached(key, Arc::from(out.as_slice()))
+        with_key("w", field, want, |k| self.store_cached(k, Arc::from(out.as_slice())))
     }
 
     fn searched_json(&self, field: &str, needle: &str) -> Arc<[u8]> {
-        let key = format!("s\0{field}\0{needle}");
-        if let Some(hit) = self.cached(&key) {
+        if let Some(hit) = with_key("s", field, needle, |k| self.cached(k)) {
             return hit;
         }
         let lower = needle.to_lowercase();
@@ -84,12 +108,11 @@ impl Snapshot {
             row.write_json(&mut out);
         }
         out.push(b']');
-        self.store_cached(key, Arc::from(out.as_slice()))
+        with_key("s", field, needle, |k| self.store_cached(k, Arc::from(out.as_slice())))
     }
 
     fn aggregate_json(&self, op: Agg, field: &str) -> Arc<[u8]> {
-        let key = format!("a\0{}\0{field}", op.name());
-        if let Some(hit) = self.cached(&key) {
+        if let Some(hit) = with_key("a", op.name(), field, |k| self.cached(k)) {
             return hit;
         }
         let mut acc: Option<f64> = None;
@@ -111,12 +134,11 @@ impl Snapshot {
             (None, Agg::Sum) => out.extend_from_slice(b"0"),
             (None, _) => out.extend_from_slice(b"null"),
         }
-        self.store_cached(key, Arc::from(out.as_slice()))
+        with_key("a", op.name(), field, |k| self.store_cached(k, Arc::from(out.as_slice())))
     }
 
     fn sorted_json(&self, field: &str) -> Arc<[u8]> {
-        let key = format!("o\0{field}");
-        if let Some(hit) = self.cached(&key) {
+        if let Some(hit) = with_key("o", field, "", |k| self.cached(k)) {
             return hit;
         }
         let (sort_field, desc) = match field.strip_prefix('-') {
@@ -147,12 +169,23 @@ impl Snapshot {
             row.write_json(&mut out);
         }
         out.push(b']');
-        self.store_cached(key, Arc::from(out.as_slice()))
+        with_key("o", field, "", |k| self.store_cached(k, Arc::from(out.as_slice())))
     }
 }
 
+static NEXT_COLLECTION_ID: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static LOCAL_CACHE: std::cell::RefCell<HashMap<String, (u64, Arc<[u8]>)>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+const LOCAL_CACHE_MAX: usize = 64;
+
 pub struct Collection {
     pub name: String,
+    id: u64,
+    version: AtomicU64,
     snap: RwLock<Snapshot>,
     next_id: AtomicU64,
     dirty: Arc<AtomicBool>,
@@ -162,11 +195,15 @@ impl Collection {
     fn new(name: &str, dirty: Arc<AtomicBool>) -> Collection {
         Collection {
             name: name.to_string(),
+            id: NEXT_COLLECTION_ID.fetch_add(1, Ordering::Relaxed),
+            version: AtomicU64::new(0),
             snap: RwLock::new(Snapshot {
                 rows: Arc::new(Vec::new()),
                 by_id: HashMap::new(),
                 all_json: OnceLock::new(),
-                cache: Mutex::new(HashMap::new()),
+                cache: RwLock::new(HashMap::new()),
+                hits: AtomicU64::new(0),
+                misses: AtomicU64::new(0),
             }),
             next_id: AtomicU64::new(0),
             dirty,
@@ -175,6 +212,52 @@ impl Collection {
 
     fn touch(&self) {
         self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    fn bump(&self) {
+        self.version.fetch_add(1, Ordering::Release);
+    }
+
+    fn derived(
+        &self,
+        kind: &str,
+        a: &str,
+        b: &str,
+        build: impl FnOnce(&Snapshot) -> Arc<[u8]>,
+    ) -> Value {
+        let version = self.version.load(Ordering::Acquire);
+        let mut id = [0u8; 20];
+        let idn = {
+            let mut n = 0;
+            let mut v = self.id;
+            loop {
+                id[n] = b'a' + (v % 26) as u8;
+                n += 1;
+                v /= 26;
+                if v == 0 {
+                    break n;
+                }
+            }
+        };
+        let tag = std::str::from_utf8(&id[..idn]).unwrap_or("x");
+        let json = with_key4(tag, kind, a, b, |key| {
+            let hit = LOCAL_CACHE.with(|c| {
+                c.borrow().get(key).and_then(|(v, json)| (*v == version).then(|| json.clone()))
+            });
+            if let Some(json) = hit {
+                return json;
+            }
+            let json = build(&self.snap.read().unwrap());
+            LOCAL_CACHE.with(|c| {
+                let mut c = c.borrow_mut();
+                if c.len() >= LOCAL_CACHE_MAX {
+                    c.clear();
+                }
+                c.insert(key.to_string(), (version, json.clone()));
+            });
+            json
+        });
+        Value::Raw(json)
     }
 
     pub fn rows(&self) -> Arc<Vec<Value>> {
@@ -193,11 +276,12 @@ impl Collection {
         }
         s.rows = Arc::new(rows.into_iter().map(as_row).collect());
         s.invalidate();
+        self.bump();
         self.next_id.store(next_id, Ordering::Relaxed);
     }
 
     pub fn all(&self) -> Value {
-        Value::Raw(self.snap.read().unwrap().json())
+        self.derived("l", "", "", |s| s.json())
     }
 
     pub fn count(&self) -> usize {
@@ -210,7 +294,7 @@ impl Collection {
     }
 
     pub fn filter(&self, field: &str, want: &str) -> Value {
-        Value::Raw(self.snap.read().unwrap().filtered_json(field, want))
+        self.derived("w", field, want, |s| s.filtered_json(field, want))
     }
 
     pub fn first(&self, field: &str, want: &str) -> Option<Value> {
@@ -229,16 +313,21 @@ impl Collection {
         Value::Arr(Arc::new(rows))
     }
 
+    pub fn cache_stats(&self) -> (u64, u64) {
+        let s = self.snap.read().unwrap();
+        (s.hits.load(Ordering::Relaxed), s.misses.load(Ordering::Relaxed))
+    }
+
     pub fn aggregate(&self, op: Agg, field: &str) -> Value {
-        Value::Raw(self.snap.read().unwrap().aggregate_json(op, field))
+        self.derived("a", op.name(), field, |s| s.aggregate_json(op, field))
     }
 
     pub fn search(&self, field: &str, needle: &str) -> Value {
-        Value::Raw(self.snap.read().unwrap().searched_json(field, needle))
+        self.derived("s", field, needle, |s| s.searched_json(field, needle))
     }
 
     pub fn order(&self, field: &str) -> Value {
-        Value::Raw(self.snap.read().unwrap().sorted_json(field))
+        self.derived("o", field, "", |s| s.sorted_json(field))
     }
 
     pub fn create(&self, v: Value) -> Option<Value> {
@@ -268,6 +357,7 @@ impl Collection {
         let idx = rows.len() - 1;
         s.by_id.insert(key, idx);
         s.invalidate();
+        self.bump();
         self.touch();
         Some(row)
     }
@@ -278,6 +368,7 @@ impl Collection {
         let merged = as_row(merge(&s.rows[i], &patch));
         Arc::make_mut(&mut s.rows)[i] = merged.clone();
         s.invalidate();
+        self.bump();
         self.touch();
         Some(merged)
     }
@@ -287,6 +378,7 @@ impl Collection {
         let Some(i) = s.by_id.remove(id) else { return false };
         Arc::make_mut(&mut s.rows).remove(i);
         s.invalidate();
+        self.bump();
         for v in s.by_id.values_mut() {
             if *v > i {
                 *v -= 1;
@@ -301,6 +393,7 @@ impl Collection {
         s.rows = Arc::new(Vec::new());
         s.by_id.clear();
         s.invalidate();
+        self.bump();
         self.next_id.store(0, Ordering::Relaxed);
         self.touch();
     }

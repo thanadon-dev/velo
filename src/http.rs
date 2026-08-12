@@ -169,6 +169,16 @@ impl Server {
             out.extend_from_slice(k);
             return (rt.status, if rt.const_text { Ctype::Text } else { Ctype::Json });
         }
+        if rt.expr.renders_json() {
+            let mark = out.len();
+            return match rt.expr.write_json(&ctx, out) {
+                Ok(()) => (rt.status, Ctype::Json),
+                Err(e) => {
+                    out.truncate(mark);
+                    self.fail(e, out)
+                }
+            };
+        }
         match rt.expr.eval(&ctx) {
             Ok(Value::Str(s)) => {
                 out.extend_from_slice(s.as_bytes());

@@ -996,3 +996,35 @@ fn aggregations() {
     call(&s, "DELETE", "/users/5", "");
     assert_eq!(call(&s, "GET", "/totals", "").1, r#"{"n":4,"sum":21,"avg":7,"lo":5,"hi":10}"#);
 }
+
+#[test]
+fn derived_results_hit_the_cache() {
+    let store = velo::Store::new();
+    let s = Server::new(compile(SRC, Some(store.clone())).unwrap()).unwrap();
+    let users = store.collection("users");
+    for i in 0..20 {
+        call(&s, "POST", "/users", &format!(r#"{{"name":"n{i}","score":{i}}}"#));
+    }
+    let reads = |s: &Arc<Server>| {
+        call(s, "GET", "/sorted", "");
+        call(s, "GET", "/search?name=n3", "");
+        call(s, "GET", "/find?q=n1", "");
+        call(s, "GET", "/totals", "");
+        call(s, "GET", "/users", "");
+    };
+
+    reads(&s);
+    let (_, warm) = users.cache_stats();
+    for _ in 0..5 {
+        reads(&s);
+    }
+    let (_, after) = users.cache_stats();
+    assert_eq!(after, warm, "repeated reads must not rebuild anything");
+
+    call(&s, "POST", "/users", r#"{"name":"new"}"#);
+    reads(&s);
+    let (_, rebuilt) = users.cache_stats();
+    assert!(rebuilt > after, "a write must invalidate the derived results");
+    reads(&s);
+    assert_eq!(users.cache_stats().1, rebuilt, "second read after a write must be cached");
+}

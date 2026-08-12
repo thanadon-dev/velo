@@ -83,6 +83,48 @@ pub enum Op {
 }
 
 impl Expr {
+    pub fn renders_json(&self) -> bool {
+        matches!(self, Expr::Object(_) | Expr::Array(_))
+    }
+
+    pub fn write_json(&self, c: &Ctx, out: &mut Vec<u8>) -> Result<(), Err_> {
+        match self {
+            Expr::Const(v) => v.write_json(out),
+            Expr::Object(fields) => {
+                out.push(b'{');
+                for (i, (k, e)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push(b',');
+                    }
+                    crate::value::write_string(out, k);
+                    out.push(b':');
+                    e.write_json(c, out)?;
+                }
+                out.push(b'}');
+            }
+            Expr::Array(items) => {
+                out.push(b'[');
+                for (i, e) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(b',');
+                    }
+                    e.write_json(c, out)?;
+                }
+                out.push(b']');
+            }
+            Expr::Param(i) => {
+                let raw = c.param(*i);
+                if raw.contains('%') || raw.contains('+') {
+                    crate::value::write_string(out, &percent_decode(raw));
+                } else {
+                    crate::value::write_string(out, raw);
+                }
+            }
+            other => other.eval(c)?.write_json(out),
+        }
+        Ok(())
+    }
+
     pub fn eval(&self, c: &Ctx) -> Result<Value, Err_> {
         match self {
             Expr::Const(v) => Ok(v.clone()),

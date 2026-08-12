@@ -1,6 +1,6 @@
 # Velo
 
-**v0.24.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.25.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -184,7 +184,8 @@ Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothin
 - **Const folding.** Routes whose expression touches no param, body, or store are evaluated at compile time and stored as ready-to-send bytes. `GET /health => "ok"` costs one `memcpy` per request.
 - **Router.** Per-method exact map (FNV-hashed) for static paths, a segment tree for `:param` paths. Params are borrowed slices of the request line, never copied.
 - **Values.** `Value` is an enum with `Arc` payloads, so returning a whole collection is a refcount bump, not a deep copy. JSON is written straight into the connection's output buffer.
-- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and up to 32 sort orders and filters, inside a byte budget; all of it is rebuilt only when the collection is written to. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. The cost is holding rows twice in memory.
+- **Object routes render straight into the socket buffer.** A route whose body is an object or array literal is written directly as JSON bytes; no intermediate `Value` tree is built per request.
+- **Rendered-once JSON.** Every stored row keeps its JSON bytes next to its fields, and each collection caches the JSON of its full row list and up to 32 sort orders and filters, inside a byte budget; all of it is rebuilt only when the collection is written to. Each worker also keeps a thread-local map of the results it has already seen, tagged with a collection version, so a cache hit costs an atomic load and a local lookup instead of a lock shared by every worker. `GET /users` and `order(...)` are then a `memcpy`, not a sort and a serialization pass. The cost is holding rows twice in memory.
 - **No allocation for key lookups.** `db.users.find(id)` on a plain path param hashes the slice of the request line directly; nothing is copied unless the param is percent-encoded.
 - **Store.** Copy-on-write snapshot behind an `RwLock`; readers clone an `Arc<Vec<Value>>` and release the lock immediately.
 - **HTTP.** Hand-written HTTP/1.1: keep-alive by default, request pipelining, per-connection read/write/body buffers reused across requests, batched writes. A connection stops rendering further pipelined requests once 256 kB of response bytes are waiting, so a client cannot make the server buffer an unbounded amount by pipelining requests for large lists; it resumes as soon as the socket drains. `Date` is formatted once per second per worker, not per response. `Expect: 100-continue` gets its interim response as soon as the headers arrive. Chunked bodies are refused with 411, conflicting `Content-Length` headers with 400, oversized bodies with 413, oversized headers with 431.
@@ -214,33 +215,31 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.24.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.25.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
 | route | kind | req/s |
 | --- | --- | --- |
-| `/health` | const fold | 88 800 |
-| `/users/:id` | store lookup | 88 000 |
-| `/stats` | 2 store counts | 80 700 |
-| `/users` (501 rows, 16 kB) | cached list | 74 300 |
-| `/users/by/team` | cached filter | 68 300 |
-| `/users/sorted` | cached sort | 60 700 |
-| `/users/page` (20 of 501) | slice + render | 54 200 |
-| `POST /users` | JSON parse + insert | 53 500 |
+| `/health` | const fold | 91 900 |
+| `/users/:id` | store lookup | 91 200 |
+| `/stats` | 2 store counts | 86 700 |
+| `/users` (501 rows, 21 kB) | cached list | 65 400 |
+| `/users/by/team` | cached filter | 59 800 |
+| `POST /users` | JSON parse + insert | 53 900 |
 
 `-c 8 -p 32`, pipelined — what the server itself can do:
 
-| route | req/s | transfer |
-| --- | --- | --- |
-| `/health` | 862 000 | 122 MB/s |
-| `/users/:id` | 786 000 | 127 MB/s |
-| `/stats` | 417 000 | 65 MB/s |
-| `/users` (16 kB each) | 304 000 | 5.0 GB/s |
-| `/users/sorted` | 139 000 | 2.3 GB/s |
-| `/users/by/team` | 97 000 | 16 MB/s |
+| route | req/s |
+| --- | --- |
+| `/health` | 835 000 |
+| `/stats` | 785 000 |
+| `/scores` (3 aggregates) | 368 000 |
+| `/users` (21 kB each) | 243 000 |
+| `/users/sorted` | 158 000 |
+| `/users/by/team` | 131 000 |
 
-In-process, no sockets (`velomicro 5000`): `find` 0.23 us, `where` 1.19 us, `all` 5.8 us, `order` 6.4 us per call.
+In-process, no sockets (`velomicro 5000`): `find` 0.23 us, `where` 1.1 us, `order` 5.0 us, `all` 6.2 us per call.
 
 Run read benchmarks before write benchmarks, or restart in between: a `POST` run at 50k req/s adds a hundred thousand rows and every later list measurement is then measuring a much bigger response.
 
@@ -267,7 +266,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-63 tests (50 integration + 5 CLI + 5 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+64 tests (51 integration + 5 CLI + 5 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -321,6 +320,8 @@ WantedBy=default.target
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.25.0** — two evaluation changes: object and array routes render straight into the output buffer instead of building a `Value` tree (`/stats` 417k to 785k req/s pipelined), and each worker keeps a thread-local, version-tagged view of the derived caches so hits no longer serialize on one lock (`order` 55k to 158k, `where` 50k to 131k req/s).
 
 **v0.24.0** — aggregations: `sum`, `avg`, `min`, `max` over a numeric field, cached and invalidated with the other derived results. Non-numeric and missing values are skipped.
 
