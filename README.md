@@ -1,12 +1,12 @@
 # Velo
 
-**v0.37.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.38.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
 GET    /users      => db.users.all()
 GET    /users/:id  => db.users.find(id)
-POST   /users      => db.users.create(body) when body.name or 400
+POST   /users      => db.users.create(body) when body.name else 400
 PUT    /users/:id  => db.users.update(id, body)
 DELETE /users/:id  => db.users.delete(id) : 204
 GET    /search     => db.users.where("team", query.team)
@@ -51,7 +51,7 @@ A program is a list of routes:
 METHOD /path/:param => expression
 METHOD /path        => expression : status
 METHOD /path        => expression when condition
-METHOD /path        => expression when condition or status
+METHOD /path        => expression when condition else status
 ```
 
 Methods: `GET POST PUT PATCH DELETE HEAD OPTIONS`. Comments: `#` or `//`. `HEAD` falls back to the matching `GET` route.
@@ -137,14 +137,15 @@ GET    /mine        => db.users.where("team", header.x_team) when header.x_team
 DELETE /users/:id   => db.users.delete(id) : 204 when header.x_key != "readonly"
 ```
 
-A condition is any expression, usually a comparison. On its own an expression is truthy unless it is `null`, `false`, `0`, or an empty string. Guarded routes are never const-folded.
+A condition is any expression, usually a comparison, and conditions combine with `and` / `or` (short-circuiting). On its own an expression is truthy unless it is `null`, `false`, `0`, or an empty string. Guarded routes are never const-folded.
 
-`or <status>` changes what a failed guard answers, which turns a guard into input validation:
+`else <status>` changes what a failed guard answers, which turns a guard into input validation:
 
 ```velo
-POST /users      => db.users.create(body) when body.name or 400
-GET  /root       => db.audit.all() when header.x_key == env("ROOT_KEY") or 403
-GET  /users/page => db.users.page(query.offset, query.limit) when query.limit < 200 or 400
+POST /users      => db.users.create(body) when body.name else 400
+GET  /root       => db.audit.all() when header.x_key == env("ROOT_KEY") else 403
+GET  /users/page => db.users.page(query.offset, query.limit) when query.limit < 200 else 400
+GET  /mine       => db.orders.where("customer", header.x_customer) when header.x_customer and header.x_key else 400
 ```
 
 `examples/todo.velo` is a complete todo API using uuid keys, timestamps, sorting, and filters. `examples/shop/` splits a larger API over four files with `include`: a catalog with search, orders keyed by a customer header, and an admin section behind a token guard.
@@ -283,7 +284,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.37.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.38.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -361,7 +362,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-80 tests (60 integration + 11 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+81 tests (61 integration + 11 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, `--watch` restarting on a change and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -396,6 +397,8 @@ cargo test
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.38.0** — conditions combine with short-circuiting `and` / `or`. The keyword that sets a failed guard's status moved from `or` to `else` to free `or` for boolean use: `when body.name else 400`.
 
 **v0.37.0** — expressions gained `+ - * /`, `< > <= >=`, and parentheses, with the usual precedence. Numbers written as strings (path params, query values) take part in arithmetic; `+` on two strings concatenates; mixed-type comparisons are false rather than surprising. Pure arithmetic still folds to a constant at compile time.
 
@@ -465,7 +468,7 @@ Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCL
 
 **v0.18.1** — `where` results are cached per field and value alongside the sorted and full-list caches, all cleared on any write (`where` 77 us to 1.2 us per call on 5 000 rows). `velobench` now parses `Content-Length` instead of scanning every byte, so large responses measure the server rather than the client.
 
-**v0.18.0** — `when <condition> or <status>` picks the status a failed guard answers, so a guard doubles as body validation (`when body.name or 400`). `velo routes` now prints each route guard.
+**v0.18.0** — `when <condition> or <status>` picks the status a failed guard answers, so a guard doubles as body validation (`when body.name else 400`). `velo routes` now prints each route guard.
 
 **v0.17.1** — `where` and `first` compare fields without allocating a string per row and `order` extracts each sort key once: `where` over HTTP went from 2.4k to 82k req/s on a 500-row collection. Added `velomicro`, an in-process dispatch benchmark.
 

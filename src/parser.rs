@@ -229,7 +229,7 @@ impl<'a> Parser<'a> {
             None
         };
         let mut guard_status = 401;
-        if guard.is_some() && self.tok.kind == Kind::Ident && self.tok.text == "or" {
+        if guard.is_some() && self.keyword("else") {
             self.advance()?;
             let code = self.expect(Kind::Num)?;
             if !(100.0..=599.0).contains(&code.num) || code.num.fract() != 0.0 {
@@ -268,6 +268,30 @@ impl<'a> Parser<'a> {
     }
 
     fn expr(&mut self) -> Result<Expr, String> {
+        let mut left = self.and_level()?;
+        while self.keyword("or") {
+            self.advance()?;
+            let right = self.and_level()?;
+            left = Expr::Or(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn keyword(&self, word: &str) -> bool {
+        self.tok.kind == Kind::Ident && self.tok.text == word
+    }
+
+    fn and_level(&mut self) -> Result<Expr, String> {
+        let mut left = self.comparison()?;
+        while self.keyword("and") {
+            self.advance()?;
+            let right = self.comparison()?;
+            left = Expr::And(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn comparison(&mut self) -> Result<Expr, String> {
         let left = self.additive()?;
         let op = match self.tok.kind {
             Kind::Eq => return self.compare(left, true),

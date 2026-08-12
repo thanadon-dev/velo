@@ -57,6 +57,8 @@ pub enum Expr {
     Call(Builtin, Vec<Expr>),
     Cmp(Box<Expr>, bool, Box<Expr>),
     Bin(BinOp, Box<Expr>, Box<Expr>),
+    And(Box<Expr>, Box<Expr>),
+    Or(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -161,6 +163,18 @@ impl Expr {
                 Ok(Value::Arr(Arc::new(out)))
             }
             Expr::Bin(op, l, r) => Ok(apply(*op, &l.eval(c)?, &r.eval(c)?)),
+            Expr::And(l, r) => {
+                if !truthy(&l.eval(c)?) {
+                    return Ok(Value::Bool(false));
+                }
+                Ok(Value::Bool(truthy(&r.eval(c)?)))
+            }
+            Expr::Or(l, r) => {
+                if truthy(&l.eval(c)?) {
+                    return Ok(Value::Bool(true));
+                }
+                Ok(Value::Bool(truthy(&r.eval(c)?)))
+            }
             Expr::Cmp(l, eq, r) => {
                 let same = l.eval(c)?.as_key() == r.eval(c)?.as_key();
                 Ok(Value::Bool(same == *eq))

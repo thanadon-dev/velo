@@ -22,7 +22,7 @@ GET  /search          => db.users.where("name", query.name)
 GET  /find            => db.users.search("name", query.q)
 GET  /math            => { sum: 2 + 3 * 4, grouped: (2 + 3) * 4, div: 10 / 4, neg: 0 - 7, join: "a" + "b" }
 GET  /calc/:n         => { n: n, doubled: n * 2, next: n + 1, big: n > 10 }
-GET  /limited         => db.users.page(0, query.limit) when query.limit < 100 or 400
+GET  /limited         => db.users.page(0, query.limit) when query.limit < 100 else 400
 GET  /totals          => { n: db.users.count(), sum: db.users.sum("score"), avg: db.users.avg("score"), lo: db.users.min("score"), hi: db.users.max("score") }
 GET  /q               => { limit: query.limit, tag: query.tag }
 GET  /raw/:v          => { v: v }
@@ -42,8 +42,10 @@ GET  /whoami          => { agent: header.user_agent, auth: header.authorization 
 GET  /tenant          => db.users.where("team", header.x_team)
 GET  /admin           => db.users.all() when header.authorization == "Bearer secret"
 GET  /gated           => "in" when header.x_key
-POST /validated       => db.users.create(body) when body.name or 400
-GET  /forbidden       => "secret" when header.x_key == "root" or 403
+GET  /both            => "both" when header.x_key and header.x_team else 400
+GET  /either          => "either" when header.x_key or header.x_team
+POST /validated       => db.users.create(body) when body.name else 400
+GET  /forbidden       => "secret" when header.x_key == "root" else 403
 DELETE /purge/:id     => db.users.delete(id) : 204 when header.x_key != "block"
 POST /events          => db.events.create({ at: now(), id: uuid(), data: body })
 "#;
@@ -721,7 +723,7 @@ fn guard_status_override() {
     let (status, _) = s.handle("GET", "/forbidden", b"", raw.as_bytes(), &mut out);
     assert_eq!((status, String::from_utf8(out).unwrap()), (200, "secret".to_string()));
 
-    assert!(compile("GET /a => 1 when 1 or 99", None).is_err());
+    assert!(compile("GET /a => 1 when 1 else 99", None).is_err());
 }
 
 #[test]
@@ -1264,4 +1266,30 @@ fn comparison_type_rules() {
         let s = Server::new(prog).unwrap();
         assert_eq!(call(&s, "GET", "/a", "").1, want, "{src}");
     }
+}
+
+#[test]
+fn boolean_guards() {
+    let s = server();
+    let call_with = |path: &str, headers: &str| {
+        let raw = format!("GET {path} HTTP/1.1\r\n{headers}\r\n");
+        let mut out = Vec::new();
+        let (status, _) = s.handle("GET", path, b"", raw.as_bytes(), &mut out);
+        (status, String::from_utf8(out).unwrap())
+    };
+    assert_eq!(call_with("/both", "X-Key: a\r\nX-Team: b\r\n"), (200, "both".into()));
+    assert_eq!(call_with("/both", "X-Key: a\r\n").0, 400);
+    assert_eq!(call_with("/both", "X-Team: b\r\n").0, 400);
+    assert_eq!(call_with("/both", "").0, 400);
+
+    assert_eq!(call_with("/either", "X-Key: a\r\n"), (200, "either".into()));
+    assert_eq!(call_with("/either", "X-Team: b\r\n"), (200, "either".into()));
+    assert_eq!(call_with("/either", "").0, 401);
+
+    let prog = compile("GET /a => 1 when 1 == 1 and 2 < 3", None).unwrap();
+    assert!(prog.routes[0].guard.is_some());
+    let s2 = Server::new(prog).unwrap();
+    assert_eq!(call(&s2, "GET", "/a", "").0, 200);
+    let s3 = Server::new(compile("GET /a => 1 when 1 == 2 or 3 > 9", None).unwrap()).unwrap();
+    assert_eq!(call(&s3, "GET", "/a", "").0, 401);
 }
