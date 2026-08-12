@@ -1,22 +1,23 @@
 # Velo
 
-**v0.26.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.26.2** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
 GET    /users      => db.users.all()
 GET    /users/:id  => db.users.find(id)
-POST   /users      => db.users.create(body)
+POST   /users      => db.users.create(body) when body.name or 400
 PUT    /users/:id  => db.users.update(id, body)
-DELETE /users/:id  => db.users.delete(id)
-GET    /stats      => { users: db.users.count(), ok: true }
-GET    /search     => db.users.where("team", query.team)
 DELETE /users/:id  => db.users.delete(id) : 204
+GET    /search     => db.users.where("team", query.team)
+GET    /stats      => { users: db.users.count(), avg: db.users.avg("score") }
 ```
 
 That file is a complete, running API server.
 
 Linux only: the event loop is epoll, and the build stops with a clear message anywhere else.
+
+[Quick start](#quick-start) · [Language](#language) · [Guards](#guards) · [OpenAPI](#openapi) · [Persistence](#persistence) · [Rate limiting](#rate-limiting) · [Metrics](#metrics) · [Deployment](#deployment) · [Design](#design) · [Benchmarks](#benchmarks) · [Tests](#tests) · [CI](#ci) · [Layout](#layout) · [Build notes](#build-notes) · [Changelog](#changelog)
 
 ## Quick start
 
@@ -161,23 +162,43 @@ velo run examples/api.velo :8080 --data data.json
 
 Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothing was written, so a read-only workload never touches the disk. The gap between snapshots adapts: velo measures how long the last save took and waits until that save has cost at most `VELO_SAVE_DUTY` percent of wall time, so a 5 MB dataset under sustained writes is not rewritten five times a second. `SIGINT` and `SIGTERM` stop the event loop and write a final snapshot before exiting, so an orderly shutdown loses nothing; a hard kill can lose at most the last save interval.
 
-## Layout
+## Rate limiting
 
-| file | what it holds |
-| --- | --- |
-| `src/lexer.rs` | tokens |
-| `src/parser.rs` | source to routes, const folding, error messages |
-| `src/ast.rs` | `Expr` tree, evaluation, built-in functions, request context |
-| `src/store.rs` | collections, snapshots, JSON caches, persistence |
-| `src/router.rs` | per-method exact map and param tree |
-| `src/http.rs` | `Server`, dispatch, metrics, status codes |
-| `src/serve.rs` | request parsing, connection state, the epoll loop |
-| `src/value.rs` | `Value`, JSON reader and writer |
-| `src/date.rs` | `Date` header formatting |
-| `src/openapi.rs` | OpenAPI 3.0 document generation |
-| `src/main.rs` | CLI |
-| `src/bin/velobench.rs` | load generator |
-| `src/bin/velomicro.rs` | in-process dispatch microbenchmark, `velomicro [rows]` |
+`VELO_RATE=100` allows each client 100 requests per second and answers `429 Too Many Requests` beyond that, counted in one-second windows across 16 shards. Behind a proxy every socket looks like `127.0.0.1`, so set `VELO_REAL_IP_HEADER=CF-Connecting-IP` (or `X-Forwarded-For`) to key on the real client — only trust that header if a proxy you control sets it.
+
+The check costs a lock and a hash per request. In a loopback benchmark, where every request shares one key and all workers contend on the same shard, `/health` drops from 90.6k to 71.9k req/s; real traffic spread over many client IPs spreads over the shards.
+
+## Metrics
+
+Set `VELO_METRICS=/_metrics` and that path answers:
+
+```json
+{"version":"0.26.0","uptime_ms":3747,"requests":275021,"failures":1,"connections":1,
+ "bytes_out":5500420,"avg_micros":15,"max_micros":38,"routes":23,"workers":4}
+```
+
+`failures` counts responses velo generated itself (404, 405, 400, 401, 409, 413, and store misses), `connections` is the live count across workers. `avg_micros` and `max_micros` measure the time from parsed request to rendered response. Timing costs a clock read per request, so enabling metrics trades about 9% of peak throughput (94.0k to 85.3k req/s on `/health`); everything else is relaxed atomics. Point a monitor at it, or at any route in your API.
+
+## Deployment
+
+Velo is one static binary and one text file. A systemd user unit is enough:
+
+```ini
+[Unit]
+Description=velo api
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/velo run /srv/api/app.velo 127.0.0.1:8080 --data /srv/api/data.json
+Environment=VELO_WORKERS=4
+Restart=always
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target
+```
+
+`SIGTERM` is the clean stop: the event loop unwinds and the final snapshot is written before exit. Put a TLS terminator in front of it; velo speaks plain HTTP/1.1 only.
 
 ## Design
 
@@ -216,7 +237,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.26.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.26.2. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -273,47 +294,27 @@ cargo test
 
 `tests/fuzz.rs` adds six deterministic robustness tests: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, 400 connections carrying byte-level mutations of otherwise valid requests (every answer must still be a well-formed status line), and oversized header and body requests. They also cover slow drip-feeding clients. They assert the process never panics and that the server still answers a normal request afterwards.
 
-## Rate limiting
-
-`VELO_RATE=100` allows each client 100 requests per second and answers `429 Too Many Requests` beyond that, counted in one-second windows across 16 shards. Behind a proxy every socket looks like `127.0.0.1`, so set `VELO_REAL_IP_HEADER=CF-Connecting-IP` (or `X-Forwarded-For`) to key on the real client — only trust that header if a proxy you control sets it.
-
-The check costs a lock and a hash per request. In a loopback benchmark, where every request shares one key and all workers contend on the same shard, `/health` drops from 90.6k to 71.9k req/s; real traffic spread over many client IPs spreads over the shards.
-
-## Metrics
-
-Set `VELO_METRICS=/_metrics` and that path answers:
-
-```json
-{"version":"0.26.0","uptime_ms":3747,"requests":275021,"failures":1,"connections":1,
- "bytes_out":5500420,"avg_micros":15,"max_micros":38,"routes":23,"workers":4}
-```
-
-`failures` counts responses velo generated itself (404, 405, 400, 401, 409, 413, and store misses), `connections` is the live count across workers. `avg_micros` and `max_micros` measure the time from parsed request to rendered response. Timing costs a clock read per request, so enabling metrics trades about 9% of peak throughput (94.0k to 85.3k req/s on `/health`); everything else is relaxed atomics. Point a monitor at it, or at any route in your API.
-
-## Deployment
-
-Velo is one static binary and one text file. A systemd user unit is enough:
-
-```ini
-[Unit]
-Description=velo api
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/velo run /srv/api/app.velo 127.0.0.1:8080 --data /srv/api/data.json
-Environment=VELO_WORKERS=4
-Restart=always
-KillSignal=SIGTERM
-
-[Install]
-WantedBy=default.target
-```
-
-`SIGTERM` is the clean stop: the event loop unwinds and the final snapshot is written before exit. Put a TLS terminator in front of it; velo speaks plain HTTP/1.1 only.
-
 ## CI
 
 `./check.sh` is the gate: `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, the full test suite, a release build, both examples compiled, and a boot smoke test with a short benchmark. `.github/workflows/ci.yml` runs exactly the same steps on push.
+
+## Layout
+
+| file | what it holds |
+| --- | --- |
+| `src/lexer.rs` | tokens |
+| `src/parser.rs` | source to routes, const folding, error messages |
+| `src/ast.rs` | `Expr` tree, evaluation, built-in functions, request context |
+| `src/store.rs` | collections, snapshots, JSON caches, persistence |
+| `src/router.rs` | per-method exact map and param tree |
+| `src/http.rs` | `Server`, dispatch, metrics, status codes |
+| `src/serve.rs` | request parsing, connection state, the epoll loop |
+| `src/value.rs` | `Value`, JSON reader and writer |
+| `src/date.rs` | `Date` header formatting |
+| `src/openapi.rs` | OpenAPI 3.0 document generation |
+| `src/main.rs` | CLI |
+| `src/bin/velobench.rs` | load generator |
+| `src/bin/velomicro.rs` | in-process dispatch microbenchmark, `velomicro [rows]` |
 
 ## Build notes
 
@@ -322,6 +323,8 @@ WantedBy=default.target
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.26.2** — README reordered into a reading path with a table of contents.
 
 **v0.26.1** — fuzz suite now mutates valid requests byte by byte and asserts every answer is still a well-formed HTTP status line. No defects found; kept as a regression net.
 
