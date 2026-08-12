@@ -9,8 +9,35 @@ pub enum Listener {
     Unix(UnixListener, std::path::PathBuf),
 }
 
+pub fn activation_fd(
+    pid: u32,
+    listen_pid: Option<String>,
+    listen_fds: Option<String>,
+) -> Option<RawFd> {
+    let owner: u32 = listen_pid?.parse().ok()?;
+    let count: i32 = listen_fds?.parse().ok()?;
+    if owner != pid || count < 1 {
+        return None;
+    }
+    Some(3)
+}
+
 impl Listener {
     pub fn bind(addr: &str) -> io::Result<Listener> {
+        let inherited = activation_fd(
+            std::process::id(),
+            std::env::var("LISTEN_PID").ok(),
+            std::env::var("LISTEN_FDS").ok(),
+        );
+        if let Some(fd) = inherited {
+            std::env::remove_var("LISTEN_PID");
+            std::env::remove_var("LISTEN_FDS");
+            use std::os::fd::FromRawFd;
+            return Ok(match addr.strip_prefix("unix:") {
+                Some(path) => Listener::Unix(unsafe { UnixListener::from_raw_fd(fd) }, path.into()),
+                None => Listener::Tcp(unsafe { TcpListener::from_raw_fd(fd) }),
+            });
+        }
         let Some(path) = addr.strip_prefix("unix:") else {
             return Ok(Listener::Tcp(TcpListener::bind(addr)?));
         };

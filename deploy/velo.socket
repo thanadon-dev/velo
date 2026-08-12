@@ -1,0 +1,10 @@
+[Unit]
+Description=velo api socket
+
+[Socket]
+ListenStream=/run/user/1000/velo.sock
+SocketMode=0660
+Backlog=1024
+
+[Install]
+WantedBy=sockets.target

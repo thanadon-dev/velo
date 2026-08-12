@@ -1,6 +1,7 @@
 [Unit]
 Description=velo api
 After=network.target
+Requires=velo.socket
 
 [Service]
 Type=simple

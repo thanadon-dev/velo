@@ -1324,3 +1324,16 @@ fn shutdown_drains_in_flight_connections() {
     assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err() || s.stopping());
 }
+
+#[test]
+fn socket_activation_is_detected() {
+    use velo::socket::activation_fd;
+    let s = |v: &str| Some(v.to_string());
+    assert_eq!(activation_fd(42, s("42"), s("1")), Some(3));
+    assert_eq!(activation_fd(42, s("42"), s("2")), Some(3));
+    assert_eq!(activation_fd(42, s("41"), s("1")), None, "another process owns the fds");
+    assert_eq!(activation_fd(42, s("42"), s("0")), None);
+    assert_eq!(activation_fd(42, None, s("1")), None);
+    assert_eq!(activation_fd(42, s("42"), None), None);
+    assert_eq!(activation_fd(42, s("nope"), s("1")), None);
+}
