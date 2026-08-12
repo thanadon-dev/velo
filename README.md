@@ -1,6 +1,6 @@
 # Velo
 
-**v1.1.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.2.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -100,8 +100,9 @@ Built-in store (`db.<collection>.<op>`):
 | `avg(field)` | mean of numeric values, `null` when there are none |
 | `min(field)` / `max(field)` | smallest / largest numeric value, `null` when there are none | |
 | `find(key)` | row | 404 |
-| `first(field, value)` | first matching row | 404 |
+| `first(field, value)` | first matching row, `first(field, op, value)` to compare | 404 |
 | `where(field, value)` | array of matching rows; linear scan, cached per field and value | `[]` |
+| `where(field, op, value)` | same, with `op` one of `== != < <= > >=` | `[]` |
 | chained steps | `where`, `search`, `order` and `page` compose; see below | |
 | `page(offset, limit)` | slice of rows, `limit` 0 means "to the end" | `[]` |
 | `search(field, text)` | rows whose `field` contains `text`, case-insensitive | `[]` |
@@ -117,12 +118,20 @@ Read operations chain, so one line can filter, sort and page:
 
 ```velo
 GET /users/top   => db.users.where("team", query.team).order("-score").page(0, 20)
+GET /users/band  => db.users.where("score", ">=", query.lo).where("score", "<=", query.hi).order("score")
 GET /users/hits  => db.users.search("name", query.q).count()
 GET /users/spend => db.users.where("team", query.team).sum("score")
 GET /users/best  => db.users.where("team", query.team).order("-score").first()
 ```
 
-`where`, `search`, `order` and `page` are steps and may repeat in any order. `count()`, `sum/avg/min/max(field)` and `first()` end a chain and nothing may follow them; `first()` answers 404 when the chain is empty. A chained result is cached like a single call, keyed on the whole chain, and thrown away when the collection changes. `first()` is the one shape that is not cached: it scans instead, and a trailing `order` picks the extreme row in one pass rather than sorting.
+A filter compares with `==` by default; pass an operator to widen it:
+
+```velo
+GET /orders/big  => db.orders.where("amount", ">", 100)
+GET /orders/open => db.orders.where("status", "!=", "done").count()
+```
+
+The operator is a literal, checked at compile time. A comparison is numeric when both sides read as numbers, otherwise it compares text; a row missing the field never matches. `where`, `search`, `order` and `page` are steps and may repeat in any order. `count()`, `sum/avg/min/max(field)` and `first()` end a chain and nothing may follow them; `first()` answers 404 when the chain is empty. A chained result is cached like a single call, keyed on the whole chain, and thrown away when the collection changes. `first()` is the one shape that is not cached: it scans instead, and a trailing `order` picks the extreme row in one pass rather than sorting.
 
 A row's field can be read directly:
 
@@ -361,7 +370,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v1.1.0. The `users` collection holds 500 rows (21 kB as JSON).
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v1.2.0. The `users` collection holds 500 rows (21 kB as JSON).
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -377,6 +386,7 @@ Load generator: `velobench` (ships in this repo, thread per connection, keep-ali
 | `/users/top` | chain: filter, sort, page 20 | 58 800 | 0.63 ms |
 | `/users/top/count` | chain: filter, count | 60 700 | 0.61 ms |
 | `/users/top/one` | chain: filter, best row | 33 900 | 1.15 ms |
+| `/users/strong` | chain: `>=` filter, sort, page | 58 100 | 0.60 ms |
 
 `-c 8 -p 32`, pipelined — what the server itself can do:
 
@@ -471,7 +481,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-96 tests (72 integration + 14 CLI + 6 fuzz + 4 unit): const folding, CRUD, chained reads, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+99 tests (75 integration + 14 CLI + 6 fuzz + 4 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -520,6 +530,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.2.0** — filters compare, not just match: `db.orders.where("amount", ">", 100)`, with `== != < <= > >=`, in a chain or on its own, and `first(field, op, value)` for the first row past a bound. Two steps make a range: `.where("score", ">=", query.lo).where("score", "<=", query.hi)`. The operator is a literal and unknown ones fail the compile; comparisons are numeric when both sides read as numbers and textual otherwise, and a row missing the field never matches.
 
 **v1.1.0** — read operations chain: `db.users.where("team", query.t).order("-score").page(0, 20)`, ending in a list, `count()`, an aggregate, or `first()`. A chain is cached as one result keyed on every step, so it costs about what a single filter costs and stays flat as the collection grows. A row's field can now be read straight off a call, as in `db.users.find(id).name`. Separately, inserting into a large collection no longer throws the cached list away: `VELO_APPEND_MAX` now only limits the copy a concurrent reader forces, so a 20 000-row collection under write-then-read load went from 3 200 us to 57 us per cycle.
 

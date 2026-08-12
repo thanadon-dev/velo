@@ -1568,3 +1568,69 @@ fn a_reader_holding_the_list_still_sees_later_writes() {
     assert!(seen.contains(r#""name":"after""#));
     drop(held);
 }
+
+const CMP_SRC: &str = r#"
+POST /users   => db.users.create(body)
+GET  /over    => db.users.where("score", ">", query.n)
+GET  /atleast => db.users.where("score", ">=", query.n).order("name")
+GET  /under   => db.users.where("score", "<", query.n).count()
+GET  /band    => db.users.where("score", ">=", query.lo).where("score", "<=", query.hi).order("score")
+GET  /others  => db.users.where("team", "!=", query.t).order("name")
+GET  /after   => db.users.where("name", ">", query.n).order("name")
+GET  /oldest  => db.users.where("score", ">", query.n).order("score").first()
+GET  /exact   => db.users.first("score", "==", query.n)
+"#;
+
+fn cmp_server() -> Arc<Server> {
+    let s = Server::new(compile(CMP_SRC, None).unwrap()).unwrap();
+    for (name, team, score) in
+        [("ann", "red", 5), ("bob", "blue", 9), ("cid", "red", 7), ("dan", "red", 1)]
+    {
+        let body = format!(r#"{{"name":"{name}","team":"{team}","score":{score}}}"#);
+        assert_eq!(call(&s, "POST", "/users", &body).0, 201);
+    }
+    s
+}
+
+#[test]
+fn comparison_filters() {
+    let s = cmp_server();
+    assert_eq!(names(&call(&s, "GET", "/over?n=5", "").1), ["bob", "cid"]);
+    assert_eq!(names(&call(&s, "GET", "/atleast?n=5", "").1), ["ann", "bob", "cid"]);
+    assert_eq!(call(&s, "GET", "/under?n=5", "").1, "1");
+    assert_eq!(names(&call(&s, "GET", "/band?lo=5&hi=7", "").1), ["ann", "cid"]);
+    assert_eq!(names(&call(&s, "GET", "/others?t=red", "").1), ["bob"]);
+    assert_eq!(names(&call(&s, "GET", "/after?n=bob", "").1), ["cid", "dan"]);
+    assert_eq!(
+        call(&s, "GET", "/oldest?n=1", "").1,
+        r#"{"id":1,"name":"ann","team":"red","score":5}"#
+    );
+    assert_eq!(
+        call(&s, "GET", "/exact?n=9", "").1,
+        r#"{"id":2,"name":"bob","team":"blue","score":9}"#
+    );
+    assert_eq!(call(&s, "GET", "/exact?n=100", "").0, 404);
+}
+
+#[test]
+fn comparison_filters_ignore_missing_and_unordered_fields() {
+    let s = cmp_server();
+    assert_eq!(call(&s, "POST", "/users", r#"{"name":"eve","team":"red"}"#).0, 201);
+    assert_eq!(call(&s, "POST", "/users", r#"{"name":"fay","team":"red","score":"12"}"#).0, 201);
+    assert_eq!(names(&call(&s, "GET", "/over?n=5", "").1), ["bob", "cid", "fay"]);
+    assert_eq!(call(&s, "GET", "/under?n=100", "").1, "5");
+    assert_eq!(
+        names(&call(&s, "GET", "/others?t=blue", "").1),
+        ["ann", "cid", "dan", "eve", "fay"]
+    );
+}
+
+#[test]
+fn comparison_needs_a_literal_operator() {
+    assert!(compile(r#"GET /a => db.x.where("n", ">", 1)"#, None).is_ok());
+    assert!(compile(r#"GET /a => db.x.where("n", "=>", 1)"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.where("n", query.op, 1)"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.where("n", ">", 1).count()"#, None).is_ok());
+    assert!(compile(r#"GET /a => db.x.first("n", ">=", 1)"#, None).is_ok());
+    assert!(compile(r#"GET /a => db.x.where("n", ">", 1, 2)"#, None).is_err());
+}

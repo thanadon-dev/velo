@@ -682,10 +682,73 @@ fn searched_json(rows: &[Value], field: &str, needle: &str) -> Arc<Vec<u8>> {
 }
 
 pub enum Stage {
-    Where(String, String),
+    Where(String, Cmp, String),
     Search(String, String),
     Order(String),
     Page(usize, usize),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cmp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl Cmp {
+    pub fn parse(text: &str) -> Option<Cmp> {
+        Some(match text {
+            "==" | "=" => Cmp::Eq,
+            "!=" => Cmp::Ne,
+            "<" => Cmp::Lt,
+            "<=" => Cmp::Le,
+            ">" => Cmp::Gt,
+            ">=" => Cmp::Ge,
+            _ => return None,
+        })
+    }
+
+    fn mark(self) -> char {
+        match self {
+            Cmp::Eq => '=',
+            Cmp::Ne => '!',
+            Cmp::Lt => '<',
+            Cmp::Le => '(',
+            Cmp::Gt => '>',
+            Cmp::Ge => ')',
+        }
+    }
+
+    fn holds(self, ord: Ordering2) -> bool {
+        match self {
+            Cmp::Eq => ord == Ordering2::Equal,
+            Cmp::Ne => ord != Ordering2::Equal,
+            Cmp::Lt => ord == Ordering2::Less,
+            Cmp::Le => ord != Ordering2::Greater,
+            Cmp::Gt => ord == Ordering2::Greater,
+            Cmp::Ge => ord != Ordering2::Less,
+        }
+    }
+}
+
+fn field_cmp(row: &Value, field: &str, op: Cmp, want: &str, want_num: Option<f64>) -> bool {
+    if op == Cmp::Eq || op == Cmp::Ne {
+        return field_eq(row, field, want) == (op == Cmp::Eq);
+    }
+    let Some(value) = row.get_ref(field) else { return false };
+    let ord = match (value, want_num) {
+        (Value::Num(n), Some(w)) => n.partial_cmp(&w),
+        (Value::Str(s), Some(w)) => match s.trim().parse::<f64>() {
+            Ok(n) => n.partial_cmp(&w),
+            Err(_) => Some(s.as_ref().cmp(want)),
+        },
+        (Value::Str(s), None) => Some(s.as_ref().cmp(want)),
+        (other, _) => Some(other.as_key().as_str().cmp(want)),
+    };
+    ord.is_some_and(|ord| op.holds(ord))
 }
 
 fn push_part(key: &mut String, part: &str) {
@@ -698,8 +761,9 @@ fn chain_key(stages: &[Stage]) -> String {
     let mut key = String::with_capacity(32);
     for stage in stages {
         match stage {
-            Stage::Where(f, v) => {
+            Stage::Where(f, op, v) => {
                 key.push('w');
+                key.push(op.mark());
                 push_part(&mut key, f);
                 push_part(&mut key, v);
             }
@@ -724,7 +788,10 @@ fn run_stages<'a>(rows: &'a [Value], stages: &[Stage]) -> Vec<&'a Value> {
     let mut cur: Vec<&Value> = live(rows).collect();
     for stage in stages {
         match stage {
-            Stage::Where(f, v) => cur.retain(|r| field_eq(r, f, v)),
+            Stage::Where(f, op, v) => {
+                let want_num = v.trim().parse::<f64>().ok();
+                cur.retain(|r| field_cmp(r, f, *op, v, want_num));
+            }
             Stage::Search(f, needle) => {
                 let lower = needle.to_lowercase();
                 cur.retain(|r| field_has(r, f, &lower));

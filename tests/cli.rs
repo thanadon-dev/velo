@@ -522,13 +522,14 @@ POST /c3 => body.name when body.name and header.x_key else 400\n\
 GET /d1 => db.x.where(\"k\", \"v\").order(\"-n\").page(0, 20)\n\
 GET /d2 => db.x.search(\"k\", \"v\").count()\n\
 GET /d3 => db.x.where(\"k\", \"v\").sum(\"n\")\n\
-GET /d4 => db.x.where(\"k\", \"v\").order(\"n\").first()\n";
+GET /d4 => db.x.where(\"k\", \"v\").order(\"n\").first()\n\
+GET /d5 => db.x.where(\"n\", \">=\", 10).where(\"n\", \"<\", 100).count()\n";
 
     let path = tmp("everything.velo");
     write(&path, program);
     let out = Command::new(BIN).arg("check").arg(&path).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("24 routes"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("25 routes"));
     let _ = std::fs::remove_file(&path);
 }
 

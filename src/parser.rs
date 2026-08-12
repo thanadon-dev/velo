@@ -632,6 +632,11 @@ fn single_op(
             want(1)?;
             Op::Order(Box::new(args.next().unwrap()))
         }
+        "first" if n == 3 => {
+            let f = Box::new(args.next().unwrap());
+            let cmp = cmp_arg(coll, &args.next().unwrap(), line, at_col)?;
+            Op::Chain(vec![Stage::Where(f, cmp, Box::new(args.next().unwrap()))], Tail::First)
+        }
         "first" => {
             want(2)?;
             let f = Box::new(args.next().unwrap());
@@ -645,6 +650,11 @@ fn single_op(
             want(2)?;
             let f = Box::new(args.next().unwrap());
             Op::Search(f, Box::new(args.next().unwrap()))
+        }
+        "where" if n == 3 => {
+            let f = Box::new(args.next().unwrap());
+            let cmp = cmp_arg(coll, &args.next().unwrap(), line, at_col)?;
+            Op::Chain(vec![Stage::Where(f, cmp, Box::new(args.next().unwrap()))], Tail::List)
         }
         "where" => {
             want(2)?;
@@ -688,6 +698,23 @@ fn single_op(
     Ok(op)
 }
 
+fn cmp_arg(
+    coll: &str,
+    arg: &Expr,
+    line: usize,
+    at_col: usize,
+) -> Result<crate::store::Cmp, String> {
+    if let Expr::Const(Value::Str(text)) = arg {
+        if let Some(op) = crate::store::Cmp::parse(text) {
+            return Ok(op);
+        }
+    }
+    Err(format!(
+        "line {}:{}: db.{}.where(field, op, value) needs a literal \"==\", \"!=\", \"<\", \"<=\", \">\" or \">=\"",
+        line, at_col, coll
+    ))
+}
+
 fn agg_of(op: &str) -> crate::store::Agg {
     match op {
         "sum" => crate::store::Agg::Sum,
@@ -727,9 +754,15 @@ fn chain_op(
         match op.as_str() {
             "all" => want(0)?,
             "where" => {
-                want(2)?;
+                if n != 3 {
+                    want(2)?;
+                }
                 let f = Box::new(args.next().unwrap());
-                stages.push(Stage::Where(f, Box::new(args.next().unwrap())));
+                let cmp = match n {
+                    3 => cmp_arg(coll, &args.next().unwrap(), line, at_col)?,
+                    _ => crate::store::Cmp::Eq,
+                };
+                stages.push(Stage::Where(f, cmp, Box::new(args.next().unwrap())));
             }
             "search" => {
                 want(2)?;
@@ -756,9 +789,13 @@ fn chain_op(
                 closed = true;
             }
             "first" => {
-                if n == 2 {
+                if n == 2 || n == 3 {
                     let f = Box::new(args.next().unwrap());
-                    stages.push(Stage::Where(f, Box::new(args.next().unwrap())));
+                    let cmp = match n {
+                        3 => cmp_arg(coll, &args.next().unwrap(), line, at_col)?,
+                        _ => crate::store::Cmp::Eq,
+                    };
+                    stages.push(Stage::Where(f, cmp, Box::new(args.next().unwrap())));
                 } else {
                     want(0)?;
                 }

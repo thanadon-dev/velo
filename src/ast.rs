@@ -1,4 +1,4 @@
-use crate::store::{Agg, Collection};
+use crate::store::{Agg, Cmp, Collection};
 use crate::value::Value;
 use std::sync::Arc;
 
@@ -84,7 +84,7 @@ pub enum Builtin {
 }
 
 pub enum Stage {
-    Where(Box<Expr>, Box<Expr>),
+    Where(Box<Expr>, Cmp, Box<Expr>),
     Search(Box<Expr>, Box<Expr>),
     Order(Box<Expr>),
     Page(Box<Expr>, Box<Expr>),
@@ -266,9 +266,11 @@ impl Expr {
                     let mut plan = Vec::with_capacity(stages.len());
                     for s in stages {
                         plan.push(match s {
-                            Stage::Where(f, v) => {
-                                crate::store::Stage::Where(f.eval(c)?.as_key(), v.eval(c)?.as_key())
-                            }
+                            Stage::Where(f, op, v) => crate::store::Stage::Where(
+                                f.eval(c)?.as_key(),
+                                *op,
+                                v.eval(c)?.as_key(),
+                            ),
                             Stage::Search(f, v) => crate::store::Stage::Search(
                                 f.eval(c)?.as_key(),
                                 v.eval(c)?.as_key(),
