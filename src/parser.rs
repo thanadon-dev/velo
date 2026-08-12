@@ -613,6 +613,11 @@ impl<'a> Parser<'a> {
                 let k = Box::new(args.next().unwrap());
                 Op::Update(k, Box::new(args.next().unwrap()))
             }
+            "upsert" => {
+                want(2)?;
+                let k = Box::new(args.next().unwrap());
+                Op::Upsert(k, Box::new(args.next().unwrap()))
+            }
             "delete" => {
                 want(1)?;
                 Op::Delete(Box::new(args.next().unwrap()))

@@ -1,13 +1,13 @@
 # Velo
 
-**v0.43.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v0.44.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
 GET    /users      => db.users.all()
 GET    /users/:id  => db.users.find(id)
 POST   /users      => db.users.create(body) when body.name else 400
-PUT    /users/:id  => db.users.update(id, body)
+PUT    /users/:id  => db.users.upsert(id, body)
 DELETE /users/:id  => db.users.delete(id) : 204
 GET    /search     => db.users.where("team", query.team)
 GET    /stats      => { users: db.users.count(), avg: db.users.avg("score") }
@@ -99,6 +99,7 @@ Built-in store (`db.<collection>.<op>`):
 | `order(field)` | rows sorted by `field`, `"-field"` for descending | `[]` |
 | `create(value)` | the stored row; `id` is generated unless the value carries one | 400 on an empty body, 409 on a duplicate `id` |
 | `update(key, patch)` | merged row | 404 |
+| `upsert(key, value)` | merged row, or a new row keyed by `key` | never misses |
 | `delete(key)` | `{"deleted":true}` | 404 |
 
 Built-in functions:
@@ -307,7 +308,7 @@ Env knobs:
 
 ## Benchmarks
 
-Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.43.1. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
+Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v0.44.0. The `users` collection holds 501 rows (16 kB as JSON). The `users` collection holds 200 rows.
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
 
@@ -397,7 +398,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-84 tests (63 integration + 12 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+85 tests (64 integration + 12 CLI + 6 fuzz + 3 unit): const folding, CRUD, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache and filter-cache invalidation, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, `--watch` restarting on a change and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -445,6 +446,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v0.44.0** — `db.x.upsert(key, value)` merges into an existing row or creates one under that key, which is what `PUT /users/:id` usually means. Numeric-looking keys are stored as numbers so they match generated ids.
 
 **v0.43.1** — every benchmark in this file re-measured against the current build, and `velobench` stopped scanning each response head for `Connection: close` (that check had quietly cost the client 3x on small responses). Clean connection ends are recognised from the socket state instead.
 

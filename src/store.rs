@@ -448,6 +448,29 @@ impl Collection {
         Some(row)
     }
 
+    pub fn upsert(&self, id: &str, value: Value) -> Value {
+        if let Some(row) = self.update(id, value.clone()) {
+            return row;
+        }
+        let keyed = match &value {
+            Value::Obj(o) | Value::Row(o, _) => {
+                let mut fields: Obj = Vec::with_capacity(o.len() + 1);
+                fields.push((Arc::from("id"), id_value(id)));
+                for (k, v) in o.iter() {
+                    if &**k != "id" {
+                        fields.push((k.clone(), v.clone()));
+                    }
+                }
+                Value::row(fields)
+            }
+            other => Value::row(vec![
+                (Arc::from("id"), id_value(id)),
+                (Arc::from("value"), other.clone()),
+            ]),
+        };
+        self.create(keyed).unwrap_or(value)
+    }
+
     pub fn update(&self, id: &str, patch: Value) -> Option<Value> {
         let mut s = self.snap.write().unwrap();
         let i = *s.by_id.get(id)?;
@@ -626,6 +649,13 @@ fn field_eq(row: &Value, field: &str, want: &str) -> bool {
     match row.get_ref(field) {
         Some(v) => v.key_eq(want),
         None => want.is_empty(),
+    }
+}
+
+fn id_value(id: &str) -> Value {
+    match id.parse::<f64>() {
+        Ok(n) if n.fract() == 0.0 && id.parse::<i64>().is_ok() => Value::Num(n),
+        _ => Value::str(id),
     }
 }
 

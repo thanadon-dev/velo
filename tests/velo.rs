@@ -13,6 +13,8 @@ GET  /users           => db.users.all()
 GET  /users/:id       => db.users.find(id)
 POST /users           => db.users.create(body)
 PUT  /users/:id       => db.users.update(id, body)
+PUT  /put/:id         => db.users.upsert(id, body)
+PUT  /keyed/:id       => db.keyed.upsert(id, body)
 DELETE /users/:id     => db.users.delete(id)
 GET  /stats           => { users: db.users.count() }
 GET  /echo/:a/x/:b    => { a: a, b: b }
@@ -1336,4 +1338,26 @@ fn socket_activation_is_detected() {
     assert_eq!(activation_fd(42, None, s("1")), None);
     assert_eq!(activation_fd(42, s("42"), None), None);
     assert_eq!(activation_fd(42, s("nope"), s("1")), None);
+}
+
+#[test]
+fn upsert_creates_or_merges() {
+    let s = server();
+    let (status, body, _) = call(&s, "PUT", "/put/7", r#"{"name":"seven"}"#);
+    assert_eq!((status, body), (200, r#"{"id":7,"name":"seven"}"#.to_string()));
+    assert_eq!(call(&s, "GET", "/users/7", "").1, r#"{"id":7,"name":"seven"}"#);
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":1}"#);
+
+    let (_, body, _) = call(&s, "PUT", "/put/7", r#"{"team":"red"}"#);
+    assert_eq!(body, r#"{"id":7,"name":"seven","team":"red"}"#);
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":1}"#);
+
+    let (_, body, _) = call(&s, "PUT", "/keyed/abc", r#"{"name":"letters"}"#);
+    assert_eq!(body, r#"{"id":"abc","name":"letters"}"#);
+    assert_eq!(call(&s, "GET", "/keyed/abc", "").1, r#"{"id":"abc","name":"letters"}"#);
+
+    let (_, body, _) = call(&s, "POST", "/users", r#"{"name":"auto"}"#);
+    assert_eq!(body, r#"{"id":1,"name":"auto"}"#);
+    assert_eq!(call(&s, "GET", "/users", "").1.matches(r#""id""#).count(), 2);
+    assert_eq!(call(&s, "PUT", "/put/7", "").0, 400);
 }

@@ -94,6 +94,7 @@ pub enum Op {
     Page(Box<Expr>, Box<Expr>),
     Create(Box<Expr>),
     Update(Box<Expr>, Box<Expr>),
+    Upsert(Box<Expr>, Box<Expr>),
     Delete(Box<Expr>),
 }
 
@@ -226,6 +227,16 @@ impl Expr {
                     };
                     let patch = v.eval(c)?;
                     col.update(&key, patch).ok_or(NOT_FOUND)
+                }
+                Op::Upsert(k, v) => {
+                    let key = match fast_key(k, c) {
+                        Some(raw) => raw.to_string(),
+                        None => k.eval(c)?.as_key(),
+                    };
+                    match v.eval(c)? {
+                        Value::Null => Err(BAD_BODY),
+                        val => Ok(col.upsert(&key, val)),
+                    }
                 }
                 Op::Delete(k) => {
                     let hit = match fast_key(k, c) {

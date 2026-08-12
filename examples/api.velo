@@ -1,11 +1,11 @@
 GET  /health              => "ok"
 GET  /openapi.json        => openapi()
-GET  /version             => { name: "velo", version: "0.43.1" }
+GET  /version             => { name: "velo", version: "0.44.0" }
 
 GET  /users               => db.users.all()
 GET  /users/:id           => db.users.find(id)
 POST /users               => db.users.create(body) when body.name else 400
-PUT  /users/:id           => db.users.update(id, body)
+PUT  /users/:id           => db.users.upsert(id, body)
 DELETE /users/:id         => db.users.delete(id) : 204
 GET  /users/page          => db.users.page(query.offset, query.limit) when query.limit < 200 else 400
 GET  /users/sorted        => db.users.order(query.by)
