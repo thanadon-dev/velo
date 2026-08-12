@@ -24,7 +24,7 @@ pub fn compile_file(
     path: &std::path::Path,
     store: Option<std::sync::Arc<Store>>,
 ) -> Result<Program, String> {
-    let store = store.unwrap_or_else(Store::new);
+    let store = store.unwrap_or_default();
     let mut seen = Vec::new();
     let mut prog = Program { routes: Vec::new(), store: store.clone(), includes: Vec::new() };
     load_into(&mut prog, path, &store, &mut seen)?;
