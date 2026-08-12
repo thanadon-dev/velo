@@ -16,10 +16,23 @@ type RateShard = HashMap<String, (Instant, u32), BuildHasherDefault<Fnv>>;
 const RATE_KEYS_MAX: usize = 4096;
 pub const MAX_HEAD: usize = 8 << 10;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Ctype {
-    Json,
-    Text,
+pub type Ctype = &'static str;
+
+pub const JSON: Ctype = "application/json";
+pub const TEXT: Ctype = "text/plain; charset=utf-8";
+
+pub fn ctype_for(path: &str) -> Ctype {
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "json" => JSON,
+        "svg" => "image/svg+xml",
+        "xml" => "application/xml",
+        "csv" => "text/csv; charset=utf-8",
+        "md" => "text/markdown; charset=utf-8",
+        _ => TEXT,
+    }
 }
 
 static SIGNALLED: AtomicBool = AtomicBool::new(false);
@@ -124,7 +137,7 @@ impl Server {
         self.requests.fetch_add(1, Ordering::Relaxed);
         if self.metrics_path.as_deref() == Some(path) {
             self.write_metrics(out);
-            return (200, Ctype::Json);
+            return (200, JSON);
         }
         let Some(m) = Method::parse(method) else {
             return self.fail(Err_ { status: 405, msg: "method not allowed" }, out);
@@ -139,7 +152,7 @@ impl Server {
         });
         let Some(idx) = found else {
             if self.cors && m == Method::Options {
-                return (204, Ctype::Json);
+                return (204, JSON);
             }
             let e = if self.router.allows(path) {
                 Err_ { status: 405, msg: "method not allowed" }
@@ -176,12 +189,12 @@ impl Server {
         }
         if let Some(k) = &rt.konst {
             out.extend_from_slice(k);
-            return (rt.status, if rt.const_text { Ctype::Text } else { Ctype::Json });
+            return (rt.status, rt.const_ctype);
         }
         if rt.expr.renders_json() {
             let mark = out.len();
             return match rt.expr.write_json(&ctx, out) {
-                Ok(()) => (rt.status, Ctype::Json),
+                Ok(()) => (rt.status, JSON),
                 Err(e) => {
                     out.truncate(mark);
                     self.fail(e, out)
@@ -191,11 +204,11 @@ impl Server {
         match rt.expr.eval(&ctx) {
             Ok(Value::Str(s)) => {
                 out.extend_from_slice(s.as_bytes());
-                (rt.status, Ctype::Text)
+                (rt.status, TEXT)
             }
             Ok(v) => {
                 v.write_json(out);
-                (rt.status, Ctype::Json)
+                (rt.status, JSON)
             }
             Err(e) => self.fail(e, out),
         }
@@ -354,7 +367,7 @@ fn err_body(e: Err_, out: &mut Vec<u8>) -> (u16, Ctype) {
     out.extend_from_slice(b"{\"error\":");
     crate::value::write_string(out, e.msg);
     out.push(b'}');
-    (e.status, Ctype::Json)
+    (e.status, JSON)
 }
 
 pub(crate) fn status_text(code: u16) -> &'static str {

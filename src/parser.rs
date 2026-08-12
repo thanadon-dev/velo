@@ -14,7 +14,7 @@ pub struct Route {
     pub params: Vec<String>,
     pub expr: Expr,
     pub konst: Option<Vec<u8>>,
-    pub const_text: bool,
+    pub const_ctype: crate::http::Ctype,
     pub status: u16,
     pub uses_body: bool,
     pub uses_query: bool,
@@ -78,6 +78,14 @@ pub struct Program {
 }
 
 pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> {
+    compile_in(src, store, std::path::Path::new("."))
+}
+
+pub fn compile_in(
+    src: &str,
+    store: Option<Arc<Store>>,
+    base: &std::path::Path,
+) -> Result<Program, String> {
     let store = store.unwrap_or_default();
     let mut p = Parser {
         lex: Lexer::new(src),
@@ -90,6 +98,8 @@ pub fn compile(src: &str, store: Option<Arc<Store>>) -> Result<Program, String> 
         header: false,
         query_fields: Vec::new(),
         header_fields: Vec::new(),
+        base: base.to_path_buf(),
+        file_ctype: None,
     };
     p.advance().map_err(|e| with_source(src, e))?;
     let mut routes = Vec::new();
@@ -121,7 +131,7 @@ pub fn bake_openapi(prog: &mut Program) {
     for r in prog.routes.iter_mut() {
         if matches!(&r.expr, Expr::Call(Builtin::Openapi, _)) {
             r.konst = Some(doc.clone());
-            r.const_text = false;
+            r.const_ctype = crate::http::JSON;
         }
     }
 }
@@ -153,6 +163,8 @@ struct Parser<'a> {
     header: bool,
     query_fields: Vec<String>,
     header_fields: Vec<String>,
+    base: std::path::PathBuf,
+    file_ctype: Option<crate::http::Ctype>,
 }
 
 impl<'a> Parser<'a> {
@@ -196,6 +208,7 @@ impl<'a> Parser<'a> {
         self.header = false;
         self.query_fields.clear();
         self.header_fields.clear();
+        self.file_ctype = None;
         let expr = self.expr()?;
         let mut status = if method == Method::Post { 201 } else { 200 };
         if self.tok.kind == Kind::Colon {
@@ -231,14 +244,15 @@ impl<'a> Parser<'a> {
             }
             guard_status = code.num as u16;
         }
-        let (konst, const_text) = if self.pure {
-            match expr.eval(&Ctx::default()) {
-                Ok(Value::Str(s)) => (Some(s.as_bytes().to_vec()), true),
-                Ok(v) => (Some(v.to_json()), false),
-                Err(_) => (None, false),
+        let (konst, const_ctype) = if self.pure {
+            match (&self.file_ctype, expr.eval(&Ctx::default())) {
+                (Some(ct), Ok(Value::Str(s))) => (Some(s.as_bytes().to_vec()), *ct),
+                (None, Ok(Value::Str(s))) => (Some(s.as_bytes().to_vec()), crate::http::TEXT),
+                (_, Ok(v)) => (Some(v.to_json()), crate::http::JSON),
+                (_, Err(_)) => (None, crate::http::JSON),
             }
         } else {
-            (None, false)
+            (None, crate::http::JSON)
         };
         Ok(Route {
             method,
@@ -246,7 +260,7 @@ impl<'a> Parser<'a> {
             params,
             expr,
             konst,
-            const_text,
+            const_ctype,
             status,
             uses_body: self.body,
             uses_query: self.query,
@@ -354,6 +368,23 @@ impl<'a> Parser<'a> {
         }
         if self.tok.kind == Kind::LParen {
             let f = match head.text.as_str() {
+                "file" => {
+                    self.advance()?;
+                    if self.tok.kind != Kind::Str {
+                        return Err(format!("line {}: file() needs a path", head.line));
+                    }
+                    let rel = self.tok.text.clone();
+                    self.advance()?;
+                    if self.tok.kind != Kind::RParen {
+                        return Err(format!("line {}: file() takes one path", head.line));
+                    }
+                    self.advance()?;
+                    let path = self.base.join(&rel);
+                    let text = std::fs::read_to_string(&path)
+                        .map_err(|e| format!("line {}: {}: {e}", head.line, path.display()))?;
+                    self.file_ctype = Some(crate::http::ctype_for(&rel));
+                    return Ok(Expr::Const(Value::str(&text)));
+                }
                 "openapi" => Builtin::Openapi,
                 "now" => Builtin::Now,
                 "uuid" => Builtin::Uuid,

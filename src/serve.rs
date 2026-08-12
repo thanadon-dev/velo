@@ -1,5 +1,5 @@
 use crate::epoll::{self, Epoll, Event};
-use crate::http::{status_text, Ctype, Server, MAX_BODY, MAX_HEAD};
+use crate::http::{status_text, Ctype, Server, JSON, MAX_BODY, MAX_HEAD};
 use crate::router::Fnv;
 use crate::value::write_i64;
 use std::collections::HashMap;
@@ -221,12 +221,9 @@ fn write_head_tagged(
         out.extend_from_slice(b"\r\n");
         return;
     }
-    out.extend_from_slice(match ct {
-        Ctype::Json => b"\r\nContent-Type: application/json\r\nContent-Length: ".as_slice(),
-        Ctype::Text => {
-            b"\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ".as_slice()
-        }
-    });
+    out.extend_from_slice(b"\r\nContent-Type: ");
+    out.extend_from_slice(ct.as_bytes());
+    out.extend_from_slice(b"\r\nContent-Length: ");
     write_i64(out, len as i64);
     out.extend_from_slice(if keep_alive {
         b"\r\nConnection: keep-alive\r\n".as_slice()
@@ -348,7 +345,7 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         c.scanned = scanned;
         let Some(head) = parsed else {
             if c.inbuf.len() - c.start > MAX_HEAD {
-                write_head(&mut c.out, 431, Ctype::Json, 0, false, headers);
+                write_head(&mut c.out, 431, JSON, 0, false, headers);
                 c.closing = true;
             }
             c.compact();
@@ -364,7 +361,7 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
             return;
         }
         if let Some(code) = head.error {
-            write_head(&mut c.out, code, Ctype::Json, 0, false, headers);
+            write_head(&mut c.out, code, JSON, 0, false, headers);
             c.closing = true;
             c.start += need;
             c.scanned = 0;
@@ -380,7 +377,7 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
                 None => &c.peer,
             };
             if !srv.allow(key) {
-                write_head(&mut c.out, 429, Ctype::Json, 0, head.keep_alive, headers);
+                write_head(&mut c.out, 429, JSON, 0, head.keep_alive, headers);
                 c.start += need;
                 c.scanned = 0;
                 c.served = true;

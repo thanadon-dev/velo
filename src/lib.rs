@@ -14,7 +14,7 @@ pub mod store;
 pub mod value;
 
 pub use http::{Ctype, Server};
-pub use parser::{compile, Method, Program, Route};
+pub use parser::{compile, compile_in, Method, Program, Route};
 pub use store::Store;
 pub use value::Value;
 
@@ -56,10 +56,10 @@ fn load_into(
         return Err(format!("{}: include nesting too deep", path.display()));
     }
     let src = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let part =
-        compile(&src, Some(store.clone())).map_err(|e| format!("{}: {e}", path.display()))?;
-    prog.routes.extend(part.routes);
     let dir = full.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let part = compile_in(&src, Some(store.clone()), &dir)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    prog.routes.extend(part.routes);
     for include in part.includes {
         load_into(prog, &dir.join(include), store, seen)?;
     }

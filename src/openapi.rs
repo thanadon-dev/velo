@@ -43,15 +43,15 @@ fn operation(out: &mut Vec<u8>, r: &Route) {
         );
     }
     out.extend_from_slice(b",\"responses\":{");
-    response(out, r.status, "ok", r.const_text);
+    response(out, r.status, "ok", r.const_ctype);
     for extra in error_codes(r) {
         out.push(b',');
-        response(out, extra, "error", false);
+        response(out, extra, "error", crate::http::JSON);
     }
     out.extend_from_slice(b"}}");
 }
 
-fn response(out: &mut Vec<u8>, code: u16, description: &str, text: bool) {
+fn response(out: &mut Vec<u8>, code: u16, description: &str, ctype: crate::http::Ctype) {
     let mut key = Vec::new();
     write_i64(&mut key, code as i64);
     write_string(out, std::str::from_utf8(&key).unwrap_or("200"));
@@ -59,7 +59,7 @@ fn response(out: &mut Vec<u8>, code: u16, description: &str, text: bool) {
     write_string(out, description);
     if code != 204 && code != 304 {
         out.extend_from_slice(b",\"content\":{");
-        write_string(out, if text { "text/plain" } else { "application/json" });
+        write_string(out, ctype.split(';').next().unwrap_or(ctype));
         out.extend_from_slice(b":{\"schema\":{}}}");
     }
     out.push(b'}');

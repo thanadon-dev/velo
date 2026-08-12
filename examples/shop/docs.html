@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>shop api</title>
+<style>
+  body { font: 15px/1.6 system-ui, sans-serif; margin: 3rem auto; max-width: 44rem; padding: 0 1rem; }
+  code { background: #f3f3f3; padding: 0.1rem 0.3rem; border-radius: 3px; }
+  li { margin: 0.2rem 0; }
+</style>
+<h1>shop api</h1>
+<p>Served by velo. The machine-readable description lives at <code>/openapi.json</code>.</p>
+<ul id="paths"></ul>
+<script>
+fetch("/openapi.json").then(r => r.json()).then(doc => {
+  const list = document.getElementById("paths");
+  for (const [path, ops] of Object.entries(doc.paths).sort()) {
+    for (const method of Object.keys(ops)) {
+      const li = document.createElement("li");
+      li.innerHTML = "<code>" + method.toUpperCase() + " " + path + "</code>";
+      list.appendChild(li);
+    }
+  }
+});
+</script>

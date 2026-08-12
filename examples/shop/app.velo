@@ -4,3 +4,4 @@ include "parts/admin.velo"
 
 GET /health       => "ok"
 GET /openapi.json => openapi()
+GET /docs         => file("docs.html")

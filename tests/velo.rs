@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
-use velo::http::Ctype;
+use velo::http::{Ctype, JSON, TEXT};
 use velo::value::parse_json;
 use velo::{compile, Server, Value};
 
@@ -60,7 +60,7 @@ fn const_routes_fold() {
     let prog = compile(SRC, None).unwrap();
     let health = prog.routes.iter().find(|r| r.pattern == "/health").unwrap();
     assert_eq!(health.konst.as_deref(), Some(b"ok".as_slice()));
-    assert!(health.const_text);
+    assert_eq!(health.const_ctype, TEXT);
     let version = prog.routes.iter().find(|r| r.pattern == "/version").unwrap();
     assert_eq!(version.konst.as_deref(), Some(br#"{"name":"velo","n":2}"#.as_slice()));
     let users =
@@ -71,7 +71,7 @@ fn const_routes_fold() {
 #[test]
 fn crud_roundtrip() {
     let s = server();
-    assert_eq!(call(&s, "GET", "/users", ""), (200, "[]".into(), Ctype::Json));
+    assert_eq!(call(&s, "GET", "/users", ""), (200, "[]".into(), JSON));
 
     let (status, body, _) = call(&s, "POST", "/users", r#"{"name":"mark"}"#);
     assert_eq!(status, 201);
@@ -93,7 +93,7 @@ fn crud_roundtrip() {
 fn params_and_body_fields() {
     let s = server();
     assert_eq!(call(&s, "GET", "/echo/1/x/2", "").1, r#"{"a":"1","b":"2"}"#);
-    assert_eq!(call(&s, "POST", "/name", r#"{"name":"velo"}"#), (201, "velo".into(), Ctype::Text));
+    assert_eq!(call(&s, "POST", "/name", r#"{"name":"velo"}"#), (201, "velo".into(), TEXT));
 }
 
 #[test]
@@ -431,7 +431,7 @@ fn cors_preflight_and_headers() {
         srv.cors = true;
         srv.extra_headers = b"Access-Control-Allow-Origin: *\r\n".to_vec();
     }
-    assert_eq!(call(&s, "OPTIONS", "/users", ""), (204, String::new(), Ctype::Json));
+    assert_eq!(call(&s, "OPTIONS", "/users", ""), (204, String::new(), JSON));
     assert_eq!(call(&s, "GET", "/nope", "").0, 404);
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -624,7 +624,7 @@ fn metrics_endpoint() {
     call(&s, "GET", "/missing", "");
     call(&s, "GET", "/users/999", "");
     let (status, body, ct) = call(&s, "GET", "/_metrics", "");
-    assert_eq!((status, ct), (200, Ctype::Json));
+    assert_eq!((status, ct), (200, JSON));
     let m = velo::value::parse_json(body.as_bytes()).unwrap();
     assert!(matches!(m.get("version"), Value::Str(_)), "{body}");
     assert!(matches!(m.get("requests"), Value::Num(n) if n >= 4.0), "{body}");
@@ -868,11 +868,11 @@ fn openapi_builtin_serves_the_document() {
     let prog = compile(src, None).unwrap();
     let docs = prog.routes.iter().find(|r| r.pattern == "/docs").unwrap();
     assert!(docs.konst.is_some());
-    assert!(!docs.const_text);
+    assert_eq!(docs.const_ctype, JSON);
 
     let s = Server::new(prog).unwrap();
     let (status, body, ct) = call(&s, "GET", "/docs", "");
-    assert_eq!((status, ct), (200, Ctype::Json));
+    assert_eq!((status, ct), (200, JSON));
     let v = velo::value::parse_json(body.as_bytes()).expect(&body);
     assert_eq!(v.get("openapi").as_key(), "3.0.3");
     assert!(matches!(v.get("paths").get("/users/{id}"), Value::Obj(_)), "{body}");
@@ -1187,5 +1187,5 @@ fn form_encoded_bodies_are_accepted() {
     assert_eq!(call(&s, "POST", "/users", "not a body").0, 400);
     assert_eq!(call(&s, "POST", "/users", "{oops").0, 400);
     assert_eq!(call(&s, "POST", "/users", "=novalue").0, 400);
-    assert_eq!(call(&s, "POST", "/name", "name=fromform"), (201, "fromform".into(), Ctype::Text));
+    assert_eq!(call(&s, "POST", "/name", "name=fromform"), (201, "fromform".into(), TEXT));
 }

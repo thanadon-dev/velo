@@ -343,3 +343,38 @@ fn watch_restarts_on_change() {
     stop(&mut child, "-TERM");
     let _ = std::fs::remove_file(&app);
 }
+
+#[test]
+fn file_builtin_serves_a_page_with_its_type() {
+    let dir = tmp("static");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write(&dir.join("index.html"), "<h1>hello</h1>\n");
+    write(&dir.join("style.css"), "body { color: red }\n");
+    write(&dir.join("app.velo"), "GET /health => \"ok\"\nGET / => file(\"index.html\")\nGET /style.css => file(\"style.css\")\n");
+
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(dir.join("app.velo"))
+        .arg(format!("127.0.0.1:{port}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let page = get(port, "/");
+    assert!(page.contains("Content-Type: text/html; charset=utf-8"), "{page}");
+    assert!(page.ends_with("<h1>hello</h1>\n"), "{page}");
+    let css = get(port, "/style.css");
+    assert!(css.contains("Content-Type: text/css; charset=utf-8"), "{css}");
+    assert!(get(port, "/health").ends_with("ok"));
+    stop(&mut child, "-TERM");
+
+    write(&dir.join("bad.velo"), "GET / => file(\"missing.html\")\n");
+    let out = Command::new(BIN).arg("check").arg(dir.join("bad.velo")).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("missing.html"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
