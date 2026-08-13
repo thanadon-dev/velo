@@ -93,6 +93,7 @@ fn main() {
                GET /o => db.users.order(\"name\")\n\
                GET /f => db.users.find(\"1\")\n\
                GET /c => db.users.where(\"team\", query.t).order(\"name\").page(0, 20)\n\
+               GET /s => db.users.select(\"id\", \"name\")\n\
                POST /w => db.users.create(body)\n\
                DELETE /d/:id => db.users.delete(id)\n";
     let store = velo::Store::new();
@@ -154,6 +155,7 @@ fn main() {
         ("order", "/o"),
         ("find", "/f"),
         ("chain", "/c?t=x"),
+        ("select", "/s"),
     ] {
         let t0 = Instant::now();
         let n = 20_000;

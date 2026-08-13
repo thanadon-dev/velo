@@ -402,6 +402,15 @@ impl Collection {
         })
     }
 
+    pub fn query_select(&self, stages: &[Stage], fields: &[String]) -> Value {
+        let mut key = String::with_capacity(32);
+        for f in fields {
+            push_part(&mut key, f);
+        }
+        key.push_str(&chain_key(stages));
+        self.derived("qs", &key, "", |rows| selected_json(&run_stages(rows, stages), fields))
+    }
+
     pub fn query_agg(&self, stages: &[Stage], op: Agg, field: &str) -> Value {
         let key = format!("{}{}", op.name(), chain_key(stages));
         self.derived("qa", &key, field, |rows| {
@@ -849,6 +858,31 @@ fn run_stages<'a>(rows: &'a Rows, stages: &[Stage]) -> Vec<&'a Value> {
         }
     }
     cur
+}
+
+fn selected_json(rows: &[&Value], fields: &[String]) -> Arc<Vec<u8>> {
+    let mut out = Vec::with_capacity(rows.len() * (fields.len() * 16 + 4) + 2);
+    out.push(b'[');
+    for (i, row) in rows.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.push(b'{');
+        let mut first = true;
+        for field in fields {
+            let Some(value) = row.get_ref(field) else { continue };
+            if !first {
+                out.push(b',');
+            }
+            first = false;
+            crate::value::write_string(&mut out, field);
+            out.push(b':');
+            value.write_json(&mut out);
+        }
+        out.push(b'}');
+    }
+    out.push(b']');
+    Arc::new(out)
 }
 
 fn rows_json(rows: &[&Value]) -> Arc<Vec<u8>> {

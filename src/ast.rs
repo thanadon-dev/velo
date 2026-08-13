@@ -105,6 +105,7 @@ pub enum Tail {
     Count,
     Agg(Agg, Box<Expr>),
     First,
+    Select(Vec<Expr>),
 }
 
 pub enum Op {
@@ -299,6 +300,13 @@ impl Expr {
                         Tail::Count => Ok(col.query_count(&plan)),
                         Tail::Agg(agg, f) => Ok(col.query_agg(&plan, *agg, &f.eval(c)?.as_key())),
                         Tail::First => col.query_first(&plan).ok_or(NOT_FOUND),
+                        Tail::Select(fields) => {
+                            let mut names = Vec::with_capacity(fields.len());
+                            for f in fields {
+                                names.push(f.eval(c)?.as_key());
+                            }
+                            Ok(col.query_select(&plan, &names))
+                        }
                     }
                 }
                 Op::Delete(k) => {

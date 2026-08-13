@@ -679,6 +679,12 @@ fn single_op(
             let cmp = cmp_arg(coll, &args.next().unwrap(), line, at_col)?;
             Op::Chain(vec![Stage::Where(f, cmp, Box::new(args.next().unwrap()))], Tail::List)
         }
+        "select" => {
+            if n == 0 {
+                want(1)?;
+            }
+            Op::Chain(Vec::new(), Tail::Select(args.collect()))
+        }
         "where" => {
             want(2)?;
             let f = Box::new(args.next().unwrap());
@@ -804,6 +810,13 @@ fn chain_op(
             "count" => {
                 want(0)?;
                 tail = Tail::Count;
+                closed = true;
+            }
+            "select" => {
+                if n == 0 {
+                    want(1)?;
+                }
+                tail = Tail::Select(args.collect());
                 closed = true;
             }
             "sum" | "avg" | "min" | "max" => {

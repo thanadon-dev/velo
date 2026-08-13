@@ -1434,6 +1434,9 @@ GET  /hunt         => db.users.search("name", query.q).page(0, 2)
 GET  /topname      => db.users.order("-score").first().name
 GET  /one/:id      => db.users.find(id).name
 GET  /every        => db.users.all().where("team", query.t).count()
+GET  /cards        => db.users.select("name", "score")
+GET  /roster       => db.users.where("team", query.t).order("name").select("name")
+GET  /slim         => db.users.select("name", "nope")
 "#;
 
 fn chain_server() -> Arc<Server> {
@@ -1482,6 +1485,45 @@ fn chain_terminals() {
         r#"{"id":1,"name":"ann","team":"red","score":5}"#
     );
     assert_eq!(call(&s, "GET", "/named?t=green", "").0, 404);
+}
+
+#[test]
+fn select_keeps_only_the_named_fields() {
+    let s = chain_server();
+    assert_eq!(
+        call(&s, "GET", "/cards", "").1,
+        r#"[{"name":"ann","score":5},{"name":"bob","score":9},{"name":"cid","score":7},{"name":"dan","score":1},{"name":"eve","score":3}]"#
+    );
+    assert_eq!(
+        call(&s, "GET", "/roster?t=red", "").1,
+        r#"[{"name":"ann"},{"name":"cid"},{"name":"dan"}]"#
+    );
+    assert_eq!(call(&s, "GET", "/roster?t=none", "").1, "[]");
+    assert_eq!(
+        call(&s, "GET", "/slim", "").1,
+        r#"[{"name":"ann"},{"name":"bob"},{"name":"cid"},{"name":"dan"},{"name":"eve"}]"#
+    );
+}
+
+#[test]
+fn select_sees_later_writes_and_does_not_collide() {
+    let s = chain_server();
+    assert_eq!(call(&s, "GET", "/roster?t=blue", "").1, r#"[{"name":"bob"},{"name":"eve"}]"#);
+    assert_eq!(call(&s, "GET", "/cards", "").1.matches("\"name\"").count(), 5);
+    assert_eq!(call(&s, "POST", "/users", r#"{"name":"fay","team":"blue","score":2}"#).0, 201);
+    assert_eq!(
+        call(&s, "GET", "/roster?t=blue", "").1,
+        r#"[{"name":"bob"},{"name":"eve"},{"name":"fay"}]"#
+    );
+    assert_eq!(call(&s, "GET", "/cards", "").1.matches("\"name\"").count(), 6);
+}
+
+#[test]
+fn select_needs_a_field() {
+    let err = compile("GET /x => db.users.select()\n", None).err().unwrap();
+    assert!(err.contains("expects 1 argument"), "{err}");
+    let err = compile("GET /x => db.users.select(\"a\").count()\n", None).err().unwrap();
+    assert!(err.contains("nothing can follow"), "{err}");
 }
 
 #[test]

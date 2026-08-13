@@ -524,13 +524,14 @@ GET /d1 => db.x.where(\"k\", \"v\").order(\"-n\").page(0, 20)\n\
 GET /d2 => db.x.search(\"k\", \"v\").count()\n\
 GET /d3 => db.x.where(\"k\", \"v\").sum(\"n\")\n\
 GET /d4 => db.x.where(\"k\", \"v\").order(\"n\").first()\n\
-GET /d5 => db.x.where(\"n\", \">=\", 10).where(\"n\", \"<\", 100).count()\n";
+GET /d5 => db.x.where(\"n\", \">=\", 10).where(\"n\", \"<\", 100).count()\n\
+GET /d6 => db.x.where(\"k\", \"v\").select(\"id\", \"k\")\n";
 
     let path = tmp("everything.velo");
     write(&path, program);
     let out = Command::new(BIN).arg("check").arg(&path).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("26 routes"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("27 routes"));
     let _ = std::fs::remove_file(&path);
 }
 
