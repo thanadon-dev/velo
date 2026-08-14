@@ -664,7 +664,8 @@ fn metrics_break_down_by_route() {
     Arc::get_mut(&mut s).unwrap().metrics_path = Some("/_metrics".to_string());
     let hit = |method: &str, path: &str, body: &str| {
         let mut out = Vec::new();
-        let (status, _, _, route) = s.handle_full(method, path, body.as_bytes(), &[], &mut out);
+        let (status, _, _, route) =
+            s.handle_full(method, path, body.as_bytes(), &[], &mut out, &mut Vec::new());
         s.record_route(route, status, 1);
         status
     };
@@ -2103,4 +2104,81 @@ fn hash_folds_when_its_input_is_constant() {
     assert!(live.konst.is_none());
     let signup = prog.routes.iter().find(|r| r.pattern == "/signup").unwrap();
     assert!(signup.konst.is_none(), "a hashed password must never be folded to a constant");
+}
+
+const COOKIE_SRC: &str = r#"
+GET /read       => cookie.session
+GET /both       => { c: cookie.session, h: header.x_token }
+POST /set       => setcookie("session", body.token)
+POST /clear     => [setcookie("session", ""), "gone"]
+POST /odd       => setcookie("bad name", "x")
+POST /injected  => setcookie("session", body.token)
+"#;
+
+fn cookie_call(
+    s: &Server,
+    method: &str,
+    path: &str,
+    jar: &str,
+    body: &str,
+) -> (u16, String, String) {
+    let raw = format!("{method} {path} HTTP/1.1\r\nhost: x\r\ncookie: {jar}\r\n\r\n");
+    let mut out = Vec::new();
+    let mut set = Vec::new();
+    let (status, _, _, _) =
+        s.handle_full(method, path, body.as_bytes(), raw.as_bytes(), &mut out, &mut set);
+    (status, String::from_utf8(out).unwrap(), String::from_utf8(set).unwrap())
+}
+
+#[test]
+fn a_cookie_is_read_by_name() {
+    let s = Server::new(compile(COOKIE_SRC, None).unwrap()).unwrap();
+    assert_eq!(cookie_call(&s, "GET", "/read", "session=abc", "").1, "abc");
+    assert_eq!(cookie_call(&s, "GET", "/read", "a=1; session=abc; b=2", "").1, "abc");
+    assert_eq!(cookie_call(&s, "GET", "/read", "a=1;session=abc", "").1, "abc");
+    assert_eq!(cookie_call(&s, "GET", "/read", "session=\"abc\"", "").1, "abc");
+    assert_eq!(cookie_call(&s, "GET", "/read", "sessionx=abc", "").1, "null");
+    assert_eq!(cookie_call(&s, "GET", "/read", "session=", "").1, "");
+    assert_eq!(cookie_call(&s, "GET", "/read", "", "").1, "null");
+    assert_eq!(cookie_call(&s, "GET", "/read", "novalue", "").1, "null");
+    let mut out = Vec::new();
+    s.handle("GET", "/read", b"", b"GET /read HTTP/1.1\r\nhost: x\r\n\r\n", &mut out);
+    assert_eq!(String::from_utf8(out).unwrap(), "null", "no cookie header at all");
+}
+
+#[test]
+fn setcookie_writes_a_hardened_header() {
+    let s = Server::new(compile(COOKIE_SRC, None).unwrap()).unwrap();
+    let (status, body, set) = cookie_call(&s, "POST", "/set", "", r#"{"token":"abc123"}"#);
+    assert_eq!((status, body.as_str()), (201, "abc123"), "the value flows through");
+    assert_eq!(set, "Set-Cookie: session=abc123; Path=/; HttpOnly; SameSite=Lax\r\n");
+
+    let (_, body, set) = cookie_call(&s, "POST", "/clear", "", "");
+    assert!(set.contains("Max-Age=0"), "an empty value expires the cookie: {set}");
+    assert!(body.contains("gone"), "the rest of the expression still runs");
+
+    assert_eq!(cookie_call(&s, "POST", "/odd", "", "").2, "", "a bad cookie name sets nothing");
+}
+
+#[test]
+fn a_cookie_value_cannot_forge_a_header() {
+    let s = Server::new(compile(COOKIE_SRC, None).unwrap()).unwrap();
+    let body = r#"{"token":"a\r\nX-Admin: yes\r\nb"}"#;
+    assert_eq!(cookie_call(&s, "POST", "/injected", "", body).2, "", "crlf must set nothing");
+    for bad in [r#"a; Domain=evil.test"#, "a b", "a=b", "a,b", "a\"b"] {
+        let body = format!(r#"{{"token":"{bad}"}}"#);
+        let set = cookie_call(&s, "POST", "/injected", "", &body).2;
+        assert_eq!(set, "", "a value velo cannot write verbatim must set nothing: {bad:?}");
+    }
+    let set = cookie_call(&s, "POST", "/injected", "", r#"{"token":"ok.value-9_~"}"#).2;
+    assert!(set.starts_with("Set-Cookie: session=ok.value-9_~;"), "{set:?}");
+}
+
+#[test]
+fn cookies_and_headers_are_read_from_the_same_request() {
+    let s = Server::new(compile(COOKIE_SRC, None).unwrap()).unwrap();
+    let raw = b"GET /both HTTP/1.1\r\nhost: x\r\ncookie: session=c1\r\nx-token: h1\r\n\r\n";
+    let mut out = Vec::new();
+    s.handle("GET", "/both", b"", raw, &mut out);
+    assert_eq!(String::from_utf8(out).unwrap(), r#"{"c":"c1","h":"h1"}"#);
 }

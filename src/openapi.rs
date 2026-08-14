@@ -83,7 +83,11 @@ fn error_codes(r: &Route) -> Vec<u16> {
 }
 
 fn parameters(out: &mut Vec<u8>, r: &Route) {
-    if r.params.is_empty() && r.query_fields.is_empty() && r.header_fields.is_empty() {
+    if r.params.is_empty()
+        && r.query_fields.is_empty()
+        && r.header_fields.is_empty()
+        && r.cookie_fields.is_empty()
+    {
         return;
     }
     out.extend_from_slice(b",\"parameters\":[");
@@ -96,6 +100,9 @@ fn parameters(out: &mut Vec<u8>, r: &Route) {
     }
     for name in &r.header_fields {
         parameter(out, &mut first, &name.replace('_', "-"), "header", false);
+    }
+    for name in &r.cookie_fields {
+        parameter(out, &mut first, name, "cookie", false);
     }
     out.push(b']');
 }

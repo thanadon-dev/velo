@@ -1,5 +1,6 @@
 use crate::store::{Agg, Cmp, Collection};
 use crate::value::Value;
+use std::cell::RefCell;
 use std::sync::Arc;
 
 pub const MAX_PARAMS: usize = 8;
@@ -22,6 +23,7 @@ pub struct Ctx<'a> {
     pub query_raw: &'a str,
     pub header: Value,
     pub header_raw: &'a [u8],
+    pub cookies: RefCell<Vec<u8>>,
 }
 
 impl<'a> Default for Ctx<'a> {
@@ -34,6 +36,7 @@ impl<'a> Default for Ctx<'a> {
             query_raw: "",
             header: Value::Null,
             header_raw: &[],
+            cookies: RefCell::new(Vec::new()),
         }
     }
 }
@@ -56,6 +59,7 @@ pub enum Expr {
     QueryField(Arc<str>),
     Header,
     HeaderField(Arc<str>),
+    CookieField(Arc<str>),
     Field(Box<Expr>, Arc<str>),
     Object(Vec<(Arc<str>, Expr)>),
     Array(Vec<Expr>),
@@ -94,6 +98,7 @@ pub enum Builtin {
     Hash,
     Password,
     Verify,
+    SetCookie,
 }
 
 pub enum Stage {
@@ -182,6 +187,7 @@ impl Expr {
             Expr::QueryField(name) => Ok(query_value(c.query_raw, name)),
             Expr::Header => Ok(c.header.clone()),
             Expr::HeaderField(name) => Ok(crate::http::header_value(c.header_raw, name)),
+            Expr::CookieField(name) => Ok(crate::http::cookie_value(c.header_raw, name)),
             Expr::Field(base, key) => Ok(base.eval(c)?.get(key)),
             Expr::Object(fields) => {
                 let mut out = Vec::with_capacity(fields.len());
@@ -218,6 +224,16 @@ impl Expr {
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
                     vals.push(a.eval(c)?);
+                }
+                if *f == Builtin::SetCookie {
+                    let value = vals.pop().unwrap_or(Value::Null);
+                    let name = vals.pop().unwrap_or(Value::Null);
+                    crate::http::set_cookie(
+                        &mut c.cookies.borrow_mut(),
+                        &name.as_key(),
+                        &value.as_key(),
+                    );
+                    return Ok(value);
                 }
                 Ok(call_builtin(*f, &vals))
             }
@@ -452,6 +468,7 @@ pub fn call_builtin(f: Builtin, args: &[Value]) -> Value {
         Builtin::Password => {
             Value::Str(Arc::from(crate::crypto::password(&args[0].as_key()).as_str()))
         }
+        Builtin::SetCookie => args[1].clone(),
         Builtin::Verify => Value::Bool(match &args[1] {
             Value::Str(stored) => crate::crypto::verify(&args[0].as_key(), stored),
             _ => false,

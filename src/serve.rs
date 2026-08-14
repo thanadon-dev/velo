@@ -195,18 +195,18 @@ fn write_head(
     keep_alive: bool,
     extra: &[u8],
 ) {
-    write_head_tagged(out, status, ct, len, keep_alive, extra, None)
+    write_head_tagged(out, status, ct, len, Trailer { keep_alive, extra, cookies: &[], etag: None })
 }
 
-fn write_head_tagged(
-    out: &mut Vec<u8>,
-    status: u16,
-    ct: Ctype,
-    len: usize,
+struct Trailer<'a> {
     keep_alive: bool,
-    extra: &[u8],
+    extra: &'a [u8],
+    cookies: &'a [u8],
     etag: Option<u64>,
-) {
+}
+
+fn write_head_tagged(out: &mut Vec<u8>, status: u16, ct: Ctype, len: usize, t: Trailer) {
+    let Trailer { keep_alive, extra, cookies, etag } = t;
     out.extend_from_slice(b"HTTP/1.1 ");
     write_i64(out, status as i64);
     out.push(b' ');
@@ -218,6 +218,7 @@ fn write_head_tagged(
             b"\r\nConnection: close\r\n".as_slice()
         });
         out.extend_from_slice(extra);
+        out.extend_from_slice(cookies);
         out.extend_from_slice(b"\r\n");
         return;
     }
@@ -231,6 +232,7 @@ fn write_head_tagged(
         b"\r\nConnection: close\r\n".as_slice()
     });
     out.extend_from_slice(extra);
+    out.extend_from_slice(cookies);
     if let Some(tag) = etag {
         out.extend_from_slice(b"ETag: \"");
         out.extend_from_slice(format!("{tag:x}").as_bytes());
@@ -246,6 +248,7 @@ struct Conn {
     out: Vec<u8>,
     wpos: usize,
     body: Vec<u8>,
+    cookies: Vec<u8>,
     closing: bool,
     want_out: bool,
     continued: bool,
@@ -264,6 +267,7 @@ impl Conn {
             start: 0,
             out: Vec::with_capacity(READ_BUF),
             wpos: 0,
+            cookies: Vec::new(),
             body: Vec::with_capacity(512),
             closing: false,
             want_out: false,
@@ -390,11 +394,19 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
             }
         }
         c.body.clear();
+        c.cookies.clear();
         let mut body = std::mem::take(&mut c.body);
+        let mut cookies = std::mem::take(&mut c.cookies);
         let timed = srv.metrics_path.is_some() || srv.log;
         let started = timed.then(Instant::now);
-        let (status, ct, const_etag, route) =
-            srv.handle_full(method, path, &req[head.head_end..], &req[..head.head_end], &mut body);
+        let (status, ct, const_etag, route) = srv.handle_full(
+            method,
+            path,
+            &req[head.head_end..],
+            &req[..head.head_end],
+            &mut body,
+            &mut cookies,
+        );
         let micros = started.map(|t0| t0.elapsed().as_micros() as u64).unwrap_or(0);
         if srv.metrics_path.is_some() {
             srv.record(micros, body.len());
@@ -410,14 +422,17 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
             None
         };
         if tag.is_some() && tag == head.none_match {
-            write_head_tagged(&mut c.out, 304, ct, 0, keep_alive, headers, tag);
+            let t = Trailer { keep_alive, extra: headers, cookies: &cookies, etag: tag };
+            write_head_tagged(&mut c.out, 304, ct, 0, t);
         } else {
-            write_head_tagged(&mut c.out, status, ct, body.len(), keep_alive, headers, tag);
+            let t = Trailer { keep_alive, extra: headers, cookies: &cookies, etag: tag };
+            write_head_tagged(&mut c.out, status, ct, body.len(), t);
             if !head.head_only && !empty_status(status) {
                 c.out.extend_from_slice(&body);
             }
         }
         c.body = body;
+        c.cookies = cookies;
         c.start += need;
         c.scanned = 0;
         c.served = true;

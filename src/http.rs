@@ -149,7 +149,9 @@ impl Server {
         raw_headers: &[u8],
         out: &mut Vec<u8>,
     ) -> (u16, Ctype) {
-        let (status, ctype, _, _) = self.handle_full(method, path, raw_body, raw_headers, out);
+        let mut cookies = Vec::new();
+        let (status, ctype, _, _) =
+            self.handle_full(method, path, raw_body, raw_headers, out, &mut cookies);
         (status, ctype)
     }
 
@@ -160,6 +162,22 @@ impl Server {
         raw_body: &[u8],
         raw_headers: &[u8],
         out: &mut Vec<u8>,
+        cookies: &mut Vec<u8>,
+    ) -> (u16, Ctype, Option<u64>, Option<usize>) {
+        let mut ctx = Ctx::default();
+        let answer = self.run(method, path, raw_body, raw_headers, out, &mut ctx);
+        cookies.extend_from_slice(&ctx.cookies.borrow());
+        answer
+    }
+
+    fn run<'a>(
+        &self,
+        method: &str,
+        path: &'a str,
+        raw_body: &'a [u8],
+        raw_headers: &'a [u8],
+        out: &mut Vec<u8>,
+        ctx: &mut Ctx<'a>,
     ) -> (u16, Ctype, Option<u64>, Option<usize>) {
         let (path, query) = match path.find('?') {
             Some(i) => (&path[..i], &path[i + 1..]),
@@ -173,10 +191,9 @@ impl Server {
         let Some(m) = Method::parse(method) else {
             return self.fail(None, Err_ { status: 405, msg: "method not allowed" }, out);
         };
-        let mut ctx = Ctx::default();
-        let found = self.router.lookup(m, path, &mut ctx).or_else(|| {
+        let found = self.router.lookup(m, path, ctx).or_else(|| {
             if m == Method::Head {
-                self.router.lookup(Method::Get, path, &mut ctx)
+                self.router.lookup(Method::Get, path, ctx)
             } else {
                 None
             }
@@ -211,7 +228,7 @@ impl Server {
             }
         }
         if let Some(g) = &rt.guard {
-            match g.eval(&ctx) {
+            match g.eval(ctx) {
                 Ok(v) if crate::parser::truthy(&v) => {}
                 _ => {
                     let msg = if rt.guard_status == 400 { "invalid body" } else { "unauthorized" };
@@ -225,7 +242,7 @@ impl Server {
         }
         if rt.expr.renders_json() {
             let mark = out.len();
-            return match rt.expr.write_json(&ctx, out) {
+            return match rt.expr.write_json(ctx, out) {
                 Ok(()) => (rt.status, JSON, None, Some(idx)),
                 Err(e) => {
                     out.truncate(mark);
@@ -233,7 +250,7 @@ impl Server {
                 }
             };
         }
-        match rt.expr.eval(&ctx) {
+        match rt.expr.eval(ctx) {
             Ok(Value::Str(s)) => {
                 out.extend_from_slice(s.as_bytes());
                 (rt.status, TEXT, None, Some(idx))
@@ -428,6 +445,51 @@ pub fn header_value(raw: &[u8], name: &str) -> Value {
         }
     }
     Value::Null
+}
+
+pub fn cookie_value(raw: &[u8], name: &str) -> Value {
+    let Value::Str(jar) = header_value(raw, "cookie") else { return Value::Null };
+    for part in jar.split(';') {
+        let part = part.trim_start();
+        let Some(eq) = part.find('=') else { continue };
+        if part[..eq].trim_end() != name {
+            continue;
+        }
+        let value = part[eq + 1..].trim();
+        let value = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(value);
+        return Value::str(value);
+    }
+    Value::Null
+}
+
+pub fn set_cookie(out: &mut Vec<u8>, name: &str, value: &str) {
+    if name.is_empty() || !name.bytes().all(cookie_char) {
+        return;
+    }
+    if !value.bytes().all(cookie_char) {
+        return;
+    }
+    out.extend_from_slice(b"Set-Cookie: ");
+    out.extend_from_slice(name.as_bytes());
+    out.push(b'=');
+    out.extend_from_slice(value.as_bytes());
+    out.extend_from_slice(b"; Path=/; HttpOnly; SameSite=Lax");
+    if cookie_secure() {
+        out.extend_from_slice(b"; Secure");
+    }
+    if value.is_empty() {
+        out.extend_from_slice(b"; Max-Age=0");
+    }
+    out.extend_from_slice(b"\r\n");
+}
+
+fn cookie_char(b: u8) -> bool {
+    b.is_ascii_graphic() && !b"=;,\"\\".contains(&b)
+}
+
+fn cookie_secure() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VELO_COOKIE_SECURE").is_ok_and(|v| v != "0"))
 }
 
 fn header_name_eq(raw: &[u8], want: &str) -> bool {

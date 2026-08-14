@@ -24,6 +24,7 @@ pub struct Route {
     pub header_obj: bool,
     pub query_fields: Vec<String>,
     pub header_fields: Vec<String>,
+    pub cookie_fields: Vec<String>,
     pub guard: Option<Expr>,
     pub guard_status: u16,
     pub line: usize,
@@ -105,6 +106,7 @@ pub fn compile_in(
         header_obj: false,
         query_fields: Vec::new(),
         header_fields: Vec::new(),
+        cookie_fields: Vec::new(),
         base: base.to_path_buf(),
         file_ctype: None,
         assets: Vec::new(),
@@ -180,6 +182,7 @@ struct Parser<'a> {
     header_obj: bool,
     query_fields: Vec<String>,
     header_fields: Vec<String>,
+    cookie_fields: Vec<String>,
     base: std::path::PathBuf,
     file_ctype: Option<crate::http::Ctype>,
     assets: Vec<std::path::PathBuf>,
@@ -230,6 +233,7 @@ impl<'a> Parser<'a> {
         self.header_obj = false;
         self.query_fields.clear();
         self.header_fields.clear();
+        self.cookie_fields.clear();
         self.file_ctype = None;
         let expr = self.expr()?;
         let mut status = if method == Method::Post { 201 } else { 200 };
@@ -285,6 +289,7 @@ impl<'a> Parser<'a> {
             source: None,
             query_fields: std::mem::take(&mut self.query_fields),
             header_fields: std::mem::take(&mut self.header_fields),
+            cookie_fields: std::mem::take(&mut self.cookie_fields),
             guard,
             guard_status,
             line,
@@ -458,6 +463,18 @@ impl<'a> Parser<'a> {
                 self.query_obj = true;
                 return Ok(e);
             }
+            "cookie" => {
+                self.pure = false;
+                self.header = true;
+                let e = self.fields(Expr::Header)?;
+                if let Expr::Field(base, name) = &e {
+                    if matches!(**base, Expr::Header) {
+                        remember(&mut self.cookie_fields, name);
+                        return Ok(Expr::CookieField(name.clone()));
+                    }
+                }
+                return Err(format!("line {}:{}: cookie needs a name", head.line, head.col));
+            }
             "header" => {
                 self.pure = false;
                 self.header = true;
@@ -513,6 +530,7 @@ impl<'a> Parser<'a> {
                 "hash" => Builtin::Hash,
                 "password" => Builtin::Password,
                 "verify" => Builtin::Verify,
+                "setcookie" => Builtin::SetCookie,
                 other => {
                     return Err(format!(
                         "line {}:{}: unknown function {other}()",
@@ -531,7 +549,7 @@ impl<'a> Parser<'a> {
             self.advance()?;
             let arity = match f {
                 Builtin::Openapi | Builtin::Now | Builtin::Uuid => 0,
-                Builtin::Default | Builtin::Verify => 2,
+                Builtin::Default | Builtin::Verify | Builtin::SetCookie => 2,
                 _ => 1,
             };
             if args.len() != arity {
@@ -551,6 +569,7 @@ impl<'a> Parser<'a> {
                     | Builtin::Date
                     | Builtin::Password
                     | Builtin::Verify
+                    | Builtin::SetCookie
             ) {
                 self.pure = false;
             }

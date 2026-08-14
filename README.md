@@ -1,6 +1,6 @@
 # Velo
 
-**v1.9.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.10.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -85,6 +85,7 @@ Expressions:
 | request body | `body`, `body.name` | parsed only if the route mentions it; JSON, or form-encoded as a fallback |
 | query string | `query.limit` | read straight from the request, percent-decoded; naming a field costs one scan, not a parse of the whole string |
 | request header | `header.x_team` | lowercased, `-` written as `_`, read straight from the request; the first header of that name wins |
+| request cookie | `cookie.session` | one cookie by name, read straight from the `Cookie` header; `null` when it is not there |
 | store call | `db.users.find(id)` | see below |
 | function call | `now()`, `uuid()`, `len(x)`, `env("PORT")` | see below |
 | arithmetic | `query.page + 1`, `body.price * body.qty`, `(a + b) * 2` | `+` on two strings concatenates |
@@ -164,10 +165,11 @@ Built-in functions:
 | `hash(x)` | SHA-256 of the text, lowercase hex |
 | `password(x)` | a salted PBKDF2-HMAC-SHA256 digest of the text, safe to store |
 | `verify(x, stored)` | whether `x` is the password behind `stored` |
+| `setcookie(name, x)` | sets a hardened `Set-Cookie` on the response and returns `x` |
 | `openapi()` | this API's OpenAPI 3.0 document, rendered once at compile time |
 | `file("page.html")` | the file's contents, read at compile time, served with a content type from its extension |
 
-Everything but `now()`, `uuid()`, `date()`, `password()`, `verify()` and `openapi()` is folded at compile time when its arguments are constant, so `upper("velo")` costs nothing at runtime.
+Everything but `now()`, `uuid()`, `date()`, `password()`, `verify()`, `setcookie()` and `openapi()` is folded at compile time when its arguments are constant, so `upper("velo")` costs nothing at runtime.
 
 ```velo
 GET  /users      => db.users.page(default(query.offset, 0), default(query.limit, 20))
@@ -222,6 +224,18 @@ DELETE /logout => db.sessions.delete(header.x_token) : 204 when db.sessions.wher
 ```
 
 The work factor is the point: a login costs one full PBKDF2, which is 25 req/s at the default 100 000 rounds over four connections on the 4-core box below, and that slowness is what makes a stolen digest expensive to crack. Nothing else pays it. Checking the session token on every request afterwards is an ordinary indexed lookup, in the same band as any other guarded route.
+
+In a browser, hand the token out as a cookie instead of a header. `setcookie(name, value)` writes the `Set-Cookie` and returns `value`, so the same expression that generates a token both stores it and sends it:
+
+```velo
+POST /login  => db.sessions.create({ id: setcookie("session", uuid()), user: lower(body.email) }).user when verify(body.pass, db.users.find(lower(body.email)).pass) else 401
+GET  /me     => db.sessions.find(cookie.session).user when db.sessions.where("id", cookie.session).count()
+DELETE /logout => [db.sessions.delete(cookie.session), setcookie("session", "")] : 204 when db.sessions.where("id", cookie.session).count()
+```
+
+Every cookie is written `Path=/; HttpOnly; SameSite=Lax`, and `VELO_COOKIE_SECURE=1` adds `Secure` for a TLS proxy. There are no per-call options: a cookie velo writes cannot be read by JavaScript and cannot be sent cross-site. An empty value expires it, which is how logout clears one. A name or value velo cannot write verbatim, because it holds a space, a semicolon, a quote or a control character, sets no cookie at all rather than a mangled one, so a token can never carry a forged header or a smuggled `Domain` into the response. An array evaluates left to right, which is how logout deletes the row and clears the cookie in one route.
+
+`examples/auth.velo` accepts the token from either place with `default(cookie.session, header.x_token)`, so the same API serves a browser and a script.
 
 A session is a row like any other, so a token is checked with a `where(...).count()` guard, which the equality index answers without a scan, and expiry is a comparison against `now()`. `uuid()` draws from a SHA-256 generator seeded from `/dev/urandom`, so a token cannot be guessed from earlier ones. Never end a route on the row that holds the digest: `select` the fields a client may see, as `examples/auth.velo` does.
 
@@ -410,6 +424,7 @@ Env knobs:
 | `VELO_LOCAL_CACHE_BYTES` | 1 MB | per-worker budget for its thread-local view of those results |
 | `VELO_RATE` | off | requests per second allowed per client; over it answers 429 |
 | `VELO_REAL_IP_HEADER` | off | header holding the client IP behind a proxy, e.g. `CF-Connecting-IP`; without it the socket address is used |
+| `VELO_COOKIE_SECURE` | off | add `Secure` to every cookie `setcookie()` writes; set it when a TLS proxy sits in front |
 | `VELO_ETAG` | off | send `ETag` on 200 `GET`/`HEAD` responses and answer 304 to a matching `If-None-Match`; constant routes carry a tag computed at compile time |
 
 ## Benchmarks
@@ -540,7 +555,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-119 tests (92 integration + 14 CLI + 6 fuzz + 7 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+123 tests (96 integration + 14 CLI + 6 fuzz + 7 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -599,6 +614,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.10.0** — cookies, so the auth flow shipped in 1.9.0 works in a browser and not only from a script. `cookie.name` reads one cookie straight from the request, the way `header.x` already did, and `setcookie(name, value)` writes a `Set-Cookie` and returns the value, so one expression can generate a token, store it in the session row and send it to the browser. Cookies are hardened with no options to get wrong: `Path=/; HttpOnly; SameSite=Lax`, plus `Secure` under `VELO_COOKIE_SECURE`. A value that cannot be written verbatim sets no cookie rather than a mangled one, so nothing a client sends can forge a header or smuggle an attribute. `velo openapi` reports cookie parameters alongside path, query and header ones.
 
 **v1.9.0** — real auth. `password(text)` and `verify(text, stored)` hash and check a password with PBKDF2-HMAC-SHA256 and a fresh salt, `hash(text)` gives plain SHA-256, and `uuid()` now draws from a SHA-256 generator seeded from `/dev/urandom` instead of a 64-bit xorshift, so a session token cannot be predicted from one that was handed out earlier. Two bugs found while testing the flow: a cached chain result such as `where(...).count()` read as truthy in a guard whatever its value, so `when db.sessions.where("id", header.x_token).count()` admitted everyone; and a guard that hit an error answered with that error, so a login guard returned `404` for an unknown account and `401` for a wrong password, which told an attacker which accounts exist. Both are fixed. All of it is still zero dependencies.
 
