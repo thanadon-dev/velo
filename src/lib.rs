@@ -2,6 +2,7 @@
 compile_error!("velo's event loop is built on epoll, so it only builds on Linux");
 
 pub mod ast;
+pub(crate) mod crypto;
 pub(crate) mod date;
 pub(crate) mod epoll;
 pub mod http;

@@ -91,6 +91,9 @@ pub enum Builtin {
     Lower,
     Upper,
     Trim,
+    Hash,
+    Password,
+    Verify,
 }
 
 pub enum Stage {
@@ -381,6 +384,22 @@ pub fn truthy(v: &Value) -> bool {
         Value::Bool(b) => *b,
         Value::Num(n) => *n != 0.0,
         Value::Str(s) => !s.is_empty(),
+        Value::Raw(json) => truthy_json(json),
+        _ => true,
+    }
+}
+
+fn truthy_json(json: &[u8]) -> bool {
+    match json.first() {
+        None => false,
+        Some(b'n') => false,
+        Some(b'f') => false,
+        Some(b'"') => json.len() > 2,
+        Some(c) if c.is_ascii_digit() || *c == b'-' => std::str::from_utf8(json)
+            .ok()
+            .and_then(|t| t.parse::<f64>().ok())
+            .map(|n| n != 0.0)
+            .unwrap_or(true),
         _ => true,
     }
 }
@@ -427,6 +446,16 @@ pub fn call_builtin(f: Builtin, args: &[Value]) -> Value {
         Builtin::Lower => text_of(&args[0], |t| t.to_lowercase()),
         Builtin::Upper => text_of(&args[0], |t| t.to_uppercase()),
         Builtin::Trim => text_of(&args[0], |t| t.trim().to_string()),
+        Builtin::Hash => Value::Str(Arc::from(
+            crate::crypto::hex(&crate::crypto::sha256(args[0].as_key().as_bytes())).as_str(),
+        )),
+        Builtin::Password => {
+            Value::Str(Arc::from(crate::crypto::password(&args[0].as_key()).as_str()))
+        }
+        Builtin::Verify => Value::Bool(match &args[1] {
+            Value::Str(stored) => crate::crypto::verify(&args[0].as_key(), stored),
+            _ => false,
+        }),
     }
 }
 
@@ -456,36 +485,7 @@ fn uuid_v4() -> String {
 }
 
 fn fill_random(out: &mut [u8]) {
-    use std::cell::Cell;
-    thread_local! {
-        static STATE: Cell<u64> = const { Cell::new(0) };
-    }
-    STATE.with(|st| {
-        let mut x = st.get();
-        if x == 0 {
-            let mut seed = [0u8; 8];
-            if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-                use std::io::Read;
-                let _ = f.read_exact(&mut seed);
-            }
-            x = u64::from_ne_bytes(seed)
-                ^ std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(1);
-            if x == 0 {
-                x = 0x9e3779b97f4a7c15;
-            }
-        }
-        for chunk in out.chunks_mut(8) {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            let bytes = x.to_ne_bytes();
-            chunk.copy_from_slice(&bytes[..chunk.len()]);
-        }
-        st.set(x);
-    });
+    crate::crypto::random(out);
 }
 
 fn num_arg(v: &Value) -> usize {

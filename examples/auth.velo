@@ -1,0 +1,9 @@
+POST /signup => db.users.create({ id: lower(trim(body.email)), email: lower(trim(body.email)), pass: password(body.pass) }).email when body.email and body.pass else 400
+
+POST /login  => db.sessions.create({ id: uuid(), user: lower(trim(body.email)), at: now(), until: now() + 86400000 }) when verify(body.pass, db.users.find(lower(trim(body.email))).pass) else 401
+
+GET  /me     => db.users.find(db.sessions.find(header.x_token).user).email when db.sessions.where("id", header.x_token).count() and db.sessions.find(header.x_token).until > now()
+
+GET  /admin  => db.users.select("id", "email") when header.authorization == env("ADMIN_TOKEN") else 403
+
+DELETE /logout => db.sessions.delete(header.x_token) : 204 when db.sessions.where("id", header.x_token).count()

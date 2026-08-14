@@ -525,13 +525,15 @@ GET /d2 => db.x.search(\"k\", \"v\").count()\n\
 GET /d3 => db.x.where(\"k\", \"v\").sum(\"n\")\n\
 GET /d4 => db.x.where(\"k\", \"v\").order(\"n\").first()\n\
 GET /d5 => db.x.where(\"n\", \">=\", 10).where(\"n\", \"<\", 100).count()\n\
-GET /d6 => db.x.where(\"k\", \"v\").select(\"id\", \"k\")\n";
+GET /d6 => db.x.where(\"k\", \"v\").select(\"id\", \"k\")\n\
+POST /e1 => db.x.create({ p: password(body.pass), fp: hash(body.pass) })\n\
+POST /e2 => \"in\" when verify(body.pass, db.x.find(body.user).p) else 401\n";
 
     let path = tmp("everything.velo");
     write(&path, program);
     let out = Command::new(BIN).arg("check").arg(&path).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("27 routes"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("29 routes"));
     let _ = std::fs::remove_file(&path);
 }
 

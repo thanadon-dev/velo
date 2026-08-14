@@ -510,6 +510,9 @@ impl<'a> Parser<'a> {
                 "lower" => Builtin::Lower,
                 "upper" => Builtin::Upper,
                 "trim" => Builtin::Trim,
+                "hash" => Builtin::Hash,
+                "password" => Builtin::Password,
+                "verify" => Builtin::Verify,
                 other => {
                     return Err(format!(
                         "line {}:{}: unknown function {other}()",
@@ -528,7 +531,7 @@ impl<'a> Parser<'a> {
             self.advance()?;
             let arity = match f {
                 Builtin::Openapi | Builtin::Now | Builtin::Uuid => 0,
-                Builtin::Default => 2,
+                Builtin::Default | Builtin::Verify => 2,
                 _ => 1,
             };
             if args.len() != arity {
@@ -540,7 +543,15 @@ impl<'a> Parser<'a> {
                     args.len()
                 ));
             }
-            if matches!(f, Builtin::Openapi | Builtin::Now | Builtin::Uuid | Builtin::Date) {
+            if matches!(
+                f,
+                Builtin::Openapi
+                    | Builtin::Now
+                    | Builtin::Uuid
+                    | Builtin::Date
+                    | Builtin::Password
+                    | Builtin::Verify
+            ) {
                 self.pure = false;
             }
             return self.fields(Expr::Call(f, args));

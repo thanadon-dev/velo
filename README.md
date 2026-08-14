@@ -1,6 +1,6 @@
 # Velo
 
-**v1.8.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.9.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -161,10 +161,13 @@ Built-in functions:
 | `default(x, fallback)` | `x`, unless it is `null` or an empty string |
 | `lower(x)` / `upper(x)` | text in one case, `null` stays `null` |
 | `trim(x)` | text without surrounding whitespace |
+| `hash(x)` | SHA-256 of the text, lowercase hex |
+| `password(x)` | a salted PBKDF2-HMAC-SHA256 digest of the text, safe to store |
+| `verify(x, stored)` | whether `x` is the password behind `stored` |
 | `openapi()` | this API's OpenAPI 3.0 document, rendered once at compile time |
 | `file("page.html")` | the file's contents, read at compile time, served with a content type from its extension |
 
-Everything but `now()`, `uuid()`, `date()` and `openapi()` is folded at compile time when its arguments are constant, so `upper("velo")` costs nothing at runtime.
+Everything but `now()`, `uuid()`, `date()`, `password()`, `verify()` and `openapi()` is folded at compile time when its arguments are constant, so `upper("velo")` costs nothing at runtime.
 
 ```velo
 GET  /users      => db.users.page(default(query.offset, 0), default(query.limit, 20))
@@ -205,7 +208,26 @@ GET  /users/page => db.users.page(query.offset, query.limit) when query.limit < 
 GET  /mine       => db.orders.where("customer", header.x_customer) when header.x_customer and header.x_key else 400
 ```
 
-`examples/todo.velo` is a complete todo API using uuid keys, timestamps, sorting, and filters. `examples/shop/` splits a larger API over four files with `include`: a catalog with search, orders keyed by a customer header, and an admin section behind a token guard.
+A guard that fails answers the guard status, and so does a guard that hits an error. `when verify(body.pass, db.users.find(body.email).pass) else 401` answers `401` whether the password was wrong or the account does not exist, so a login route cannot be used to enumerate accounts.
+
+## Auth
+
+`password(text)` turns a password into something safe to keep, and `verify(text, stored)` checks one against it. The digest is PBKDF2-HMAC-SHA256 with a fresh 16-byte salt per call, stored as `pbkdf2$<rounds>$<salt>$<digest>`; `VELO_KDF_ROUNDS` sets the work factor and defaults to 100 000. Verification compares in constant time, and the same password hashed twice gives two different strings.
+
+```velo
+POST /signup => db.users.create({ id: lower(body.email), email: lower(body.email), pass: password(body.pass) }).email when body.email and body.pass else 400
+POST /login  => db.sessions.create({ id: uuid(), user: lower(body.email), until: now() + 86400000 }) when verify(body.pass, db.users.find(lower(body.email)).pass) else 401
+GET  /me     => db.sessions.find(header.x_token).user when db.sessions.where("id", header.x_token).count() and db.sessions.find(header.x_token).until > now()
+DELETE /logout => db.sessions.delete(header.x_token) : 204 when db.sessions.where("id", header.x_token).count()
+```
+
+The work factor is the point: a login costs one full PBKDF2, which is 25 req/s at the default 100 000 rounds over four connections on the 4-core box below, and that slowness is what makes a stolen digest expensive to crack. Nothing else pays it. Checking the session token on every request afterwards is an ordinary indexed lookup, in the same band as any other guarded route.
+
+A session is a row like any other, so a token is checked with a `where(...).count()` guard, which the equality index answers without a scan, and expiry is a comparison against `now()`. `uuid()` draws from a SHA-256 generator seeded from `/dev/urandom`, so a token cannot be guessed from earlier ones. Never end a route on the row that holds the digest: `select` the fields a client may see, as `examples/auth.velo` does.
+
+`hash(x)` is plain SHA-256 in lowercase hex, for fingerprints, cache keys, or storing an API key you only ever compare. It is not a password hash; use `password()` for those. With a constant argument it folds at compile time.
+
+`examples/auth.velo` is a complete signup, login, session and logout API. `examples/todo.velo` is a complete todo API using uuid keys, timestamps, sorting, and filters. `examples/shop/` splits a larger API over four files with `include`: a catalog with search, orders keyed by a customer header, and an admin section behind a token guard.
 
 ## OpenAPI
 
@@ -518,7 +540,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-112 tests (88 integration + 14 CLI + 6 fuzz + 4 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, sorting, compile-error formatting, `Date` formatting, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+119 tests (92 integration + 14 CLI + 6 fuzz + 7 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -563,6 +585,7 @@ velo: app.velo: line 2:15: unknown identifier "user"
 | `src/socket.rs` | TCP and Unix listeners behind one type |
 | `src/value.rs` | `Value`, JSON reader and writer |
 | `src/date.rs` | `Date` header and ISO timestamp formatting (internal) |
+| `src/crypto.rs` | SHA-256, HMAC, PBKDF2, password hashing, random bytes (internal) |
 | `src/openapi.rs` | OpenAPI 3.0 document generation |
 | `src/main.rs` | CLI |
 | `examples/embed.rs` | using velo as a library |
@@ -576,6 +599,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.9.0** — real auth. `password(text)` and `verify(text, stored)` hash and check a password with PBKDF2-HMAC-SHA256 and a fresh salt, `hash(text)` gives plain SHA-256, and `uuid()` now draws from a SHA-256 generator seeded from `/dev/urandom` instead of a 64-bit xorshift, so a session token cannot be predicted from one that was handed out earlier. Two bugs found while testing the flow: a cached chain result such as `where(...).count()` read as truthy in a guard whatever its value, so `when db.sessions.where("id", header.x_token).count()` admitted everyone; and a guard that hit an error answered with that error, so a login guard returned `404` for an unknown account and `401` for a wrong password, which told an attacker which accounts exist. Both are fixed. All of it is still zero dependencies.
 
 **v1.8.0** — a chain that starts with `where(field, value)` now looks the value up in an index instead of scanning every row. The index is built on first use, appended to by inserts, and dropped by every other write, so it can never describe rows that have moved. Measured on 20 000 rows with a writer running flat out, which is the case where no cached answer survives long enough to be reused: a filtered count went from 859 to 2 445 req/s, a filter-sort-page-select chain from 2 283 to 3 758, and `first()` after a filter, the one shape that was never cached, from 87 to 3 288 req/s. The index cost 132 kB over those 20 000 rows.
 

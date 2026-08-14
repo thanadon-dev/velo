@@ -213,11 +213,10 @@ impl Server {
         if let Some(g) = &rt.guard {
             match g.eval(&ctx) {
                 Ok(v) if crate::parser::truthy(&v) => {}
-                Ok(_) => {
+                _ => {
                     let msg = if rt.guard_status == 400 { "invalid body" } else { "unauthorized" };
                     return self.fail(Some(idx), Err_ { status: rt.guard_status, msg }, out);
                 }
-                Err(e) => return self.fail(Some(idx), e, out),
             }
         }
         if let Some(k) = &rt.konst {

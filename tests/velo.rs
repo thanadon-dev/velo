@@ -1470,6 +1470,8 @@ GET  /every        => db.users.all().where("team", query.t).count()
 GET  /cards        => db.users.select("name", "score")
 GET  /roster       => db.users.where("team", query.t).order("name").select("name")
 GET  /slim         => db.users.select("name", "nope")
+GET  /gate         => "in" when db.users.where("team", query.t).count()
+GET  /gatesum      => "in" when db.users.where("team", query.t).sum("score")
 "#;
 
 fn chain_server() -> Arc<Server> {
@@ -1597,6 +1599,15 @@ fn chain_terminals() {
         r#"{"id":1,"name":"ann","team":"red","score":5}"#
     );
     assert_eq!(call(&s, "GET", "/named?t=green", "").0, 404);
+}
+
+#[test]
+fn a_guard_reads_a_counted_chain_as_a_number() {
+    let s = chain_server();
+    assert_eq!(call(&s, "GET", "/gate?t=red", "").0, 200);
+    assert_eq!(call(&s, "GET", "/gate?t=none", "").0, 401);
+    assert_eq!(call(&s, "GET", "/gatesum?t=blue", "").0, 200);
+    assert_eq!(call(&s, "GET", "/gatesum?t=none", "").0, 401);
 }
 
 #[test]
@@ -2030,4 +2041,66 @@ fn verify_chains(s: &Arc<Server>) {
     }
     let over = all.iter().filter(|r| matches!(r.get("score"), Value::Num(n) if n >= 25.0)).count();
     assert_eq!(call(s, "GET", "/high?n=25", "").1, over.to_string());
+}
+
+const AUTH_SRC: &str = r#"
+POST /signup  => db.users.create({ id: body.email, email: body.email, pass: password(body.pass) }) when body.email and body.pass else 400
+POST /login   => db.sessions.create({ id: uuid(), user: body.email }) when verify(body.pass, db.users.find(body.email).pass) else 401
+GET  /me      => db.sessions.find(header.x_token).user when db.sessions.where("id", header.x_token).count()
+GET  /fixed   => hash("velo")
+GET  /digest  => hash(query.q)
+"#;
+
+fn auth_server() -> Arc<Server> {
+    std::env::set_var("VELO_KDF_ROUNDS", "1000");
+    Server::new(compile(AUTH_SRC, None).unwrap()).unwrap()
+}
+
+fn with_token(s: &Server, token: &str) -> (u16, String) {
+    let raw = format!("GET /me HTTP/1.1\r\nhost: x\r\nx-token: {token}\r\n\r\n");
+    let mut out = Vec::new();
+    let (status, _) = s.handle("GET", "/me", b"", raw.as_bytes(), &mut out);
+    (status, String::from_utf8(out).unwrap())
+}
+
+#[test]
+fn a_password_never_lands_in_the_store_as_written() {
+    let s = auth_server();
+    let (code, stored, _) = call(&s, "POST", "/signup", r#"{"email":"a@b.c","pass":"hunter2"}"#);
+    assert_eq!(code, 201);
+    assert!(!stored.contains("hunter2"), "the plain password was stored: {stored}");
+    assert!(stored.contains("pbkdf2$1000$"), "{stored}");
+    let again = call(&s, "POST", "/signup", r#"{"email":"d@e.f","pass":"hunter2"}"#).1;
+    assert_ne!(stored, again, "the same password hashed to the same bytes twice");
+}
+
+#[test]
+fn login_admits_the_right_password_only() {
+    let s = auth_server();
+    assert_eq!(call(&s, "POST", "/signup", r#"{"email":"a@b.c","pass":"hunter2"}"#).0, 201);
+    assert_eq!(call(&s, "POST", "/signup", r#"{"email":"a@b.c"}"#).0, 400);
+    assert_eq!(call(&s, "POST", "/login", r#"{"email":"a@b.c","pass":"nope"}"#).0, 401);
+    assert_eq!(call(&s, "POST", "/login", r#"{"email":"gone@b.c","pass":"hunter2"}"#).0, 401);
+
+    let (code, session, _) = call(&s, "POST", "/login", r#"{"email":"a@b.c","pass":"hunter2"}"#);
+    assert_eq!(code, 201);
+    let token = parse_json(session.as_bytes()).unwrap().get("id").as_key();
+    assert_eq!(token.len(), 36);
+    assert_eq!(with_token(&s, &token), (200, "a@b.c".to_string()));
+    assert_eq!(with_token(&s, "00000000-0000-4000-8000-000000000000").0, 401);
+    assert_eq!(with_token(&s, "").0, 401);
+}
+
+#[test]
+fn hash_folds_when_its_input_is_constant() {
+    let prog = compile(AUTH_SRC, None).unwrap();
+    let folded = prog.routes.iter().find(|r| r.pattern == "/fixed").unwrap();
+    assert_eq!(
+        folded.konst.as_deref(),
+        Some("cd1e45e8b94d27b2562ab5ae45b4bff61e2bc89d9ca4ffe117e70aa5ac8ef1eb".as_bytes())
+    );
+    let live = prog.routes.iter().find(|r| r.pattern == "/digest").unwrap();
+    assert!(live.konst.is_none());
+    let signup = prog.routes.iter().find(|r| r.pattern == "/signup").unwrap();
+    assert!(signup.konst.is_none(), "a hashed password must never be folded to a constant");
 }
