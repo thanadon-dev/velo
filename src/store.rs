@@ -85,9 +85,14 @@ struct Snapshot {
     all_json: Option<Arc<Vec<u8>>>,
     list_used: AtomicBool,
     cache: RwLock<HashMap<String, Arc<Vec<u8>>>>,
+    index: RwLock<HashMap<String, HashMap<String, Vec<u32>>>>,
     hits: AtomicU64,
     misses: AtomicU64,
 }
+
+const INDEX_MIN: usize = 512;
+const INDEX_FIELDS: usize = 8;
+const INDEX_VALUES: usize = 65_536;
 
 fn is_live(v: &Value) -> bool {
     !matches!(v, Value::Null)
@@ -100,6 +105,41 @@ impl Snapshot {
 
     fn len(&self) -> usize {
         self.rows.len() - self.holes
+    }
+
+    fn candidates(&self, field: &str, want: &str) -> Option<Vec<u32>> {
+        if self.rows.len() < INDEX_MIN {
+            return None;
+        }
+        {
+            let map = self.index.read().unwrap();
+            if let Some(by_value) = map.get(field) {
+                return Some(by_value.get(want).cloned().unwrap_or_default());
+            }
+            if map.len() >= INDEX_FIELDS {
+                return None;
+            }
+        }
+        let mut by_value: HashMap<String, Vec<u32>> = HashMap::new();
+        for (i, row) in self.rows.iter().enumerate() {
+            if is_live(row) {
+                by_value.entry(index_key(row, field)).or_default().push(i as u32);
+            }
+        }
+        let hits = by_value.get(want).cloned().unwrap_or_default();
+        if by_value.len() <= INDEX_VALUES {
+            let mut map = self.index.write().unwrap();
+            if map.len() < INDEX_FIELDS {
+                map.insert(field.to_string(), by_value);
+            }
+        }
+        Some(hits)
+    }
+
+    fn extend_index(&mut self, at: usize, row: &Value) {
+        for (field, by_value) in self.index.get_mut().unwrap().iter_mut() {
+            by_value.entry(index_key(row, field)).or_default().push(at as u32);
+        }
     }
 
     fn compact(&mut self) {
@@ -143,6 +183,7 @@ impl Snapshot {
     }
 
     fn invalidate(&mut self) {
+        self.index.get_mut().unwrap().clear();
         self.all_json = None;
         self.list_used.store(false, Ordering::Relaxed);
         self.cache.get_mut().unwrap().clear();
@@ -210,6 +251,7 @@ impl Collection {
                 all_json: None,
                 list_used: AtomicBool::new(false),
                 cache: RwLock::new(HashMap::new()),
+                index: RwLock::new(HashMap::new()),
                 hits: AtomicU64::new(0),
                 misses: AtomicU64::new(0),
             }),
@@ -245,6 +287,17 @@ impl Collection {
         b: &str,
         build: impl FnOnce(&Rows) -> Arc<Vec<u8>>,
     ) -> Value {
+        self.derived_with(kind, a, b, |_| (), |rows, ()| build(rows))
+    }
+
+    fn derived_with<T>(
+        &self,
+        kind: &str,
+        a: &str,
+        b: &str,
+        pick: impl FnOnce(&Snapshot) -> T,
+        build: impl FnOnce(&Rows, T) -> Arc<Vec<u8>>,
+    ) -> Value {
         let version = self.version.load(Ordering::Acquire);
         let tag = self.tag();
 
@@ -260,11 +313,11 @@ impl Collection {
         let json = match shared {
             Some(json) => json,
             None => {
-                let rows = {
+                let (rows, extra) = {
                     let s = self.snap.read().unwrap();
-                    s.rows.clone()
+                    (s.rows.clone(), pick(&s))
                 };
-                let json = build(&rows);
+                let json = build(&rows, extra);
                 with_key4(&tag, kind, a, b, |key| {
                     let s = self.snap.read().unwrap();
                     if self.version.load(Ordering::Acquire) == version {
@@ -390,16 +443,28 @@ impl Collection {
 
     pub fn query(&self, stages: &[Stage]) -> Value {
         let key = chain_key(stages);
-        self.derived("q", &key, "", |rows| rows_json(&run_stages(rows, stages)))
+        self.derived_with(
+            "q",
+            &key,
+            "",
+            |s| plan_hits(s, stages),
+            |rows, hits| rows_json(&run_stages_hit(rows, stages, hits)),
+        )
     }
 
     pub fn query_count(&self, stages: &[Stage]) -> Value {
         let key = chain_key(stages);
-        self.derived("qc", &key, "", |rows| {
-            let mut out = Vec::with_capacity(12);
-            crate::value::write_i64(&mut out, run_stages(rows, stages).len() as i64);
-            Arc::new(out)
-        })
+        self.derived_with(
+            "qc",
+            &key,
+            "",
+            |s| plan_hits(s, stages),
+            |rows, hits| {
+                let mut out = Vec::with_capacity(12);
+                crate::value::write_i64(&mut out, run_stages_hit(rows, stages, hits).len() as i64);
+                Arc::new(out)
+            },
+        )
     }
 
     pub fn query_select(&self, stages: &[Stage], fields: &[String]) -> Value {
@@ -408,14 +473,24 @@ impl Collection {
             push_part(&mut key, f);
         }
         key.push_str(&chain_key(stages));
-        self.derived("qs", &key, "", |rows| selected_json(&run_stages(rows, stages), fields))
+        self.derived_with(
+            "qs",
+            &key,
+            "",
+            |s| plan_hits(s, stages),
+            |rows, hits| selected_json(&run_stages_hit(rows, stages, hits), fields),
+        )
     }
 
     pub fn query_agg(&self, stages: &[Stage], op: Agg, field: &str) -> Value {
         let key = format!("{}{}", op.name(), chain_key(stages));
-        self.derived("qa", &key, field, |rows| {
-            aggregate_over(run_stages(rows, stages).into_iter(), op, field)
-        })
+        self.derived_with(
+            "qa",
+            &key,
+            field,
+            |s| plan_hits(s, stages),
+            |rows, hits| aggregate_over(run_stages_hit(rows, stages, hits).into_iter(), op, field),
+        )
     }
 
     pub fn query_first(&self, stages: &[Stage]) -> Option<Value> {
@@ -424,7 +499,7 @@ impl Collection {
             _ => (stages, None),
         };
         let s = self.snap.read().unwrap();
-        let rows = run_stages(&s.rows, head);
+        let rows = run_stages_hit(&s.rows, head, plan_hits(&s, head));
         match pick {
             Some(field) => extreme(&rows, field),
             None => rows.first().map(|r| (*r).clone()),
@@ -458,7 +533,10 @@ impl Collection {
         s.by_id.insert(key, idx);
         let appendable = s.list_used.load(Ordering::Relaxed);
         let reuse = appendable.then(|| s.all_json.take()).flatten();
+        let keep = std::mem::take(s.index.get_mut().unwrap());
         s.invalidate();
+        *s.index.get_mut().unwrap() = keep;
+        s.extend_index(idx, &row);
         s.all_json = reuse;
         s.append_json(&row);
         s.list_used.store(false, Ordering::Relaxed);
@@ -838,8 +916,32 @@ fn chain_key(stages: &[Stage]) -> String {
     key
 }
 
+fn index_key(row: &Value, field: &str) -> String {
+    row.get_ref(field).map(|v| v.as_key()).unwrap_or_default()
+}
+
+fn plan_hits(s: &Snapshot, stages: &[Stage]) -> Option<Vec<u32>> {
+    match stages.first() {
+        Some(Stage::Where(field, Cmp::Eq, want)) => s.candidates(field, want),
+        _ => None,
+    }
+}
+
+fn run_stages_hit<'a>(rows: &'a Rows, stages: &[Stage], hits: Option<Vec<u32>>) -> Vec<&'a Value> {
+    let Some(hits) = hits else { return run_stages(rows, stages) };
+    let mut cur: Vec<&Value> =
+        hits.iter().filter_map(|&i| rows.get(i as usize)).filter(|r| is_live(r)).collect();
+    apply_stages(&mut cur, &stages[1..]);
+    cur
+}
+
 fn run_stages<'a>(rows: &'a Rows, stages: &[Stage]) -> Vec<&'a Value> {
     let mut cur: Vec<&Value> = rows.live().collect();
+    apply_stages(&mut cur, stages);
+    cur
+}
+
+fn apply_stages(cur: &mut Vec<&Value>, stages: &[Stage]) {
     for stage in stages {
         match stage {
             Stage::Where(f, op, v) => {
@@ -850,14 +952,13 @@ fn run_stages<'a>(rows: &'a Rows, stages: &[Stage]) -> Vec<&'a Value> {
                 let lower = needle.to_lowercase();
                 cur.retain(|r| field_has(r, f, &lower));
             }
-            Stage::Order(f) => sort_rows(&mut cur, f),
+            Stage::Order(f) => sort_rows(cur, f),
             Stage::Page(offset, limit) => {
                 let take = if *limit == 0 { usize::MAX } else { *limit };
-                cur = cur.into_iter().skip(*offset).take(take).collect();
+                *cur = cur.drain(..).skip(*offset).take(take).collect();
             }
         }
     }
-    cur
 }
 
 fn selected_json(rows: &[&Value], fields: &[String]) -> Arc<Vec<u8>> {

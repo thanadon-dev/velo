@@ -1487,6 +1487,85 @@ fn chain_server() -> Arc<Server> {
     s
 }
 
+const INDEX_SRC: &str = r#"
+POST   /users        => db.users.create(body)
+PUT    /users/:id    => db.users.upsert(id, body)
+DELETE /users/:id    => db.users.delete(id) : 204
+GET    /count        => db.users.where("team", query.t).count()
+GET    /rows         => db.users.where("team", query.t).select("name")
+GET    /first        => db.users.where("team", query.t).order("name").first()
+GET    /sorted       => db.users.where("team", query.t).order("-score").page(0, 3).select("name")
+GET    /narrow       => db.users.where("team", query.t).where("score", ">=", query.lo).count()
+GET    /blank        => db.users.where("nothing", "").count()
+"#;
+
+#[test]
+fn an_indexed_filter_answers_what_a_scan_would() {
+    let s = Server::new(compile(INDEX_SRC, None).unwrap()).unwrap();
+    let teams = ["red", "blue", "green"];
+    for i in 0..1500 {
+        let body = format!(
+            r#"{{"name":"u{i:04}","team":"{}","score":{}}}"#,
+            teams[i % teams.len()],
+            i % 100
+        );
+        assert_eq!(call(&s, "POST", "/users", &body).0, 201);
+    }
+    let count = |team: &str| call(&s, "GET", &format!("/count?t={team}"), "").1;
+    assert_eq!(count("red"), "500");
+    assert_eq!(count("blue"), "500");
+    assert_eq!(count("green"), "500");
+    assert_eq!(count("none"), "0");
+    assert_eq!(call(&s, "GET", "/blank", "").1, "1500");
+    assert_eq!(call(&s, "GET", "/narrow?t=red&lo=50", "").1, "250");
+    assert_eq!(names(&call(&s, "GET", "/rows?t=red", "").1).len(), 500);
+    let first = call(&s, "GET", "/first?t=blue", "").1;
+    assert!(first.contains(r#""name":"u0001""#), "{first}");
+    assert_eq!(names(&call(&s, "GET", "/sorted?t=red", "").1).len(), 3);
+
+    assert_eq!(call(&s, "POST", "/users", r#"{"name":"zz","team":"red"}"#).0, 201);
+    assert_eq!(count("red"), "501");
+    assert_eq!(count("blue"), "500");
+
+    assert_eq!(call(&s, "PUT", "/users/1", r#"{"team":"blue"}"#).0, 200);
+    assert_eq!(count("red"), "500");
+    assert_eq!(count("blue"), "501");
+
+    assert_eq!(call(&s, "DELETE", "/users/2", "").0, 204);
+    assert_eq!(count("blue"), "500");
+    assert_eq!(count("red"), "500");
+    assert_eq!(count("green"), "500");
+    assert_eq!(names(&call(&s, "GET", "/rows?t=green", "").1).len(), 500);
+}
+
+#[test]
+fn an_index_survives_many_fields_and_a_rebuild() {
+    let s = Server::new(compile(INDEX_SRC, None).unwrap()).unwrap();
+    for i in 0..900 {
+        let body = format!(r#"{{"name":"u{i:04}","team":"t{}","score":{}}}"#, i % 7, i % 5);
+        assert_eq!(call(&s, "POST", "/users", &body).0, 201);
+    }
+    let mut want = [0i64; 7];
+    for i in 0..900 {
+        want[i % 7] += 1;
+    }
+    for round in 0..3 {
+        for (t, expected) in want.iter().enumerate() {
+            let got = call(&s, "GET", &format!("/count?t=t{t}"), "").1;
+            assert_eq!(got, expected.to_string(), "round {round} team t{t}");
+        }
+        let doomed = round + 1;
+        assert_eq!(call(&s, "DELETE", &format!("/users/{doomed}"), "").0, 204);
+        want[(doomed - 1) % 7] -= 1;
+        assert_eq!(call(&s, "POST", "/users", r#"{"name":"x","team":"t0"}"#).0, 201);
+        want[0] += 1;
+    }
+    let total: i64 = (0..7)
+        .map(|t| call(&s, "GET", &format!("/count?t=t{t}"), "").1.parse::<i64>().unwrap())
+        .sum();
+    assert_eq!(total, want.iter().sum::<i64>());
+}
+
 fn names(body: &str) -> Vec<String> {
     match parse_json(body.as_bytes()).unwrap() {
         Value::Arr(rows) => rows.iter().map(|r| r.get("name").as_key()).collect(),
