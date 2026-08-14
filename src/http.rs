@@ -69,6 +69,7 @@ pub struct Server {
     pub rate: u32,
     pub real_ip_header: Option<String>,
     limiter: Vec<Mutex<RateShard>>,
+    per_route: Vec<RouteStat>,
     started: Instant,
     requests: AtomicU64,
     failures: AtomicU64,
@@ -79,9 +80,18 @@ pub struct Server {
     stop: AtomicBool,
 }
 
+#[derive(Default)]
+struct RouteStat {
+    hits: AtomicU64,
+    failures: AtomicU64,
+    micros: AtomicU64,
+    max_micros: AtomicU64,
+}
+
 impl Server {
     pub fn new(prog: Program) -> Result<Arc<Server>, String> {
         let router = Router::build(&prog.routes)?;
+        let prog_routes = prog.routes.len();
         let cors = std::env::var("VELO_CORS").ok().filter(|v| !v.is_empty());
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         Ok(Arc::new(Server {
@@ -109,6 +119,7 @@ impl Server {
                 .filter(|v| !v.is_empty())
                 .map(|v| v.to_ascii_lowercase()),
             limiter: (0..RATE_SHARDS).map(|_| Mutex::new(HashMap::default())).collect(),
+            per_route: (0..prog_routes).map(|_| RouteStat::default()).collect(),
             started: Instant::now(),
             requests: AtomicU64::new(0),
             failures: AtomicU64::new(0),
@@ -138,7 +149,7 @@ impl Server {
         raw_headers: &[u8],
         out: &mut Vec<u8>,
     ) -> (u16, Ctype) {
-        let (status, ctype, _) = self.handle_full(method, path, raw_body, raw_headers, out);
+        let (status, ctype, _, _) = self.handle_full(method, path, raw_body, raw_headers, out);
         (status, ctype)
     }
 
@@ -149,7 +160,7 @@ impl Server {
         raw_body: &[u8],
         raw_headers: &[u8],
         out: &mut Vec<u8>,
-    ) -> (u16, Ctype, Option<u64>) {
+    ) -> (u16, Ctype, Option<u64>, Option<usize>) {
         let (path, query) = match path.find('?') {
             Some(i) => (&path[..i], &path[i + 1..]),
             None => (path, ""),
@@ -157,10 +168,10 @@ impl Server {
         self.requests.fetch_add(1, Ordering::Relaxed);
         if self.metrics_path.as_deref() == Some(path) {
             self.write_metrics(out);
-            return (200, JSON, None);
+            return (200, JSON, None, None);
         }
         let Some(m) = Method::parse(method) else {
-            return self.fail(Err_ { status: 405, msg: "method not allowed" }, out);
+            return self.fail(None, Err_ { status: 405, msg: "method not allowed" }, out);
         };
         let mut ctx = Ctx::default();
         let found = self.router.lookup(m, path, &mut ctx).or_else(|| {
@@ -172,14 +183,14 @@ impl Server {
         });
         let Some(idx) = found else {
             if self.cors && m == Method::Options {
-                return (204, JSON, None);
+                return (204, JSON, None, None);
             }
             let e = if self.router.allows(path) {
                 Err_ { status: 405, msg: "method not allowed" }
             } else {
                 Err_ { status: 404, msg: "not found" }
             };
-            return self.fail(e, out);
+            return self.fail(None, e, out);
         };
         let rt = &self.routes[idx];
         ctx.query_raw = query;
@@ -195,7 +206,7 @@ impl Server {
                 Ok(v) => ctx.body = v,
                 Err(_) => match form_body(raw_body) {
                     Some(v) => ctx.body = v,
-                    None => return self.fail(crate::parser::BAD_BODY, out),
+                    None => return self.fail(Some(idx), crate::parser::BAD_BODY, out),
                 },
             }
         }
@@ -204,35 +215,35 @@ impl Server {
                 Ok(v) if crate::parser::truthy(&v) => {}
                 Ok(_) => {
                     let msg = if rt.guard_status == 400 { "invalid body" } else { "unauthorized" };
-                    return self.fail(Err_ { status: rt.guard_status, msg }, out);
+                    return self.fail(Some(idx), Err_ { status: rt.guard_status, msg }, out);
                 }
-                Err(e) => return self.fail(e, out),
+                Err(e) => return self.fail(Some(idx), e, out),
             }
         }
         if let Some(k) = &rt.konst {
             out.extend_from_slice(k);
-            return (rt.status, rt.const_ctype, rt.const_etag);
+            return (rt.status, rt.const_ctype, rt.const_etag, Some(idx));
         }
         if rt.expr.renders_json() {
             let mark = out.len();
             return match rt.expr.write_json(&ctx, out) {
-                Ok(()) => (rt.status, JSON, None),
+                Ok(()) => (rt.status, JSON, None, Some(idx)),
                 Err(e) => {
                     out.truncate(mark);
-                    self.fail(e, out)
+                    self.fail(Some(idx), e, out)
                 }
             };
         }
         match rt.expr.eval(&ctx) {
             Ok(Value::Str(s)) => {
                 out.extend_from_slice(s.as_bytes());
-                (rt.status, TEXT, None)
+                (rt.status, TEXT, None, Some(idx))
             }
             Ok(v) => {
                 v.write_json(out);
-                (rt.status, JSON, None)
+                (rt.status, JSON, None, Some(idx))
             }
-            Err(e) => self.fail(e, out),
+            Err(e) => self.fail(Some(idx), e, out),
         }
     }
 
@@ -254,7 +265,30 @@ impl Server {
         f(out, ",\"max_micros\":", self.max_micros.load(Ordering::Relaxed));
         f(out, ",\"routes\":", self.routes.len() as u64);
         f(out, ",\"workers\":", self.workers as u64);
-        out.push(b'}');
+        out.extend_from_slice(b",\"paths\":[");
+        let mut first = true;
+        for (rt, stat) in self.routes.iter().zip(&self.per_route) {
+            let hits = stat.hits.load(Ordering::Relaxed);
+            if hits == 0 {
+                continue;
+            }
+            if !first {
+                out.push(b',');
+            }
+            first = false;
+            out.extend_from_slice(b"{\"route\":");
+            let mut label = String::with_capacity(rt.pattern.len() + 8);
+            label.push_str(rt.method.name());
+            label.push(' ');
+            label.push_str(&rt.pattern);
+            crate::value::write_string(out, &label);
+            f(out, ",\"hits\":", hits);
+            f(out, ",\"failures\":", stat.failures.load(Ordering::Relaxed));
+            f(out, ",\"avg_micros\":", stat.micros.load(Ordering::Relaxed) / hits);
+            f(out, ",\"max_micros\":", stat.max_micros.load(Ordering::Relaxed));
+            out.push(b'}');
+        }
+        out.extend_from_slice(b"]}");
     }
 
     pub fn log_line(&self, method: &str, path: &str, status: u16, bytes: usize, micros: u64) {
@@ -291,6 +325,16 @@ impl Server {
         self.micros.fetch_add(micros, Ordering::Relaxed);
         self.bytes_out.fetch_add(bytes as u64, Ordering::Relaxed);
         self.max_micros.fetch_max(micros, Ordering::Relaxed);
+    }
+
+    pub fn record_route(&self, route: Option<usize>, status: u16, micros: u64) {
+        let Some(stat) = route.and_then(|i| self.per_route.get(i)) else { return };
+        stat.hits.fetch_add(1, Ordering::Relaxed);
+        stat.micros.fetch_add(micros, Ordering::Relaxed);
+        stat.max_micros.fetch_max(micros, Ordering::Relaxed);
+        if status >= 400 {
+            stat.failures.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn allow(&self, key: &str) -> bool {
@@ -470,10 +514,15 @@ fn env_usize(key: &str, default: usize) -> usize {
 }
 
 impl Server {
-    fn fail(&self, e: Err_, out: &mut Vec<u8>) -> (u16, Ctype, Option<u64>) {
+    fn fail(
+        &self,
+        route: Option<usize>,
+        e: Err_,
+        out: &mut Vec<u8>,
+    ) -> (u16, Ctype, Option<u64>, Option<usize>) {
         self.failures.fetch_add(1, Ordering::Relaxed);
         let (status, ctype) = err_body(e, out);
-        (status, ctype, None)
+        (status, ctype, None, route)
     }
 }
 

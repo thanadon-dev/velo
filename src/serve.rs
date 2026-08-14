@@ -393,11 +393,12 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
         let mut body = std::mem::take(&mut c.body);
         let timed = srv.metrics_path.is_some() || srv.log;
         let started = timed.then(Instant::now);
-        let (status, ct, const_etag) =
+        let (status, ct, const_etag, route) =
             srv.handle_full(method, path, &req[head.head_end..], &req[..head.head_end], &mut body);
         let micros = started.map(|t0| t0.elapsed().as_micros() as u64).unwrap_or(0);
         if srv.metrics_path.is_some() {
             srv.record(micros, body.len());
+            srv.record_route(route, status, micros);
         }
         if srv.log {
             srv.log_line(method, path, status, body.len(), micros);

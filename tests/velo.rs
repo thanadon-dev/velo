@@ -659,6 +659,39 @@ fn metrics_endpoint() {
 }
 
 #[test]
+fn metrics_break_down_by_route() {
+    let mut s = Server::new(compile(SRC, None).unwrap()).unwrap();
+    Arc::get_mut(&mut s).unwrap().metrics_path = Some("/_metrics".to_string());
+    let hit = |method: &str, path: &str, body: &str| {
+        let mut out = Vec::new();
+        let (status, _, _, route) = s.handle_full(method, path, body.as_bytes(), &[], &mut out);
+        s.record_route(route, status, 1);
+        status
+    };
+    assert_eq!(hit("GET", "/health", ""), 200);
+    assert_eq!(hit("GET", "/health", ""), 200);
+    assert_eq!(hit("POST", "/users", r#"{"name":"a"}"#), 201);
+    assert_eq!(hit("GET", "/users/999", ""), 404);
+    assert_eq!(hit("GET", "/nowhere", ""), 404);
+
+    let (_, body, _) = call(&s, "GET", "/_metrics", "");
+    let m = velo::value::parse_json(body.as_bytes()).unwrap();
+    let Value::Arr(paths) = m.get("paths") else { panic!("no breakdown in {body}") };
+    let find = |label: &str| {
+        paths.iter().find(|p| p.get("route").as_key() == label).unwrap_or_else(|| {
+            panic!("{label} missing in {body}");
+        })
+    };
+    assert_eq!(find("GET /health").get("hits").as_key(), "2");
+    assert_eq!(find("GET /health").get("failures").as_key(), "0");
+    assert_eq!(find("POST /users").get("hits").as_key(), "1");
+    assert_eq!(find("GET /users/:id").get("hits").as_key(), "1");
+    assert_eq!(find("GET /users/:id").get("failures").as_key(), "1");
+    assert!(!paths.iter().any(|p| p.get("route").as_key().contains("nowhere")), "{body}");
+    assert!(paths.iter().all(|p| p.get("hits").as_key() != "0"), "{body}");
+}
+
+#[test]
 fn expect_continue_is_answered() {
     let port = spawn();
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
