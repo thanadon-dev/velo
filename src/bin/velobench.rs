@@ -142,6 +142,7 @@ fn worker(
     bytes: Arc<AtomicU64>,
 ) -> Vec<u64> {
     let mut lat = Vec::with_capacity(1 << 16);
+    let mut at = 0usize;
     let target = match &a.unix {
         Some(path) => path.clone(),
         None => format!("{}:{}", a.host, a.port),
@@ -202,6 +203,9 @@ fn worker(
         let us = t0.elapsed().as_micros() as u64 / a.pipeline as u64;
         if lat.len() < lat.capacity() {
             lat.push(us);
+        } else {
+            lat[at] = us;
+            at = (at + 1) % lat.len();
         }
         local_done += seen as u64;
     }
