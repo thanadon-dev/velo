@@ -1,6 +1,6 @@
 # Velo
 
-**v1.12.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.13.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -87,6 +87,7 @@ Expressions:
 | request header | `header.x_team` | lowercased, `-` written as `_`, read straight from the request; the first header of that name wins |
 | request cookie | `cookie.session` | one cookie by name, read straight from the `Cookie` header; `null` when it is not there |
 | store call | `db.users.find(id)` | see below |
+| projection | `body.select("name", "email")` | the object with only those fields, applied to each element of an array |
 | function call | `now()`, `uuid()`, `len(x)`, `env("PORT")` | see below |
 | arithmetic | `query.page + 1`, `body.price * body.qty`, `(a + b) * 2` | `+` on two strings concatenates |
 | comparison | `query.limit < 100`, `header.x_key == env("KEY")` | numeric when both sides parse as numbers, otherwise string-to-string, otherwise false |
@@ -152,6 +153,14 @@ GET /orders/open => db.orders.where("status", "!=", "done").count()
 ```
 
 The operator is a literal, checked at compile time. A comparison is numeric when both sides read as numbers, otherwise it compares text; a row missing the field never matches. `where`, `search`, `order` and `page` are steps and may repeat in any order. `count()`, `sum/avg/min/max(field)`, `select(field, ...)` and `first()` end a chain and nothing may follow them; `first()` answers 404 when the chain is empty. A chained result is cached like a single call, keyed on the whole chain, and thrown away when the collection changes. `first()` is the one shape that is not cached: it scans instead, and a trailing `order` picks the extreme row in one pass rather than sorting.
+
+`select` is not only a store operation. It narrows any object, which is how a write route decides what a client is allowed to set:
+
+```velo
+POST /users => db.users.create(body.select("name", "email")) when body.name else 400
+```
+
+Without it, `create(body)` stores whatever the client sent, so a request carrying `"role":"admin"` or its own `"pass"` field writes those too. With it, everything outside the list is dropped before the row exists. On an array it narrows each element, on anything that is not an object it is `null`, and it never reaches deeper than the level it is applied to. `select()` with no fields is a compile error everywhere it can appear.
 
 A row's field can be read directly:
 
@@ -565,7 +574,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-128 tests (100 integration + 14 CLI + 6 fuzz + 8 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+131 tests (103 integration + 14 CLI + 6 fuzz + 8 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -624,6 +633,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.13.0** — `select` narrows any object, not just something the store returned, which closes the write-side twin of the hole v1.12.0 closed on reads. `db.users.create(body)` stores whatever the client sent, so a request carrying `"role":"admin"` or its own `"pass"` writes those too; `db.users.create(body.select("name", "email"))` drops everything outside the list before the row exists. The same operator now means one thing in three places: keep these fields, of a list, of a row, or of the request body. It narrows one level, answers `null` for anything that is not an object, and refuses to compile with no fields named.
 
 **v1.12.0** — `select` follows `find` and `first`, so a route can return one row without the fields a client must not see. Until now projection only worked on a list, which meant the obvious profile route, `db.users.find(id)`, handed back every column including the password digest that v1.9.0 taught velo to store, and the only workaround built the object field by field with a lookup per field. A projected miss is still a 404, a field the row lacks is skipped, and `select()` with no fields is a compile error rather than a silent pass-through of the whole row.
 

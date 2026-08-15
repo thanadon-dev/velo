@@ -530,13 +530,14 @@ POST /e1 => db.x.create({ p: password(body.pass), fp: hash(body.pass) })\n\
 POST /e2 => \"in\" when verify(body.pass, db.x.find(body.user).p) else 401\n\
 GET /e3 => db.x.find(cookie.session)\n\
 POST /e4 => setcookie(\"session\", uuid())\n\
-GET /e5/:id => db.x.find(id).select(\"id\", \"k\")\n";
+GET /e5/:id => db.x.find(id).select(\"id\", \"k\")\n\
+POST /e6 => db.x.create(body.select(\"k\", \"n\"))\n";
 
     let path = tmp("everything.velo");
     write(&path, program);
     let out = Command::new(BIN).arg("check").arg(&path).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("32 routes"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("33 routes"));
     let _ = std::fs::remove_file(&path);
 }
 

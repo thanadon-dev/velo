@@ -587,6 +587,17 @@ impl<'a> Parser<'a> {
         while self.tok.kind == Kind::Dot {
             self.advance()?;
             let name = self.expect(Kind::Ident)?;
+            if name.text == "select" && self.tok.kind == Kind::LParen {
+                let args = self.call_args()?;
+                if args.is_empty() {
+                    return Err(format!(
+                        "line {}:{}: select expects at least 1 argument(s), got 0",
+                        name.line, name.col
+                    ));
+                }
+                cur = Expr::Select(Box::new(cur), args);
+                continue;
+            }
             cur = Expr::Field(Box::new(cur), Arc::from(name.text.as_str()));
         }
         Ok(cur)

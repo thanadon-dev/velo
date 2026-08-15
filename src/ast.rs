@@ -61,6 +61,7 @@ pub enum Expr {
     HeaderField(Arc<str>),
     CookieField(Arc<str>),
     Field(Box<Expr>, Arc<str>),
+    Select(Box<Expr>, Vec<Expr>),
     Object(Vec<(Arc<str>, Expr)>),
     Array(Vec<Expr>),
     Db(Arc<Collection>, Op),
@@ -189,6 +190,13 @@ impl Expr {
             Expr::HeaderField(name) => Ok(crate::http::header_value(c.header_raw, name)),
             Expr::CookieField(name) => Ok(crate::http::cookie_value(c.header_raw, name)),
             Expr::Field(base, key) => Ok(base.eval(c)?.get(key)),
+            Expr::Select(base, fields) => {
+                let mut names = Vec::with_capacity(fields.len());
+                for f in fields {
+                    names.push(f.eval(c)?.as_key_arc());
+                }
+                Ok(keep_fields(base.eval(c)?, &names))
+            }
             Expr::Object(fields) => {
                 let mut out = Vec::with_capacity(fields.len());
                 for (k, e) in fields {
@@ -406,14 +414,33 @@ fn project(row: Value, fields: &[Expr], c: &Ctx) -> Result<Value, Err_> {
     if fields.is_empty() {
         return Ok(row);
     }
-    let mut kept: crate::value::Obj = Vec::with_capacity(fields.len());
+    let mut names = Vec::with_capacity(fields.len());
     for f in fields {
-        let name = f.eval(c)?.as_key_arc();
-        if let Some(v) = row.get_ref(&name) {
-            kept.push((name, v.clone()));
+        names.push(f.eval(c)?.as_key_arc());
+    }
+    Ok(keep_fields(row, &names))
+}
+
+fn keep_fields(v: Value, names: &[Arc<str>]) -> Value {
+    match &v {
+        Value::Arr(items) => {
+            Value::Arr(Arc::new(items.iter().map(|i| keep_object(i, names)).collect()))
+        }
+        _ => keep_object(&v, names),
+    }
+}
+
+fn keep_object(v: &Value, names: &[Arc<str>]) -> Value {
+    if !matches!(v, Value::Obj(_) | Value::Row(_, _)) {
+        return Value::Null;
+    }
+    let mut kept: crate::value::Obj = Vec::with_capacity(names.len());
+    for name in names {
+        if let Some(found) = v.get_ref(name) {
+            kept.push((name.clone(), found.clone()));
         }
     }
-    Ok(Value::obj(kept))
+    Value::obj(kept)
 }
 
 pub fn truthy(v: &Value) -> bool {

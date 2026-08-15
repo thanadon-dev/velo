@@ -2245,3 +2245,50 @@ fn select_still_refuses_where_it_never_belonged() {
         assert!(compile(src, None).is_err(), "should not compile: {src}");
     }
 }
+
+const MASS_SRC: &str = r#"
+POST /open  => db.users.create(body)
+POST /safe  => db.users.create(body.select("name", "email")) when body.name else 400
+POST /echo  => body.select("name")
+POST /deep  => body.items.select("id")
+POST /none  => body.select("nope")
+GET  /flat  => query.q.select("a")
+"#;
+
+#[test]
+fn a_body_can_be_narrowed_before_it_is_stored() {
+    let s = Server::new(compile(MASS_SRC, None).unwrap()).unwrap();
+    let body = r#"{"name":"ann","email":"a@b.c","role":"admin","pass":"x"}"#;
+    let open = call(&s, "POST", "/open", body).1;
+    assert!(
+        open.contains("admin") && open.contains(r#""pass""#),
+        "unguarded create takes all: {open}"
+    );
+    assert_eq!(call(&s, "POST", "/safe", body).1, r#"{"id":2,"name":"ann","email":"a@b.c"}"#);
+    assert_eq!(call(&s, "POST", "/echo", body).1, r#"{"name":"ann"}"#);
+    assert_eq!(call(&s, "POST", "/safe", r#"{"role":"admin"}"#).0, 400, "a guard still gates it");
+}
+
+#[test]
+fn select_maps_over_an_array_and_gives_up_on_anything_else() {
+    let s = Server::new(compile(MASS_SRC, None).unwrap()).unwrap();
+    assert_eq!(
+        call(&s, "POST", "/deep", r#"{"items":[{"id":1,"s":"x"},{"id":2,"s":"y"}]}"#).1,
+        r#"[{"id":1},{"id":2}]"#
+    );
+    assert_eq!(call(&s, "POST", "/none", r#"{"a":1}"#).1, "{}", "no field matched");
+    assert_eq!(call(&s, "GET", "/flat?q=hello", "").1, "null", "a string has no fields");
+    assert_eq!(call(&s, "POST", "/echo", "").1, "null", "no body at all");
+    assert_eq!(call(&s, "POST", "/deep", r#"{"items":[[1],"x",null]}"#).1, "[null,null,null]");
+}
+
+#[test]
+fn a_bare_select_is_refused_wherever_it_appears() {
+    for src in [
+        r#"POST /a => body.select()"#,
+        r#"POST /a => db.x.create(body.select())"#,
+        r#"GET /a => query.q.select()"#,
+    ] {
+        assert!(compile(src, None).is_err(), "should not compile: {src}");
+    }
+}
