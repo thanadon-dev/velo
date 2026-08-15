@@ -1,6 +1,6 @@
 # Velo
 
-**v1.11.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.12.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -114,7 +114,7 @@ Built-in store (`db.<collection>.<op>`):
 | `delete(key)` | `{"deleted":true}` | 404 |
 | `delete_where(field, value)` | `{"deleted":n}` | `{"deleted":0}` |
 | `clear()` | `{"deleted":n}`, resets generated ids | `{"deleted":0}` |
-| `select(field, ...)` | the rows with only those fields kept | `[]` |
+| `select(field, ...)` | the rows with only those fields kept, or one row after `find`/`first` | `[]` / 404 |
 
 Read operations chain, so one line can filter, sort and page:
 
@@ -126,6 +126,16 @@ GET /users/spend => db.users.where("team", query.team).sum("score")
 GET /users/best  => db.users.where("team", query.team).order("-score").first()
 GET /users/cards => db.users.where("team", query.team).select("id", "name")
 ```
+
+`select` also follows `find` and `first`, which is how a route returns one row without the fields a client must not see:
+
+```velo
+GET /users/:id   => db.users.find(id).select("id", "name", "team")
+GET /users/best  => db.users.order("-score").first().select("name", "score")
+GET /users/byname => db.users.first("email", query.q).select("id", "name")
+```
+
+A projected miss is still a 404, a field the row does not have is skipped, and the fields come back in the order the route names them.
 
 `select` ends a chain by narrowing each row to the fields it names, in the order it names them, skipping any the row does not have. It is how a route keeps a password hash or an internal note out of the response, and it is the cheapest way to shrink a large list: over 5 000 rows, trading five fields for two took the body from 509 kB to 149 kB and the route from 6 437 to 19 125 req/s, all of it saved on the wire.
 
@@ -237,7 +247,7 @@ Every cookie is written `Path=/; HttpOnly; SameSite=Lax`, and `VELO_COOKIE_SECUR
 
 `examples/auth.velo` accepts the token from either place with `default(cookie.session, header.x_token)`, so the same API serves a browser and a script.
 
-A session is a row like any other, so a token is checked with a `where(...).count()` guard, which the equality index answers without a scan, and expiry is a comparison against `now()`. `uuid()` draws from a SHA-256 generator seeded from `/dev/urandom`, so a token cannot be guessed from earlier ones. Never end a route on the row that holds the digest: `select` the fields a client may see, as `examples/auth.velo` does.
+A session is a row like any other, so a token is checked with a `where(...).count()` guard, which the equality index answers without a scan, and expiry is a comparison against `now()`. `uuid()` draws from a SHA-256 generator seeded from `/dev/urandom`, so a token cannot be guessed from earlier ones. Never end a route on the row that holds the digest: `select` the fields a client may see. That works on one row as well as a list, so `db.users.find(id).select("id", "email")` is the safe way to serve a profile.
 
 `hash(x)` is plain SHA-256 in lowercase hex, for fingerprints, cache keys, or storing an API key you only ever compare. It is not a password hash; use `password()` for those. With a constant argument it folds at compile time.
 
@@ -555,7 +565,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-124 tests (96 integration + 14 CLI + 6 fuzz + 8 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+128 tests (100 integration + 14 CLI + 6 fuzz + 8 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -614,6 +624,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.12.0** — `select` follows `find` and `first`, so a route can return one row without the fields a client must not see. Until now projection only worked on a list, which meant the obvious profile route, `db.users.find(id)`, handed back every column including the password digest that v1.9.0 taught velo to store, and the only workaround built the object field by field with a lookup per field. A projected miss is still a 404, a field the row lacks is skipped, and `select()` with no fields is a compile error rather than a silent pass-through of the whole row.
 
 **v1.11.0** — the same answers, with less work per request. A read no longer allocates to reach its cached result: the collection tag is built once instead of on every call, the operators that take a field and a value borrow the request's own bytes rather than copying them into fresh strings, a chain plan holds shared handles instead of owned ones, and the cache key is written digit by digit instead of through the formatting machinery. Environment knobs like `VELO_CACHE_BYTES` are read once when a collection is created rather than on the path that uses them, and the caches hash their keys with FNV like the router already did. Measured in-process over 500 rows, best of nine runs: a filtered read went from 0.83 to 0.42 us, a four-step chain from 1.57 to 1.01 us, `find` from 0.25 to 0.17 us, and `select` from 5.25 to 4.57 us. Nothing about the language or the answers changed, and `bench/baseline.json` now holds the faster figures so a regression is measured against them.
 

@@ -112,18 +112,18 @@ pub enum Tail {
     List,
     Count,
     Agg(Agg, Box<Expr>),
-    First,
+    First(Vec<Expr>),
     Select(Vec<Expr>),
 }
 
 pub enum Op {
     All,
     Count,
-    Find(Box<Expr>),
+    Find(Box<Expr>, Vec<Expr>),
     Where(Box<Expr>, Box<Expr>),
     Search(Box<Expr>, Box<Expr>),
     Aggregate(Agg, Box<Expr>),
-    First(Box<Expr>, Box<Expr>),
+    First(Box<Expr>, Box<Expr>, Vec<Expr>),
     Order(Box<Expr>),
     Page(Box<Expr>, Box<Expr>),
     Create(Box<Expr>),
@@ -240,20 +240,25 @@ impl Expr {
             Expr::Db(col, op) => match op {
                 Op::All => Ok(col.all()),
                 Op::Count => Ok(Value::Num(col.count() as f64)),
-                Op::Find(k) => match fast_key(k, c) {
-                    Some(raw) => col.find(raw).ok_or(NOT_FOUND),
-                    None => col.find(&k.eval(c)?.as_key_ref()).ok_or(NOT_FOUND),
-                },
+                Op::Find(k, fields) => {
+                    let row = match fast_key(k, c) {
+                        Some(raw) => col.find(raw),
+                        None => col.find(&k.eval(c)?.as_key_ref()),
+                    };
+                    project(row.ok_or(NOT_FOUND)?, fields, c)
+                }
                 Op::Page(o, l) => {
                     let offset = num_arg(&o.eval(c)?);
                     let limit = num_arg(&l.eval(c)?);
                     Ok(col.page(offset, limit))
                 }
                 Op::Order(f) => Ok(col.order(&f.eval(c)?.as_key_ref())),
-                Op::First(f, v) => {
+                Op::First(f, v, fields) => {
                     let field = f.eval(c)?;
                     let want = v.eval(c)?;
-                    col.first(&field.as_key_ref(), &want.as_key_ref()).ok_or(NOT_FOUND)
+                    let row =
+                        col.first(&field.as_key_ref(), &want.as_key_ref()).ok_or(NOT_FOUND)?;
+                    project(row, fields, c)
                 }
                 Op::Aggregate(agg, f) => Ok(col.aggregate(*agg, &f.eval(c)?.as_key_ref())),
                 Op::Search(f, v) => {
@@ -318,7 +323,10 @@ impl Expr {
                         Tail::List => Ok(col.query(&plan)),
                         Tail::Count => Ok(col.query_count(&plan)),
                         Tail::Agg(agg, f) => Ok(col.query_agg(&plan, *agg, &f.eval(c)?.as_key())),
-                        Tail::First => col.query_first(&plan).ok_or(NOT_FOUND),
+                        Tail::First(fields) => {
+                            let row = col.query_first(&plan).ok_or(NOT_FOUND)?;
+                            Ok(project(row, fields, c)?)
+                        }
                         Tail::Select(fields) => {
                             let mut names = Vec::with_capacity(fields.len());
                             for f in fields {
@@ -392,6 +400,20 @@ pub fn apply(op: BinOp, l: &Value, r: &Value) -> Value {
 
 fn deleted(n: usize) -> Value {
     Value::obj(vec![(crate::value::intern("deleted"), Value::Num(n as f64))])
+}
+
+fn project(row: Value, fields: &[Expr], c: &Ctx) -> Result<Value, Err_> {
+    if fields.is_empty() {
+        return Ok(row);
+    }
+    let mut kept: crate::value::Obj = Vec::with_capacity(fields.len());
+    for f in fields {
+        let name = f.eval(c)?.as_key_arc();
+        if let Some(v) = row.get_ref(&name) {
+            kept.push((name, v.clone()));
+        }
+    }
+    Ok(Value::obj(kept))
 }
 
 pub fn truthy(v: &Value) -> bool {

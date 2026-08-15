@@ -2182,3 +2182,66 @@ fn cookies_and_headers_are_read_from_the_same_request() {
     s.handle("GET", "/both", b"", raw, &mut out);
     assert_eq!(String::from_utf8(out).unwrap(), r#"{"c":"c1","h":"h1"}"#);
 }
+
+const PROJ_SRC: &str = r#"
+POST /users      => db.users.create(body)
+GET  /u/:id      => db.users.find(id).select("id", "name")
+GET  /raw/:id    => db.users.find(id)
+GET  /byname     => db.users.first("name", query.n).select("id", "team")
+GET  /best       => db.users.order("-score").first().select("name", "score")
+GET  /gap/:id    => db.users.find(id).select("id", "nope")
+GET  /order/:id  => db.users.find(id).select("team", "id")
+GET  /then/:id   => db.users.find(id).select("id", "name").name
+"#;
+
+fn proj_server() -> Arc<Server> {
+    let s = Server::new(compile(PROJ_SRC, None).unwrap()).unwrap();
+    for (name, team, score) in [("ann", "red", 5), ("bob", "blue", 9)] {
+        let body =
+            format!(r#"{{"name":"{name}","team":"{team}","score":{score},"pass":"SECRET"}}"#);
+        assert_eq!(call(&s, "POST", "/users", &body).0, 201);
+    }
+    s
+}
+
+#[test]
+fn a_single_row_can_hide_the_fields_it_does_not_want_to_show() {
+    let s = proj_server();
+    assert!(call(&s, "GET", "/raw/1", "").1.contains("SECRET"), "the unprojected row still leaks");
+    for path in ["/u/1", "/byname?n=ann", "/order/1", "/then/1"] {
+        assert!(!call(&s, "GET", path, "").1.contains("SECRET"), "{path} leaked the password");
+    }
+    assert_eq!(call(&s, "GET", "/u/1", "").1, r#"{"id":1,"name":"ann"}"#);
+    assert_eq!(call(&s, "GET", "/byname?n=bob", "").1, r#"{"id":2,"team":"blue"}"#);
+    assert_eq!(call(&s, "GET", "/best", "").1, r#"{"name":"bob","score":9}"#);
+}
+
+#[test]
+fn a_projection_keeps_the_order_it_names_and_the_misses_it_does_not_have() {
+    let s = proj_server();
+    assert_eq!(call(&s, "GET", "/order/1", "").1, r#"{"team":"red","id":1}"#, "named order wins");
+    assert_eq!(call(&s, "GET", "/gap/1", "").1, r#"{"id":1}"#, "a field the row lacks is skipped");
+    assert_eq!(call(&s, "GET", "/then/1", "").1, "ann", "a field still reads off a projection");
+}
+
+#[test]
+fn a_projected_miss_is_still_a_miss() {
+    let s = proj_server();
+    assert_eq!(call(&s, "GET", "/u/99", "").0, 404);
+    assert_eq!(call(&s, "GET", "/byname?n=nobody", "").0, 404);
+    let empty = Server::new(compile(PROJ_SRC, None).unwrap()).unwrap();
+    assert_eq!(call(&empty, "GET", "/best", "").0, 404, "an empty chain still answers 404");
+}
+
+#[test]
+fn select_still_refuses_where_it_never_belonged() {
+    let bad = [
+        r#"GET /a => db.x.all().select("id").count()"#,
+        r#"GET /a => db.x.count().select("id")"#,
+        r#"GET /a => db.x.find("1").select()"#,
+        r#"GET /a => db.x.create(body).select("id")"#,
+    ];
+    for src in bad {
+        assert!(compile(src, None).is_err(), "should not compile: {src}");
+    }
+}

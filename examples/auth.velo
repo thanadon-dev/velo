@@ -2,7 +2,7 @@ POST /signup => db.users.create({ id: lower(trim(body.email)), email: lower(trim
 
 POST /login  => db.sessions.create({ id: setcookie("session", uuid()), user: lower(trim(body.email)), at: now(), until: now() + 86400000 }).user when verify(body.pass, db.users.find(lower(trim(body.email))).pass) else 401
 
-GET  /me     => db.users.find(db.sessions.find(default(cookie.session, header.x_token)).user).email when db.sessions.where("id", default(cookie.session, header.x_token)).count() and db.sessions.find(default(cookie.session, header.x_token)).until > now()
+GET  /me     => db.users.find(db.sessions.find(default(cookie.session, header.x_token)).user).select("id", "email") when db.sessions.where("id", default(cookie.session, header.x_token)).count() and db.sessions.find(default(cookie.session, header.x_token)).until > now()
 
 DELETE /logout => [db.sessions.delete(default(cookie.session, header.x_token)), setcookie("session", "")] : 204 when db.sessions.where("id", default(cookie.session, header.x_token)).count()
 

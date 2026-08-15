@@ -628,11 +628,12 @@ impl<'a> Parser<'a> {
             }
             op = next;
         }
+        let proj = take_projection(&name.text, &mut calls, line, at_col)?;
         let op = if calls.len() == 1 {
             let (op, args) = calls.pop().unwrap();
-            single_op(&name.text, &op, args, line, at_col)?
+            single_op(&name.text, &op, args, proj, line, at_col)?
         } else {
-            chain_op(&name.text, calls, line, at_col)?
+            chain_op(&name.text, calls, proj, line, at_col)?
         };
         let expr = Expr::Db(col, op);
         match field {
@@ -649,6 +650,7 @@ fn single_op(
     coll: &str,
     op: &str,
     args: Vec<Expr>,
+    proj: Vec<Expr>,
     line: usize,
     at_col: usize,
 ) -> Result<Op, String> {
@@ -674,7 +676,7 @@ fn single_op(
         }
         "find" => {
             want(1)?;
-            Op::Find(Box::new(args.next().unwrap()))
+            Op::Find(Box::new(args.next().unwrap()), proj)
         }
         "page" => {
             want(2)?;
@@ -688,12 +690,12 @@ fn single_op(
         "first" if n == 3 => {
             let f = Box::new(args.next().unwrap());
             let cmp = cmp_arg(coll, &args.next().unwrap(), line, at_col)?;
-            Op::Chain(vec![Stage::Where(f, cmp, Box::new(args.next().unwrap()))], Tail::First)
+            Op::Chain(vec![Stage::Where(f, cmp, Box::new(args.next().unwrap()))], Tail::First(proj))
         }
         "first" => {
             want(2)?;
             let f = Box::new(args.next().unwrap());
-            Op::First(f, Box::new(args.next().unwrap()))
+            Op::First(f, Box::new(args.next().unwrap()), proj)
         }
         "sum" | "avg" | "min" | "max" => {
             want(1)?;
@@ -783,15 +785,38 @@ fn agg_of(op: &str) -> crate::store::Agg {
     }
 }
 
+fn take_projection(
+    coll: &str,
+    calls: &mut Vec<(String, Vec<Expr>)>,
+    line: usize,
+    at_col: usize,
+) -> Result<Vec<Expr>, String> {
+    if calls.len() < 2 || calls[calls.len() - 1].0 != "select" {
+        return Ok(Vec::new());
+    }
+    if !matches!(calls[calls.len() - 2].0.as_str(), "find" | "first") {
+        return Ok(Vec::new());
+    }
+    let fields = calls.pop().map(|(_, args)| args).unwrap_or_default();
+    if fields.is_empty() {
+        return Err(format!(
+            "line {line}:{at_col}: db.{coll}.select expects at least 1 argument(s), got 0"
+        ));
+    }
+    Ok(fields)
+}
+
 fn chain_op(
     coll: &str,
     calls: Vec<(String, Vec<Expr>)>,
+    proj: Vec<Expr>,
     line: usize,
     at_col: usize,
 ) -> Result<Op, String> {
     let mut stages = Vec::new();
     let mut tail = Tail::List;
     let mut closed = false;
+    let mut proj = Some(proj);
     for (op, args) in calls {
         if closed {
             return Err(format!(
@@ -865,7 +890,7 @@ fn chain_op(
                 } else {
                     want(0)?;
                 }
-                tail = Tail::First;
+                tail = Tail::First(proj.take().unwrap_or_default());
                 closed = true;
             }
             other => {
