@@ -68,6 +68,21 @@ impl Value {
         }
     }
 
+    pub fn as_key_arc(&self) -> Arc<str> {
+        match self {
+            Value::Str(s) => s.clone(),
+            other => Arc::from(other.as_key().as_str()),
+        }
+    }
+
+    pub fn as_key_ref(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Value::Str(s) => std::borrow::Cow::Borrowed(s),
+            Value::Null => std::borrow::Cow::Borrowed(""),
+            other => std::borrow::Cow::Owned(other.as_key()),
+        }
+    }
+
     pub fn as_key(&self) -> String {
         match self {
             Value::Str(s) => s.to_string(),

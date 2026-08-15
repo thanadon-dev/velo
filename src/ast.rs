@@ -242,29 +242,29 @@ impl Expr {
                 Op::Count => Ok(Value::Num(col.count() as f64)),
                 Op::Find(k) => match fast_key(k, c) {
                     Some(raw) => col.find(raw).ok_or(NOT_FOUND),
-                    None => col.find(&k.eval(c)?.as_key()).ok_or(NOT_FOUND),
+                    None => col.find(&k.eval(c)?.as_key_ref()).ok_or(NOT_FOUND),
                 },
                 Op::Page(o, l) => {
                     let offset = num_arg(&o.eval(c)?);
                     let limit = num_arg(&l.eval(c)?);
                     Ok(col.page(offset, limit))
                 }
-                Op::Order(f) => Ok(col.order(&f.eval(c)?.as_key())),
+                Op::Order(f) => Ok(col.order(&f.eval(c)?.as_key_ref())),
                 Op::First(f, v) => {
-                    let field = f.eval(c)?.as_key();
-                    let want = v.eval(c)?.as_key();
-                    col.first(&field, &want).ok_or(NOT_FOUND)
+                    let field = f.eval(c)?;
+                    let want = v.eval(c)?;
+                    col.first(&field.as_key_ref(), &want.as_key_ref()).ok_or(NOT_FOUND)
                 }
-                Op::Aggregate(agg, f) => Ok(col.aggregate(*agg, &f.eval(c)?.as_key())),
+                Op::Aggregate(agg, f) => Ok(col.aggregate(*agg, &f.eval(c)?.as_key_ref())),
                 Op::Search(f, v) => {
-                    let field = f.eval(c)?.as_key();
-                    let needle = v.eval(c)?.as_key();
-                    Ok(col.search(&field, &needle))
+                    let field = f.eval(c)?;
+                    let needle = v.eval(c)?;
+                    Ok(col.search(&field.as_key_ref(), &needle.as_key_ref()))
                 }
                 Op::Where(f, v) => {
-                    let field = f.eval(c)?.as_key();
-                    let want = v.eval(c)?.as_key();
-                    Ok(col.filter(&field, &want))
+                    let field = f.eval(c)?;
+                    let want = v.eval(c)?;
+                    Ok(col.filter(&field.as_key_ref(), &want.as_key_ref()))
                 }
                 Op::Create(v) => match v.eval(c)? {
                     Value::Null => Err(BAD_BODY),
@@ -290,24 +290,24 @@ impl Expr {
                 }
                 Op::Clear => Ok(deleted(col.clear())),
                 Op::DeleteWhere(f, v) => {
-                    let field = f.eval(c)?.as_key();
-                    let want = v.eval(c)?.as_key();
-                    Ok(deleted(col.delete_where(&field, &want)))
+                    let field = f.eval(c)?;
+                    let want = v.eval(c)?;
+                    Ok(deleted(col.delete_where(&field.as_key_ref(), &want.as_key_ref())))
                 }
                 Op::Chain(stages, tail) => {
                     let mut plan = Vec::with_capacity(stages.len());
                     for s in stages {
                         plan.push(match s {
                             Stage::Where(f, op, v) => crate::store::Stage::Where(
-                                f.eval(c)?.as_key(),
+                                f.eval(c)?.as_key_arc(),
                                 *op,
-                                v.eval(c)?.as_key(),
+                                v.eval(c)?.as_key_arc(),
                             ),
                             Stage::Search(f, v) => crate::store::Stage::Search(
-                                f.eval(c)?.as_key(),
-                                v.eval(c)?.as_key(),
+                                f.eval(c)?.as_key_arc(),
+                                v.eval(c)?.as_key_arc(),
                             ),
-                            Stage::Order(f) => crate::store::Stage::Order(f.eval(c)?.as_key()),
+                            Stage::Order(f) => crate::store::Stage::Order(f.eval(c)?.as_key_arc()),
                             Stage::Page(o, l) => crate::store::Stage::Page(
                                 num_arg(&o.eval(c)?),
                                 num_arg(&l.eval(c)?),
@@ -322,7 +322,7 @@ impl Expr {
                         Tail::Select(fields) => {
                             let mut names = Vec::with_capacity(fields.len());
                             for f in fields {
-                                names.push(f.eval(c)?.as_key());
+                                names.push(f.eval(c)?.as_key_arc());
                             }
                             Ok(col.query_select(&plan, &names))
                         }

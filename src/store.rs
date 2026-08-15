@@ -24,8 +24,34 @@ fn with_key4<R>(tag: &str, prefix: &str, a: &str, b: &str, f: impl FnOnce(&str) 
     }
 }
 
-fn cache_budget() -> usize {
-    std::env::var("VELO_CACHE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(8 << 20)
+struct Limits {
+    cache_bytes: usize,
+    local_cache_bytes: usize,
+    append_max: usize,
+}
+
+impl Limits {
+    fn from_env() -> Limits {
+        let read = |key: &str, fallback: usize| {
+            std::env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(fallback)
+        };
+        Limits {
+            cache_bytes: read("VELO_CACHE_BYTES", 8 << 20),
+            local_cache_bytes: read("VELO_LOCAL_CACHE_BYTES", 1 << 20),
+            append_max: read("VELO_APPEND_MAX", 512 << 10),
+        }
+    }
+}
+
+fn tag_for(mut id: u64) -> String {
+    let mut out = String::with_capacity(8);
+    loop {
+        out.push((b'a' + (id % 26) as u8) as char);
+        id /= 26;
+        if id == 0 {
+            return out;
+        }
+    }
 }
 
 const CHUNK: usize = 128;
@@ -84,7 +110,7 @@ struct Snapshot {
     by_id: HashMap<String, usize>,
     all_json: Option<Arc<Vec<u8>>>,
     list_used: AtomicBool,
-    cache: RwLock<HashMap<String, Arc<Vec<u8>>>>,
+    cache: RwLock<Keyed<Arc<Vec<u8>>>>,
     index: RwLock<HashMap<String, HashMap<String, Vec<u32>>>>,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -154,7 +180,7 @@ impl Snapshot {
         }
     }
 
-    fn append_json(&mut self, row: &Value) {
+    fn append_json(&mut self, row: &Value, append_max: usize) {
         let Some(mut old) = self.all_json.take() else { return };
         if old.len() < 2 {
             return;
@@ -169,7 +195,7 @@ impl Snapshot {
             self.all_json = Some(old);
             return;
         }
-        if old.len() > append_max() {
+        if old.len() > append_max {
             return;
         }
         let mut out = Vec::with_capacity(old.len() * 2);
@@ -196,8 +222,7 @@ impl Snapshot {
         hit
     }
 
-    fn store_cached(&self, key: &str, json: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
-        let budget = cache_budget();
+    fn store_cached(&self, key: &str, json: Arc<Vec<u8>>, budget: usize) -> Arc<Vec<u8>> {
         if json.len() > budget {
             return json;
         }
@@ -213,25 +238,19 @@ impl Snapshot {
 
 static NEXT_COLLECTION_ID: AtomicU64 = AtomicU64::new(0);
 
-type LocalCache = std::cell::RefCell<HashMap<String, (u64, Arc<Vec<u8>>)>>;
+type Keyed<V> = HashMap<String, V, std::hash::BuildHasherDefault<crate::router::Fnv>>;
+type LocalCache = std::cell::RefCell<Keyed<(u64, Arc<Vec<u8>>)>>;
 
 thread_local! {
-    static LOCAL_CACHE: LocalCache = std::cell::RefCell::new(HashMap::new());
+    static LOCAL_CACHE: LocalCache = std::cell::RefCell::new(HashMap::default());
 }
 
 const LOCAL_CACHE_MAX: usize = 64;
 
-fn append_max() -> usize {
-    std::env::var("VELO_APPEND_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(512 << 10)
-}
-
-fn local_budget() -> usize {
-    std::env::var("VELO_LOCAL_CACHE_BYTES").ok().and_then(|v| v.parse().ok()).unwrap_or(1 << 20)
-}
-
 pub struct Collection {
     pub name: String,
-    id: u64,
+    tag: String,
+    limits: Limits,
     version: AtomicU64,
     snap: RwLock<Snapshot>,
     next_id: AtomicU64,
@@ -242,7 +261,8 @@ impl Collection {
     fn new(name: &str, dirty: Arc<AtomicBool>) -> Collection {
         Collection {
             name: name.to_string(),
-            id: NEXT_COLLECTION_ID.fetch_add(1, Ordering::Relaxed),
+            tag: tag_for(NEXT_COLLECTION_ID.fetch_add(1, Ordering::Relaxed)),
+            limits: Limits::from_env(),
             version: AtomicU64::new(0),
             snap: RwLock::new(Snapshot {
                 rows: Rows::default(),
@@ -250,7 +270,7 @@ impl Collection {
                 by_id: HashMap::new(),
                 all_json: None,
                 list_used: AtomicBool::new(false),
-                cache: RwLock::new(HashMap::new()),
+                cache: RwLock::new(HashMap::default()),
                 index: RwLock::new(HashMap::new()),
                 hits: AtomicU64::new(0),
                 misses: AtomicU64::new(0),
@@ -266,18 +286,6 @@ impl Collection {
 
     fn bump(&self) {
         self.version.fetch_add(1, Ordering::Release);
-    }
-
-    fn tag(&self) -> String {
-        let mut out = String::with_capacity(8);
-        let mut v = self.id;
-        loop {
-            out.push((b'a' + (v % 26) as u8) as char);
-            v /= 26;
-            if v == 0 {
-                return out;
-            }
-        }
     }
 
     fn derived(
@@ -299,9 +307,9 @@ impl Collection {
         build: impl FnOnce(&Rows, T) -> Arc<Vec<u8>>,
     ) -> Value {
         let version = self.version.load(Ordering::Acquire);
-        let tag = self.tag();
+        let tag = &self.tag;
 
-        let local = with_key4(&tag, kind, a, b, |key| {
+        let local = with_key4(tag, kind, a, b, |key| {
             LOCAL_CACHE
                 .with(|c| c.borrow().get(key).and_then(|(v, j)| (*v == version).then(|| j.clone())))
         });
@@ -309,7 +317,7 @@ impl Collection {
             return Value::Raw(json);
         }
 
-        let shared = with_key4(&tag, kind, a, b, |key| self.snap.read().unwrap().cached(key));
+        let shared = with_key4(tag, kind, a, b, |key| self.snap.read().unwrap().cached(key));
         let json = match shared {
             Some(json) => json,
             None => {
@@ -318,24 +326,24 @@ impl Collection {
                     (s.rows.clone(), pick(&s))
                 };
                 let json = build(&rows, extra);
-                with_key4(&tag, kind, a, b, |key| {
+                with_key4(tag, kind, a, b, |key| {
                     let s = self.snap.read().unwrap();
                     if self.version.load(Ordering::Acquire) == version {
-                        s.store_cached(key, json.clone());
+                        s.store_cached(key, json.clone(), self.limits.cache_bytes);
                     }
                 });
                 json
             }
         };
 
-        with_key4(&tag, kind, a, b, |key| {
+        with_key4(tag, kind, a, b, |key| {
             LOCAL_CACHE.with(|c| {
                 let mut c = c.borrow_mut();
                 let used: usize = c.values().map(|(_, v)| v.len()).sum();
-                if c.len() >= LOCAL_CACHE_MAX || used + json.len() > local_budget() {
+                if c.len() >= LOCAL_CACHE_MAX || used + json.len() > self.limits.local_cache_bytes {
                     c.clear();
                 }
-                if json.len() <= local_budget() {
+                if json.len() <= self.limits.local_cache_bytes {
                     c.insert(key.to_string(), (version, json.clone()));
                 }
             })
@@ -467,12 +475,12 @@ impl Collection {
         )
     }
 
-    pub fn query_select(&self, stages: &[Stage], fields: &[String]) -> Value {
-        let mut key = String::with_capacity(32);
+    pub fn query_select(&self, stages: &[Stage], fields: &[Arc<str>]) -> Value {
+        let mut key = String::with_capacity(48);
         for f in fields {
             push_part(&mut key, f);
         }
-        key.push_str(&chain_key(stages));
+        push_chain(&mut key, stages);
         self.derived_with(
             "qs",
             &key,
@@ -483,7 +491,9 @@ impl Collection {
     }
 
     pub fn query_agg(&self, stages: &[Stage], op: Agg, field: &str) -> Value {
-        let key = format!("{}{}", op.name(), chain_key(stages));
+        let mut key = String::with_capacity(48);
+        key.push_str(op.name());
+        push_chain(&mut key, stages);
         self.derived_with(
             "qa",
             &key,
@@ -495,7 +505,7 @@ impl Collection {
 
     pub fn query_first(&self, stages: &[Stage]) -> Option<Value> {
         let (head, pick) = match stages.split_last() {
-            Some((Stage::Order(field), rest)) => (rest, Some(field.as_str())),
+            Some((Stage::Order(field), rest)) => (rest, Some(&**field)),
             _ => (stages, None),
         };
         let s = self.snap.read().unwrap();
@@ -538,7 +548,7 @@ impl Collection {
         *s.index.get_mut().unwrap() = keep;
         s.extend_index(idx, &row);
         s.all_json = reuse;
-        s.append_json(&row);
+        s.append_json(&row, self.limits.append_max);
         s.list_used.store(false, Ordering::Relaxed);
         self.bump();
         self.touch();
@@ -814,9 +824,9 @@ fn searched_json(rows: &Rows, field: &str, needle: &str) -> Arc<Vec<u8>> {
 }
 
 pub enum Stage {
-    Where(String, Cmp, String),
-    Search(String, String),
-    Order(String),
+    Where(Arc<str>, Cmp, Arc<str>),
+    Search(Arc<str>, Arc<str>),
+    Order(Arc<str>),
     Page(usize, usize),
 }
 
@@ -883,36 +893,57 @@ fn field_cmp(row: &Value, field: &str, op: Cmp, want: &str, want_num: Option<f64
     ord.is_some_and(|ord| op.holds(ord))
 }
 
-fn push_part(key: &mut String, part: &str) {
-    use std::fmt::Write;
-    let _ = write!(key, "{}:{part}", part.len());
+fn push_usize(key: &mut String, mut n: usize) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    key.push_str(std::str::from_utf8(&digits[at..]).unwrap_or("0"));
 }
 
-fn chain_key(stages: &[Stage]) -> String {
-    use std::fmt::Write;
-    let mut key = String::with_capacity(32);
+fn push_part(key: &mut String, part: &str) {
+    push_usize(key, part.len());
+    key.push(':');
+    key.push_str(part);
+}
+
+fn push_chain(key: &mut String, stages: &[Stage]) {
     for stage in stages {
         match stage {
             Stage::Where(f, op, v) => {
                 key.push('w');
                 key.push(op.mark());
-                push_part(&mut key, f);
-                push_part(&mut key, v);
+                push_part(key, f);
+                push_part(key, v);
             }
             Stage::Search(f, v) => {
                 key.push('s');
-                push_part(&mut key, f);
-                push_part(&mut key, v);
+                push_part(key, f);
+                push_part(key, v);
             }
             Stage::Order(f) => {
                 key.push('o');
-                push_part(&mut key, f);
+                push_part(key, f);
             }
             Stage::Page(o, l) => {
-                let _ = write!(key, "p{o}:{l}");
+                key.push('p');
+                push_usize(key, *o);
+                key.push(':');
+                push_usize(key, *l);
             }
         }
     }
+}
+
+fn chain_key(stages: &[Stage]) -> String {
+    let mut key = String::with_capacity(48);
+    push_chain(&mut key, stages);
     key
 }
 
@@ -961,7 +992,7 @@ fn apply_stages(cur: &mut Vec<&Value>, stages: &[Stage]) {
     }
 }
 
-fn selected_json(rows: &[&Value], fields: &[String]) -> Arc<Vec<u8>> {
+fn selected_json(rows: &[&Value], fields: &[Arc<str>]) -> Arc<Vec<u8>> {
     let mut out = Vec::with_capacity(rows.len() * (fields.len() * 16 + 4) + 2);
     out.push(b'[');
     for (i, row) in rows.iter().enumerate() {
@@ -1138,5 +1169,41 @@ fn obj_of(v: &Value) -> Option<&Arc<Obj>> {
     match v {
         Value::Obj(o) | Value::Row(o, _) => Some(o),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chain_key_pins_every_part_it_is_built_from() {
+        let key = |stages: &[Stage]| {
+            let mut out = String::new();
+            push_chain(&mut out, stages);
+            out
+        };
+        let mut seen = std::collections::HashSet::new();
+        for n in [0usize, 1, 9, 10, 99, 100, 1_000, 12_345, usize::MAX] {
+            let mut out = String::new();
+            push_usize(&mut out, n);
+            assert_eq!(out, n.to_string());
+        }
+        let plans: Vec<Vec<Stage>> = vec![
+            vec![],
+            vec![Stage::Where("a".into(), Cmp::Eq, "bc".into())],
+            vec![Stage::Where("ab".into(), Cmp::Eq, "c".into())],
+            vec![Stage::Where("a".into(), Cmp::Ne, "bc".into())],
+            vec![Stage::Search("a".into(), "bc".into())],
+            vec![Stage::Order("a".into())],
+            vec![Stage::Page(1, 23)],
+            vec![Stage::Page(12, 3)],
+            vec![Stage::Order("a".into()), Stage::Page(1, 23)],
+            vec![Stage::Page(1, 23), Stage::Order("a".into())],
+            vec![Stage::Where("a".into(), Cmp::Eq, "b".into()), Stage::Order("c".into())],
+        ];
+        for plan in &plans {
+            assert!(seen.insert(key(plan)), "two different plans share a cache key");
+        }
     }
 }

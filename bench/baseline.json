@@ -1,11 +1,11 @@
 {
-  "write": 2.075,
-  "create_delete": 4.367,
-  "write_then_list": 9.296,
-  "all": 7.392,
-  "where": 0.799,
-  "order": 6.569,
-  "find": 0.26,
-  "chain": 1.687,
-  "select": 5.455
+  "write": 2.032,
+  "create_delete": 2.509,
+  "write_then_list": 7.793,
+  "all": 5.560,
+  "where": 0.422,
+  "order": 5.942,
+  "find": 0.172,
+  "chain": 1.007,
+  "select": 4.569
 }
