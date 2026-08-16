@@ -2882,3 +2882,133 @@ fn a_check_outside_a_guard_answers_the_same_way() {
     let prog = compile(r#"GET /a => "x" when check(1, "never")"#, None).unwrap();
     assert!(prog.routes[0].konst.is_none(), "a checked route must not fold");
 }
+
+const CONCUR_SRC: &str = r#"
+GET /why    => "ok" when check(query.a, "a is required")
+GET /named  => "ok" when check(query.a, query.r)
+GET /cook   => setcookie("s", query.v)
+GET /rate   => "ok" when limit(query.k, 5)
+GET /free   => "free"
+"#;
+
+fn serve_on(src: &str) -> (Arc<Server>, u16) {
+    let s = Server::new(compile(src, None).unwrap()).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bg = s.clone();
+    std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
+    (s, port)
+}
+
+#[test]
+fn pipelined_requests_never_borrow_each_others_reasons() {
+    let (s, port) = serve_on(CONCUR_SRC);
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+
+    let mut batch = String::new();
+    let mut want = Vec::new();
+    for i in 0..60 {
+        match i % 4 {
+            0 => {
+                batch.push_str(&format!("GET /named?r=reason-{i} HTTP/1.1\r\nHost: x\r\n\r\n"));
+                want.push(format!("{{\"error\":\"reason-{i}\"}}"));
+            }
+            1 => {
+                batch.push_str("GET /named?a=1&r=unused HTTP/1.1\r\nHost: x\r\n\r\n");
+                want.push("ok".to_string());
+            }
+            2 => {
+                batch.push_str(&format!("GET /cook?v=tok-{i} HTTP/1.1\r\nHost: x\r\n\r\n"));
+                want.push(format!("tok-{i}"));
+            }
+            _ => {
+                batch.push_str("GET /free HTTP/1.1\r\nHost: x\r\n\r\n");
+                want.push("free".to_string());
+            }
+        }
+    }
+    batch.push_str("GET /free HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    want.push("free".to_string());
+    c.write_all(batch.as_bytes()).unwrap();
+
+    let mut out = Vec::new();
+    c.read_to_end(&mut out).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    let mut bodies = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(gap) = rest.find("\r\n\r\n") {
+        let (head, after) = rest.split_at(gap + 4);
+        let len: usize = head
+            .lines()
+            .find_map(|l| l.strip_prefix("Content-Length: "))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        bodies.push(after[..len].to_string());
+        rest = &after[len..];
+    }
+    assert_eq!(bodies.len(), want.len(), "one body per request: {}", bodies.len());
+    for (got, expect) in bodies.iter().zip(&want) {
+        assert_eq!(got, expect, "a pipelined response carried the wrong body");
+    }
+    assert_eq!(text.matches("Set-Cookie: s=tok-").count(), 15, "one cookie per cookie request");
+    for i in (2..60).step_by(4) {
+        assert!(text.contains(&format!("Set-Cookie: s=tok-{i};")), "missing cookie {i}");
+    }
+    s.shutdown();
+}
+
+#[test]
+fn a_rate_ceiling_holds_when_many_threads_push_at_once() {
+    let s = Server::new(compile(CONCUR_SRC, None).unwrap()).unwrap();
+    let key = format!("burst-{}", std::process::id());
+    let passed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let refused = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut hands = Vec::new();
+    for _ in 0..8 {
+        let (s, key, passed, refused) = (s.clone(), key.clone(), passed.clone(), refused.clone());
+        hands.push(std::thread::spawn(move || {
+            for _ in 0..40 {
+                let mut out = Vec::new();
+                let (code, _) = s.dispatch("GET", &format!("/rate?k={key}"), b"", &mut out);
+                match code {
+                    200 => passed.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    429 => refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    other => panic!("unexpected {other}"),
+                };
+            }
+        }));
+    }
+    for h in hands {
+        h.join().unwrap();
+    }
+    let (ok, no) = (
+        passed.load(std::sync::atomic::Ordering::Relaxed),
+        refused.load(std::sync::atomic::Ordering::Relaxed),
+    );
+    assert_eq!(ok + no, 320, "every request got an answer");
+    assert!(ok >= 5, "the ceiling let its five through: {ok}");
+    assert!(ok <= 5 * 3, "320 requests in a moment must not pass a ceiling of five: {ok}");
+}
+
+#[test]
+fn threads_hitting_different_reasons_keep_them_apart() {
+    let s = Server::new(compile(CONCUR_SRC, None).unwrap()).unwrap();
+    let mut hands = Vec::new();
+    for t in 0..8 {
+        let s = s.clone();
+        hands.push(std::thread::spawn(move || {
+            for i in 0..50 {
+                let want = format!("t{t}-{i}");
+                let mut out = Vec::new();
+                let (code, _) = s.dispatch("GET", &format!("/named?r={want}"), b"", &mut out);
+                let body = String::from_utf8(out).unwrap();
+                assert_eq!(code, 400);
+                assert_eq!(body, format!("{{\"error\":\"{want}\"}}"), "reason crossed threads");
+            }
+        }));
+    }
+    for h in hands {
+        h.join().unwrap();
+    }
+}
