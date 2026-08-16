@@ -531,7 +531,7 @@ POST /e2 => \"in\" when verify(body.pass, db.x.find(body.user).p) else 401\n\
 GET /e3 => db.x.find(cookie.session)\n\
 POST /e4 => setcookie(\"session\", uuid())\n\
 GET /e5/:id => db.x.find(id).select(\"id\", \"k\")\n\
-POST /e6 => db.x.create(body.select(\"k\", \"n\"))\n\
+POST /e6 => db.x.create(body.select(\"k\", \"n\")) when body.k else 400 \"k is required\"\n\
 DELETE /e7 => db.x.delete_where(\"n\", \"<\", 5)\n\
 GET /e8 => \"ok\" when limit(header.x_key, 5) else 401\n";
 

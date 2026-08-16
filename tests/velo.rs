@@ -2758,3 +2758,63 @@ fn a_guarded_route_is_never_folded_and_its_guard_runs_first() {
     assert_eq!(call(&s, "GET", "/gated", "").0, 403, "and with no header at all");
     assert!(!call(&s, "GET", "/gated", "").1.contains("secret"), "a refusal must not leak it");
 }
+
+const WHY_SRC: &str = r#"
+POST /users => db.users.create(body) when body.name else 400 "name is required"
+GET  /admin => "ok" when header.x_key == "root" else 403 "admin token required"
+GET  /plain => "ok" when header.x_key
+GET  /quiet => "ok" when header.x_key else 403
+POST /aged  => "ok" when body.age > 0 and body.age < 130 else 400 "age must be between 1 and 129"
+"#;
+
+#[test]
+fn a_guard_can_say_why_it_refused() {
+    let s = Server::new(compile(WHY_SRC, None).unwrap()).unwrap();
+    assert_eq!(
+        call(&s, "POST", "/users", "{}"),
+        (400, r#"{"error":"name is required"}"#.into(), JSON)
+    );
+    assert_eq!(call(&s, "POST", "/users", r#"{"name":"ann"}"#).0, 201, "a passing guard is quiet");
+    assert_eq!(
+        call(&s, "POST", "/aged", r#"{"age":200}"#).1,
+        r#"{"error":"age must be between 1 and 129"}"#
+    );
+    let (code, body, _) = call(&s, "GET", "/admin", "");
+    assert_eq!((code, body.as_str()), (403, r#"{"error":"admin token required"}"#));
+    assert_eq!(call(&s, "GET", "/plain", "").1, r#"{"error":"unauthorized"}"#, "no reason given");
+    assert_eq!(
+        call(&s, "GET", "/quiet", "").1,
+        r#"{"error":"unauthorized"}"#,
+        "status but no text"
+    );
+    assert_eq!(call(&s, "GET", "/quiet", "").0, 403);
+}
+
+#[test]
+fn a_reason_is_escaped_and_must_not_be_empty() {
+    let s = Server::new(
+        compile(r#"POST /a => "x" when body.k else 400 "quote \" and \\ and newline""#, None)
+            .unwrap(),
+    )
+    .unwrap();
+    let body = call(&s, "POST", "/a", "{}").1;
+    assert_eq!(body, r#"{"error":"quote \" and \\ and newline"}"#);
+    assert!(matches!(parse_json(body.as_bytes()), Ok(Value::Obj(_))), "still valid JSON: {body}");
+
+    assert!(compile(r#"POST /a => "x" when body.k else 400 """#, None).is_err(), "empty reason");
+    assert!(
+        compile(r#"POST /a => "x" when body.k else "oops""#, None).is_err(),
+        "reason no status"
+    );
+    assert!(compile(r#"POST /a => "x" else 400 "no guard""#, None).is_err(), "no guard at all");
+}
+
+#[test]
+fn a_reason_reaches_the_openapi_document() {
+    let prog = compile(WHY_SRC, None).unwrap();
+    let doc = String::from_utf8(velo::openapi::document(&prog, "t", "1")).unwrap();
+    assert!(doc.contains(r#""400":{"description":"name is required""#), "{doc}");
+    assert!(doc.contains(r#""403":{"description":"admin token required""#), "{doc}");
+    assert!(doc.contains(r#""401":{"description":"error""#), "an unexplained guard stays generic");
+    assert!(matches!(parse_json(doc.as_bytes()), Ok(Value::Obj(_))));
+}

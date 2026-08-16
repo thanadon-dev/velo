@@ -27,6 +27,7 @@ pub struct Route {
     pub cookie_fields: Vec<String>,
     pub guard: Option<Expr>,
     pub guard_status: u16,
+    pub guard_msg: Option<String>,
     pub line: usize,
     pub source: Option<Arc<str>>,
 }
@@ -254,6 +255,7 @@ impl<'a> Parser<'a> {
             None
         };
         let mut guard_status = 401;
+        let mut guard_msg = None;
         if guard.is_some() && self.keyword("else") {
             self.advance()?;
             let code = self.expect(Kind::Num)?;
@@ -261,6 +263,16 @@ impl<'a> Parser<'a> {
                 return Err(format!("line {}:{}: bad status {}", code.line, code.col, code.text));
             }
             guard_status = code.num as u16;
+            if self.tok.kind == Kind::Str {
+                let text = self.expect(Kind::Str)?;
+                if text.text.is_empty() {
+                    return Err(format!(
+                        "line {}:{}: else needs a reason, or none at all",
+                        text.line, text.col
+                    ));
+                }
+                guard_msg = Some(text.text);
+            }
         }
         let (konst, const_ctype) = if self.pure {
             match (&self.file_ctype, expr.eval(&Ctx::default())) {
@@ -292,6 +304,7 @@ impl<'a> Parser<'a> {
             cookie_fields: std::mem::take(&mut self.cookie_fields),
             guard,
             guard_status,
+            guard_msg,
             line,
         })
     }

@@ -232,6 +232,13 @@ impl Server {
                 Ok(v) if crate::parser::truthy(&v) => {}
                 Err(e) if e.status == 429 => return self.fail(Some(idx), e, out),
                 _ => {
+                    if let Some(reason) = &rt.guard_msg {
+                        self.failures.fetch_add(1, Ordering::Relaxed);
+                        out.extend_from_slice(b"{\"error\":");
+                        crate::value::write_string(out, reason);
+                        out.push(b'}');
+                        return (rt.guard_status, JSON, None, Some(idx));
+                    }
                     let msg = if rt.guard_status == 400 { "invalid body" } else { "unauthorized" };
                     return self.fail(Some(idx), Err_ { status: rt.guard_status, msg }, out);
                 }

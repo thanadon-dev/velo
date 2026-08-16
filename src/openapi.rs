@@ -46,7 +46,11 @@ fn operation(out: &mut Vec<u8>, r: &Route) {
     response(out, r.status, "ok", r.const_ctype);
     for extra in error_codes(r) {
         out.push(b',');
-        response(out, extra, "error", crate::http::JSON);
+        let why = match &r.guard_msg {
+            Some(reason) if extra == r.guard_status => reason.as_str(),
+            _ => "error",
+        };
+        response(out, extra, why, crate::http::JSON);
     }
     out.extend_from_slice(b"}}");
 }
