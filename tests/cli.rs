@@ -403,10 +403,18 @@ fn logs_carry_status_bytes_and_duration() {
 
         assert!(get(port, "/list").ends_with("[1,2,3]"));
         assert_eq!(get(port, "/missing").lines().next().unwrap(), "HTTP/1.1 404 Not Found");
-        std::thread::sleep(Duration::from_millis(200));
-        stop(&mut child, "-TERM");
 
-        let text = std::fs::read_to_string(&log).unwrap();
+        let want = if check == "json" { "\"status\":404" } else { "GET /missing 404 " };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let text = loop {
+            let text = std::fs::read_to_string(&log).unwrap_or_default();
+            if text.contains(want) {
+                break text;
+            }
+            assert!(Instant::now() < deadline, "{mode} log never reached the disk: {text:?}");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        stop(&mut child, "-TERM");
         if check == "json" {
             let line = text.lines().find(|l| l.contains("\"/list\"")).unwrap_or_default();
             let v = velo::value::parse_json(line.as_bytes()).expect(&text);
