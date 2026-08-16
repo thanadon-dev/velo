@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::process::exit;
 use std::time::Duration;
@@ -11,6 +12,7 @@ fn main() {
         "run" => run(&args),
         "check" => check(&args),
         "routes" => routes(&args),
+        "bench" => bench(&args),
         "openapi" => openapi(&args),
         "new" => new(&args),
         "version" | "--version" | "-v" => println!("velo {VERSION}"),
@@ -31,6 +33,8 @@ fn usage(code: i32) -> ! {
          \x20                               start the server (default :8080, env VELO_ADDR)\n\
          \x20 velo check <file.velo>        compile only, report errors\n\
          \x20 velo routes <file.velo>       list compiled routes\n\
+         \x20 velo bench <file.velo> [-c n] [-d secs] [--data file.json]\n\
+         \x20                               serve the file and load every plain GET route\n\
          \x20 velo openapi <file.velo>      print an OpenAPI 3 document\n\
          \x20 velo new <file.velo>          write a starter file\n\
          \x20 velo version                  print version"
@@ -209,6 +213,91 @@ fn check(args: &[String]) {
             eprintln!("velo: {e}");
             exit(1)
         }
+    }
+}
+
+fn bench(args: &[String]) {
+    let conns: usize = flag(args, "-c").and_then(|v| v.parse().ok()).unwrap_or(8);
+    let secs: u64 = flag(args, "-d").and_then(|v| v.parse().ok()).unwrap_or(2);
+    let store = Store::new();
+    let prog = program(args, Some(store.clone()));
+    if let Some(path) = flag(args, "--data") {
+        if let Err(e) = store.load_file(std::path::Path::new(&path)) {
+            eprintln!("velo: {path}: {e}");
+            exit(1)
+        }
+    }
+    let loaded: usize = store.names().iter().map(|n| store.collection(n).count()).sum();
+    let mut targets = Vec::new();
+    let mut skipped = Vec::new();
+    for r in &prog.routes {
+        let why = if r.method.name() != "GET" {
+            "not a GET"
+        } else if !r.params.is_empty() {
+            "needs a path parameter"
+        } else if r.guard.is_some() {
+            "behind a guard"
+        } else {
+            targets.push((r.method.name().to_string(), r.pattern.clone()));
+            continue;
+        };
+        skipped.push((r.method.name().to_string(), r.pattern.clone(), why));
+    }
+    if targets.is_empty() {
+        eprintln!("velo: nothing to bench, every route needs a parameter, a guard or a body");
+        exit(1)
+    }
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("velo: {e}");
+            exit(1)
+        }
+    };
+    let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+    let server = match Server::new(prog) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("velo: {e}");
+            exit(1)
+        }
+    };
+    let bg = server.clone();
+    std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
+    println!(
+        "velo {VERSION} benching {} route(s), {conns} conns, {secs}s each, {loaded} row(s) loaded",
+        targets.len()
+    );
+    if loaded == 0 {
+        println!("note: the store is empty, pass --data to bench against real rows");
+    }
+    let mut rows = Vec::new();
+    for (method, path) in &targets {
+        let r = velo::bench::run(velo::bench::Args {
+            port,
+            path: path.clone(),
+            method: method.clone(),
+            conns,
+            secs,
+            ..Default::default()
+        });
+        rows.push((format!("{method} {path}"), r));
+    }
+    server.shutdown();
+    rows.sort_by(|a, b| a.1.per_second().partial_cmp(&b.1.per_second()).unwrap_or(Ordering::Equal));
+    let width = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(10);
+    for (label, r) in &rows {
+        println!(
+            "{label:width$}  {:>9.0} req/s  p50 {:>7.3} ms  p99 {:>7.3} ms  {:>7.1} MB/s{}",
+            r.per_second(),
+            r.p50,
+            r.p99,
+            r.bytes as f64 / r.elapsed / 1e6,
+            if r.errors > 0 { format!("  {} errors", r.errors) } else { String::new() }
+        );
+    }
+    for (method, path, why) in &skipped {
+        println!("{:width$}  skipped, {why}", format!("{method} {path}"));
     }
 }
 

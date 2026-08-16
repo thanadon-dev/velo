@@ -1,6 +1,6 @@
 # Velo
 
-**v1.27.2** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.28.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -45,6 +45,7 @@ CLI:
 | `velo run <file> [addr] [--data f.json] [--watch]` | start the server; `addr` is `:8080`, `127.0.0.1:8080`, or `unix:/run/velo.sock` |
 | `velo check <file>` | compile only, report errors with the offending line, column, and a caret |
 | `velo routes <file>` | list compiled routes with their kind, status, guard, and source file and line |
+| `velo bench <file> [-c n] [-d secs] [--data f.json]` | serve the file and load every plain `GET` route in turn, slowest first |
 | `velo openapi <file>` | print an OpenAPI 3.0 document for the routes |
 | `velo new <file>` | write a starter file |
 | `velo version` | print version |
@@ -510,6 +511,24 @@ Env knobs:
 
 ## Benchmarks
 
+`velo bench` answers the question the load generator cannot: which of *your* routes is the slow one. It compiles the file, serves it on a port of its own, loads each `GET` route that needs no path parameter and sits behind no guard, and prints them slowest first. Routes it cannot drive are listed with the reason, so nothing goes missing quietly.
+
+```sh
+velo bench examples/api.velo -c 4 -d 1 --data snapshot.json
+```
+
+```
+velo 1.28.0 benching 17 route(s), 4 conns, 1s each, 40 row(s) loaded
+GET /users/top/one        39467 req/s  p50   0.085 ms  p99   0.287 ms      6.3 MB/s
+GET /users/top            40270 req/s  p50   0.083 ms  p99   0.261 ms      5.4 MB/s
+...
+GET /users/:id        skipped, needs a path parameter
+POST /users           skipped, not a GET
+GET /admin/users      skipped, behind a guard
+```
+
+Without `--data` the store is empty and it says so, because a filter over no rows is not the number anyone wants.
+
 Load generator: `velobench` (ships in this repo, thread per connection, keep-alive). 4-core box, client and server share the machine, release build, v1.8.0. The `users` collection holds 500 rows (21 kB as JSON).
 
 `-c 50`, one request in flight per connection — client-bound, both processes fight for the same 4 cores:
@@ -636,7 +655,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-170 tests (132 integration + 17 CLI + 8 fuzz + 11 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, per-key rate limits, intersected filters, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+171 tests (132 integration + 18 CLI + 8 fuzz + 11 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, per-key rate limits, intersected filters, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
 
@@ -687,7 +706,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 | `src/openapi.rs` | OpenAPI 3.0 document generation |
 | `src/main.rs` | CLI |
 | `examples/embed.rs` | using velo as a library |
-| `src/bin/velobench.rs` | load generator |
+| `src/bench.rs` | the load generator, shared by `velobench` and `velo bench` |
+| `src/bin/velobench.rs` | load generator CLI |
 | `src/bin/velomicro.rs` | in-process dispatch microbenchmark, `velomicro [rows]` |
 
 ## Build notes
@@ -699,6 +719,8 @@ The write path is bounded by the allocator rather than by anything velo does. An
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.28.0** — `velo bench <file>` loads your own API. `velobench` needs a running server and a URL per route, which makes comparing a file's routes a manual exercise, and velo already knows what routes there are. The new command compiles the file, serves it on a port of its own, drives every `GET` route that needs no path parameter and sits behind no guard, and prints them slowest first, which is the order worth reading. Every route it cannot drive is listed with the reason rather than dropped. `--data` loads a snapshot first, and without one it warns that the store is empty, since a filter over no rows measures nothing useful. The load generator moved into the library so both commands run the same code.
 
 **v1.27.2** — tests for the expiry sweep, the one thread in velo that deletes data without a request asking it to. It had a test that it removes the right rows and none that it does so safely while the server is busy. A sweeper, a writer and a reader now run against one collection at once for most of a second, and when they stop every unexpired row must still be there, seeded and written alike, while every expired one is gone. The sweep is also exercised through the binary with `VELO_EXPIRE` set, including a second pass over rows written after the first, so a sweeper that ran once and stopped would be caught. Both tests fail if the sweep compares the wrong way, and the binary one fails if the thread is never started.
 

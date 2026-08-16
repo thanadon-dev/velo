@@ -723,3 +723,66 @@ fn a_background_sweep_runs_while_the_server_serves() {
     stop(&mut child, "-TERM");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
+    let dir = tmp("bench");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write(
+        &dir.join("app.velo"),
+        "GET /health     => \"ok\"\n\
+         GET /users      => db.users.all()\n\
+         GET /count      => db.users.count()\n\
+         GET /users/:id  => db.users.find(id)\n\
+         POST /users     => db.users.create(body)\n\
+         GET /gated      => \"secret\" when header.x_key else 403\n",
+    );
+    std::fs::write(
+        dir.join("data.json"),
+        r#"{"users":{"next_id":2,"rows":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}}"#,
+    )
+    .unwrap();
+
+    let out = Command::new(BIN)
+        .arg("bench")
+        .arg(dir.join("app.velo"))
+        .args(["-c", "2", "-d", "1", "--data"])
+        .arg(dir.join("data.json"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("benching 3 route(s)"), "{text}");
+    assert!(text.contains("2 row(s) loaded"), "the data file was not read: {text}");
+    assert!(!text.contains("the store is empty"), "{text}");
+    for path in ["GET /health", "GET /users", "GET /count"] {
+        assert!(text.contains(path), "{path} missing from {text}");
+    }
+    assert!(text.contains("GET /users/:id"), "{text}");
+    assert!(text.contains("needs a path parameter"), "{text}");
+    assert!(text.contains("POST /users") && text.contains("not a GET"), "{text}");
+    assert!(text.contains("GET /gated") && text.contains("behind a guard"), "{text}");
+    assert!(text.contains("req/s") && text.contains("p99"), "{text}");
+    let rates: Vec<f64> = text
+        .lines()
+        .filter_map(|l| l.split_whitespace().find(|w| w.parse::<f64>().is_ok()))
+        .filter_map(|w| w.parse().ok())
+        .collect();
+    assert!(rates.len() >= 3, "no throughput numbers in {text}");
+    assert!(rates.windows(2).all(|w| w[0] <= w[1]), "slowest route first: {rates:?}");
+
+    let out = Command::new(BIN)
+        .arg("bench")
+        .arg(dir.join("app.velo"))
+        .args(["-c", "2", "-d", "1"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("the store is empty"), "no warning");
+
+    write(&dir.join("all.velo"), "GET /a/:id => db.x.find(id)\n");
+    let out = Command::new(BIN).arg("bench").arg(dir.join("all.velo")).output().unwrap();
+    assert!(!out.status.success(), "nothing benchable must fail");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nothing to bench"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

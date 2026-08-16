@@ -2689,26 +2689,32 @@ fn a_snapshot_is_never_half_written() {
     let full = std::fs::metadata(&path).unwrap().len();
     assert!(full > 200_000, "the snapshot must be big enough to catch a partial write: {full}");
 
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let writer = {
-        let (store, path) = (store.clone(), path.clone());
+        let (store, path, stop, writes) =
+            (store.clone(), path.clone(), stop.clone(), writes.clone());
         std::thread::spawn(move || {
-            for _ in 0..200 {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 store.save_to(&path).unwrap();
+                writes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         })
     };
-    let mut reads = 0;
-    while !writer.is_finished() {
+    for _ in 0..200 {
         let raw = std::fs::read(&path).unwrap();
         assert!(
             matches!(parse_json(&raw), Ok(velo::Value::Obj(_))),
             "a reader saw {} bytes of a snapshot that was still being written",
             raw.len()
         );
-        reads += 1;
     }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
     writer.join().unwrap();
-    assert!(reads > 20, "the reader never got a look in: {reads}");
+    assert!(
+        writes.load(std::sync::atomic::Ordering::Relaxed) > 5,
+        "the writer barely ran, so the reads raced nothing"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
