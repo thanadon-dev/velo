@@ -1,6 +1,6 @@
-POST /signup => db.users.create({ id: lower(trim(body.email)), email: lower(trim(body.email)), pass: password(body.pass) }).email when body.email and body.pass else 400
+POST /signup => db.users.create({ id: lower(trim(body.email)), email: lower(trim(body.email)), pass: password(body.pass) }).email when limit("signup:" + default(header.x_real_ip, "all"), 5) and body.email and body.pass else 400
 
-POST /login  => db.sessions.create({ id: setcookie("session", uuid()), user: lower(trim(body.email)), at: now(), until: now() + 86400000 }).user when verify(body.pass, db.users.find(lower(trim(body.email))).pass) else 401
+POST /login  => db.sessions.create({ id: setcookie("session", uuid()), user: lower(trim(body.email)), at: now(), until: now() + 86400000 }).user when limit("login:" + lower(trim(body.email)), 5) and verify(body.pass, db.users.find(lower(trim(body.email))).pass) else 401
 
 GET  /me     => db.users.find(db.sessions.find(default(cookie.session, header.x_token)).user).select("id", "email") when db.sessions.where("id", default(cookie.session, header.x_token)).count() and db.sessions.find(default(cookie.session, header.x_token)).until > now()
 

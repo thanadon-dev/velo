@@ -14,6 +14,7 @@ pub struct Err_ {
 pub const NOT_FOUND: Err_ = Err_ { status: 404, msg: "not found" };
 pub const BAD_BODY: Err_ = Err_ { status: 400, msg: "invalid body" };
 pub const CONFLICT: Err_ = Err_ { status: 409, msg: "already exists" };
+pub const TOO_MANY: Err_ = Err_ { status: 429, msg: "too many requests" };
 
 pub struct Ctx<'a> {
     pub params: [&'a str; MAX_PARAMS],
@@ -100,6 +101,7 @@ pub enum Builtin {
     Password,
     Verify,
     SetCookie,
+    Limit,
 }
 
 pub enum Stage {
@@ -232,6 +234,16 @@ impl Expr {
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
                     vals.push(a.eval(c)?);
+                }
+                if *f == Builtin::Limit {
+                    let rate = match as_num(&vals[1]) {
+                        Some(rate) if rate >= 1.0 => rate as u32,
+                        _ => return Err(TOO_MANY),
+                    };
+                    if !crate::http::within_limit(&vals[0].as_key(), rate) {
+                        return Err(TOO_MANY);
+                    }
+                    return Ok(Value::Bool(true));
                 }
                 if *f == Builtin::SetCookie {
                     let value = vals.pop().unwrap_or(Value::Null);
@@ -518,6 +530,7 @@ pub fn call_builtin(f: Builtin, args: &[Value]) -> Value {
             Value::Str(Arc::from(crate::crypto::password(&args[0].as_key()).as_str()))
         }
         Builtin::SetCookie => args[1].clone(),
+        Builtin::Limit => Value::Bool(true),
         Builtin::Verify => Value::Bool(match &args[1] {
             Value::Str(stored) => crate::crypto::verify(&args[0].as_key(), stored),
             _ => false,

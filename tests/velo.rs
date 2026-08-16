@@ -2337,3 +2337,45 @@ fn delete_where_wants_a_literal_operator() {
     assert!(compile(r#"DELETE /a => db.x.delete_where("n", query.op, 1)"#, None).is_err());
     assert!(compile(r#"DELETE /a => db.x.delete_where("n", ">", 1, 2)"#, None).is_err());
 }
+
+const LIMIT_SRC: &str = r#"
+POST /login  => "in" when limit("t1:" + body.user, 3) and body.pass == "ok" else 401
+GET  /solo   => "ok" when limit("t2:" + query.k, 2) else 401
+GET  /zero   => "ok" when limit("t3", 0) else 401
+GET  /open   => "open"
+"#;
+
+#[test]
+fn a_limit_counts_per_key_and_answers_429_whatever_the_guard_says() {
+    let s = Server::new(compile(LIMIT_SRC, None).unwrap()).unwrap();
+    let login = |user: &str, pass: &str| {
+        call(&s, "POST", "/login", &format!(r#"{{"user":"{user}","pass":"{pass}"}}"#)).0
+    };
+    assert_eq!([login("ann", "ok"), login("ann", "ok"), login("ann", "ok")], [201, 201, 201]);
+    assert_eq!(login("ann", "ok"), 429, "over the ceiling, not the guard's 401");
+    assert_eq!(login("bob", "ok"), 201, "a different key has its own budget");
+    assert_eq!(login("cid", "WRONG"), 401, "a wrong password is still 401");
+    assert_eq!([login("cid", "WRONG"), login("cid", "WRONG")], [401, 401]);
+    assert_eq!(login("cid", "WRONG"), 429, "failed attempts count toward the ceiling");
+    assert_eq!(call(&s, "GET", "/open", "").0, 200, "an unlimited route is untouched");
+}
+
+#[test]
+fn a_limit_of_zero_lets_nothing_through() {
+    let s = Server::new(compile(LIMIT_SRC, None).unwrap()).unwrap();
+    assert_eq!(call(&s, "GET", "/zero", "").0, 429);
+    assert_eq!(call(&s, "GET", "/solo?k=x", "").0, 200);
+    assert_eq!(call(&s, "GET", "/solo?k=x", "").0, 200);
+    assert_eq!(call(&s, "GET", "/solo?k=x", "").0, 429);
+    assert_eq!(call(&s, "GET", "/solo?k=y", "").0, 200);
+    assert_eq!(call(&s, "GET", "/solo?k=x", "").1, r#"{"error":"too many requests"}"#);
+}
+
+#[test]
+fn limit_wants_a_key_and_a_rate() {
+    assert!(compile(r#"GET /a => "x" when limit("k", 5)"#, None).is_ok());
+    assert!(compile(r#"GET /a => "x" when limit("k")"#, None).is_err());
+    assert!(compile(r#"GET /a => "x" when limit("k", 5, 6)"#, None).is_err());
+    let prog = compile(r#"GET /a => "x" when limit("k", 5)"#, None).unwrap();
+    assert!(prog.routes[0].konst.is_none(), "a limited route must never fold to a constant");
+}

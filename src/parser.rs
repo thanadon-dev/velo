@@ -531,6 +531,7 @@ impl<'a> Parser<'a> {
                 "password" => Builtin::Password,
                 "verify" => Builtin::Verify,
                 "setcookie" => Builtin::SetCookie,
+                "limit" => Builtin::Limit,
                 other => {
                     return Err(format!(
                         "line {}:{}: unknown function {other}()",
@@ -549,7 +550,7 @@ impl<'a> Parser<'a> {
             self.advance()?;
             let arity = match f {
                 Builtin::Openapi | Builtin::Now | Builtin::Uuid => 0,
-                Builtin::Default | Builtin::Verify | Builtin::SetCookie => 2,
+                Builtin::Default | Builtin::Verify | Builtin::SetCookie | Builtin::Limit => 2,
                 _ => 1,
             };
             if args.len() != arity {
@@ -570,6 +571,7 @@ impl<'a> Parser<'a> {
                     | Builtin::Password
                     | Builtin::Verify
                     | Builtin::SetCookie
+                    | Builtin::Limit
             ) {
                 self.pure = false;
             }

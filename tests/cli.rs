@@ -532,13 +532,14 @@ GET /e3 => db.x.find(cookie.session)\n\
 POST /e4 => setcookie(\"session\", uuid())\n\
 GET /e5/:id => db.x.find(id).select(\"id\", \"k\")\n\
 POST /e6 => db.x.create(body.select(\"k\", \"n\"))\n\
-DELETE /e7 => db.x.delete_where(\"n\", \"<\", 5)\n";
+DELETE /e7 => db.x.delete_where(\"n\", \"<\", 5)\n\
+GET /e8 => \"ok\" when limit(header.x_key, 5) else 401\n";
 
     let path = tmp("everything.velo");
     write(&path, program);
     let out = Command::new(BIN).arg("check").arg(&path).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("34 routes"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("35 routes"));
     let _ = std::fs::remove_file(&path);
 }
 

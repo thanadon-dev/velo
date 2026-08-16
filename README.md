@@ -1,6 +1,6 @@
 # Velo
 
-**v1.15.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.16.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -186,10 +186,11 @@ Built-in functions:
 | `password(x)` | a salted PBKDF2-HMAC-SHA256 digest of the text, safe to store |
 | `verify(x, stored)` | whether `x` is the password behind `stored` |
 | `setcookie(name, x)` | sets a hardened `Set-Cookie` on the response and returns `x` |
+| `limit(key, per_second)` | `true` while that key is under its rate, `429` once it is not |
 | `openapi()` | this API's OpenAPI 3.0 document, rendered once at compile time |
 | `file("page.html")` | the file's contents, read at compile time, served with a content type from its extension |
 
-Everything but `now()`, `uuid()`, `date()`, `password()`, `verify()`, `setcookie()` and `openapi()` is folded at compile time when its arguments are constant, so `upper("velo")` costs nothing at runtime.
+Everything but `now()`, `uuid()`, `date()`, `password()`, `verify()`, `setcookie()`, `limit()` and `openapi()` is folded at compile time when its arguments are constant, so `upper("velo")` costs nothing at runtime.
 
 ```velo
 GET  /users      => db.users.page(default(query.offset, 0), default(query.limit, 20))
@@ -244,6 +245,14 @@ DELETE /logout => db.sessions.delete(header.x_token) : 204 when db.sessions.wher
 ```
 
 The work factor is the point: a login costs one full PBKDF2, which is 25 req/s at the default 100 000 rounds over four connections on the 4-core box below, and that slowness is what makes a stolen digest expensive to crack. Nothing else pays it. Checking the session token on every request afterwards is an ordinary indexed lookup, in the same band as any other guarded route.
+
+`VELO_RATE` caps every client at one budget for the whole API, which is the wrong shape for a login: verifying a password costs a full PBKDF2, and an attacker working through one account from many addresses never trips a per-address counter. `limit(key, per_second)` puts a ceiling on whatever you name:
+
+```velo
+POST /login => db.sessions.create({ id: setcookie("session", uuid()), user: lower(body.email) }) when limit("login:" + lower(body.email), 5) and verify(body.pass, db.users.find(lower(body.email)).pass) else 401
+```
+
+Over the ceiling answers `429 {"error":"too many requests"}` whatever `else` says, because a client that is being throttled should be told to back off rather than told its password was wrong. Under the ceiling the guard carries on, so a wrong password is still a `401`. Put `limit` first in the guard: `and` short-circuits, so anything to its left decides whether the attempt is counted at all, and a failed attempt must count. The key is any expression, so `limit(header.x_real_ip, 100)` throttles an address, `limit("login:" + body.email, 5)` throttles an account across every address, and naming both costs two calls. Buckets are fixed one-second windows shared by the whole process, so two routes naming the same key share one budget.
 
 In a browser, hand the token out as a cookie instead of a header. `setcookie(name, value)` writes the `Set-Cookie` and returns `value`, so the same expression that generates a token both stores it and sends it:
 
@@ -590,7 +599,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-139 tests (105 integration + 14 CLI + 6 fuzz + 11 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+142 tests (108 integration + 14 CLI + 6 fuzz + 11 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, per-key rate limits, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -649,6 +658,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.16.0** — `limit(key, per_second)` caps requests against any key a route can name, which is the last thing the auth work left unfinished. `VELO_RATE` gives every client one budget for the whole API, so a login could not be held to a tighter ceiling than a health check, and an attacker working through a single account from many addresses never tripped a per-address counter. `limit("login:" + body.email, 5)` throttles the account, `limit(header.x_real_ip, 100)` throttles the address, and both together is two calls. Going over answers `429` whatever the guard's `else` says, since a throttled client should be told to slow down rather than told its password was wrong, while a wrong password under the ceiling is still a `401`.
 
 **v1.15.0** — rows can expire. v1.9.0 told people to keep a session as a row and v1.10.0 handed the browser a cookie pointing at it, but nothing ever removed one, so a server that stayed up leaked a row per login until it ran out of memory. `VELO_EXPIRE=sessions.until` sweeps a collection on a timer and deletes every row whose named field holds a Unix time in milliseconds that has passed; a row missing the field, or holding something that is not a number, is never touched. The same sweep is available from a route because `delete_where` now takes the comparison operators `where` already took, so `db.sessions.delete_where("until", "<", now())` works and so does deleting by anything else that can be compared.
 

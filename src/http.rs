@@ -230,6 +230,7 @@ impl Server {
         if let Some(g) = &rt.guard {
             match g.eval(ctx) {
                 Ok(v) if crate::parser::truthy(&v) => {}
+                Err(e) if e.status == 429 => return self.fail(Some(idx), e, out),
                 _ => {
                     let msg = if rt.guard_status == 400 { "invalid body" } else { "unauthorized" };
                     return self.fail(Some(idx), Err_ { status: rt.guard_status, msg }, out);
@@ -357,25 +358,7 @@ impl Server {
         if self.rate == 0 {
             return true;
         }
-        let mut hash: u64 = 0xcbf29ce484222325;
-        for b in key.as_bytes() {
-            hash ^= *b as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        let mut shard = self.limiter[hash as usize % RATE_SHARDS].lock().unwrap();
-        let now = Instant::now();
-        if shard.len() > RATE_KEYS_MAX {
-            shard.retain(|_, (start, _)| now.duration_since(*start) < Duration::from_secs(1));
-        }
-        if let Some(slot) = shard.get_mut(key) {
-            if now.duration_since(slot.0) >= Duration::from_secs(1) {
-                *slot = (now, 0);
-            }
-            slot.1 += 1;
-            return slot.1 <= self.rate;
-        }
-        shard.insert(key.to_string(), (now, 1));
-        true
+        take_token(&self.limiter, key, self.rate)
     }
 
     pub fn shutdown(&self) {
@@ -481,6 +464,40 @@ pub fn set_cookie(out: &mut Vec<u8>, name: &str, value: &str) {
         out.extend_from_slice(b"; Max-Age=0");
     }
     out.extend_from_slice(b"\r\n");
+}
+
+fn shards() -> &'static Vec<Mutex<RateShard>> {
+    static SHARDS: std::sync::OnceLock<Vec<Mutex<RateShard>>> = std::sync::OnceLock::new();
+    SHARDS.get_or_init(|| (0..RATE_SHARDS).map(|_| Mutex::new(HashMap::default())).collect())
+}
+
+pub fn within_limit(key: &str, rate: u32) -> bool {
+    if rate == 0 {
+        return false;
+    }
+    take_token(shards(), key, rate)
+}
+
+fn take_token(limiter: &[Mutex<RateShard>], key: &str, rate: u32) -> bool {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for b in key.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let mut shard = limiter[hash as usize % RATE_SHARDS].lock().unwrap();
+    let now = Instant::now();
+    if shard.len() > RATE_KEYS_MAX {
+        shard.retain(|_, (start, _)| now.duration_since(*start) < Duration::from_secs(1));
+    }
+    if let Some(slot) = shard.get_mut(key) {
+        if now.duration_since(slot.0) >= Duration::from_secs(1) {
+            *slot = (now, 0);
+        }
+        slot.1 += 1;
+        return slot.1 <= rate;
+    }
+    shard.insert(key.to_string(), (now, 1));
+    true
 }
 
 fn cookie_char(b: u8) -> bool {
