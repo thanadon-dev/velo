@@ -797,16 +797,17 @@ impl Agg {
     }
 }
 
-enum SortKey {
+enum SortKey<'a> {
     Num(f64),
-    Text(String),
+    Text(std::borrow::Cow<'a, str>),
 }
 
-fn sort_key(v: Option<&Value>) -> SortKey {
+fn sort_key(v: Option<&Value>) -> SortKey<'_> {
     match v {
         Some(Value::Num(n)) => SortKey::Num(*n),
-        Some(other) => SortKey::Text(other.as_key()),
-        None => SortKey::Text(String::new()),
+        Some(Value::Str(s)) => SortKey::Text(std::borrow::Cow::Borrowed(s)),
+        Some(other) => SortKey::Text(std::borrow::Cow::Owned(other.as_key())),
+        None => SortKey::Text(std::borrow::Cow::Borrowed("")),
     }
 }
 
@@ -1170,14 +1171,14 @@ fn sort_rows(rows: &mut Vec<&Value>, field: &str) {
     sort_rows_top(rows, field, None)
 }
 
-fn sort_rows_top(rows: &mut Vec<&Value>, field: &str, top: Option<usize>) {
+fn sort_rows_top<'a>(rows: &mut Vec<&'a Value>, field: &str, top: Option<usize>) {
     let (sort_field, desc) = match field.strip_prefix('-') {
         Some(f) => (f, true),
         None => (field, false),
     };
     let mut keyed: Vec<(SortKey, usize, &Value)> =
         rows.iter().enumerate().map(|(at, r)| (sort_key(r.get_ref(sort_field)), at, *r)).collect();
-    let order = |a: &(SortKey, usize, &Value), b: &(SortKey, usize, &Value)| {
+    let order = |a: &(SortKey<'a>, usize, &'a Value), b: &(SortKey<'a>, usize, &'a Value)| {
         let ord = cmp_keys(&a.0, &b.0);
         let ord = if desc { ord.reverse() } else { ord };
         ord.then(a.1.cmp(&b.1))

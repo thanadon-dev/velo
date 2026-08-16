@@ -2500,3 +2500,45 @@ fn a_filter_after_a_page_still_sees_the_page() {
     );
     assert_eq!(call(&s, "GET", "/after?t=t0", "").1.matches(r#""id""#).count(), 10);
 }
+
+const MIXED_SORT_SRC: &str = r#"
+POST /add    => db.mixed.create(body)
+GET  /up     => db.mixed.order("v").select("id")
+GET  /down   => db.mixed.order("-v").select("id")
+GET  /uptop  => db.mixed.order("v").page(0, 4).select("id")
+GET  /best   => db.mixed.order("-v").first().select("id")
+"#;
+
+#[test]
+fn sorting_orders_mixed_types_the_same_way_every_route_does() {
+    let s = Server::new(compile(MIXED_SORT_SRC, None).unwrap()).unwrap();
+    for body in [
+        r#"{"id":"num2","v":2}"#,
+        r#"{"id":"text_b","v":"b"}"#,
+        r#"{"id":"num10","v":10}"#,
+        r#"{"id":"missing"}"#,
+        r#"{"id":"null","v":null}"#,
+        r#"{"id":"text_a","v":"a"}"#,
+        r#"{"id":"bool","v":true}"#,
+        r#"{"id":"num2b","v":2}"#,
+    ] {
+        assert_eq!(call(&s, "POST", "/add", body).0, 201);
+    }
+    let up = call(&s, "GET", "/up", "").1;
+    assert_eq!(
+        up,
+        r#"[{"id":"num2"},{"id":"num2b"},{"id":"num10"},{"id":"missing"},{"id":"null"},{"id":"text_a"},{"id":"text_b"},{"id":"bool"}]"#,
+        "numbers first in value order, then empties, then text, ties in insertion order"
+    );
+    let down = call(&s, "GET", "/down", "").1;
+    assert_eq!(down.matches(r#""id""#).count(), 8);
+    assert!(down.starts_with(r#"[{"id":"bool"}"#), "descending flips the whole order: {down}");
+
+    let top: Vec<&str> = up.split("},{").take(4).collect();
+    assert_eq!(
+        call(&s, "GET", "/uptop", "").1,
+        format!("{}}}]", top.join("},{")),
+        "a partial sort must agree with the full one on mixed types too"
+    );
+    assert_eq!(call(&s, "GET", "/best", "").1, r#"{"id":"bool"}"#, "first() agrees as well");
+}
