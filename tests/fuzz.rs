@@ -267,6 +267,10 @@ GET  /list    => db.rows.where("k", query.v).select("id")
 GET  /first   => db.rows.where("k", query.v).order("id").first().select("id")
 GET  /top     => db.rows.order("k").page(0, query.p).select("id")
 GET  /allsort => db.rows.order("k").select("id")
+PUT  /up/:id  => db.rows.update(id, body)
+PUT  /ups/:id => db.rows.upsert(id, body)
+DELETE /del/:id => db.rows.delete(id)
+DELETE /delw  => db.rows.delete_where("g", query.g)
 "#;
 
 struct Row {
@@ -411,5 +415,165 @@ fn queries_over_randomly_shaped_rows_agree_with_counting_by_hand() {
                 "round {round}: top {p} must match the full sort"
             );
         }
+    }
+}
+
+#[derive(Clone)]
+struct Held {
+    k: String,
+    g: String,
+    n: Option<f64>,
+}
+
+fn send(s: &Server, method: &str, path: &str, body: &str) -> u16 {
+    let mut out = Vec::new();
+    s.dispatch(method, path, body.as_bytes(), &mut out).0
+}
+
+fn field_patch(rng: &mut Rng, held: &mut Held) -> String {
+    let ks = ["\"a\"", "\"b\"", "\"c\"", "null", "12", "true", "\"\""];
+    let gs = ["\"x\"", "\"y\"", "null"];
+    let ns = ["1", "2.5", "-3", "\"7\"", "null"];
+    match rng.below(3) {
+        0 => {
+            let v = ks[rng.below(ks.len())];
+            held.k = as_key(Some(v));
+            format!("\"k\":{v}")
+        }
+        1 => {
+            let v = gs[rng.below(gs.len())];
+            held.g = as_key(Some(v));
+            format!("\"g\":{v}")
+        }
+        _ => {
+            let v = ns[rng.below(ns.len())];
+            held.n = (!v.starts_with('"')).then(|| v.parse::<f64>().ok()).flatten();
+            format!("\"n\":{v}")
+        }
+    }
+}
+
+fn check(s: &Server, held: &std::collections::BTreeMap<usize, Held>, note: &str) {
+    assert!(held.len() >= 512, "{note}: {} rows is under the index threshold", held.len());
+    assert_eq!(ask(s, "/n"), held.len().to_string(), "{note}: count");
+    for want in ["a", "b", "c", "12", "true", "", "gone"] {
+        let expect: Vec<usize> =
+            held.iter().filter(|(_, h)| h.k == want).map(|(id, _)| *id).collect();
+        assert_eq!(
+            ask(s, &format!("/eq?v={want}")),
+            expect.len().to_string(),
+            "{note}: count of {want:?}"
+        );
+        assert_eq!(ids(&ask(s, &format!("/list?v={want}"))), expect, "{note}: rows of {want:?}");
+        for g in ["x", "y", ""] {
+            let n = held.values().filter(|h| h.k == want && h.g == g).count();
+            assert_eq!(
+                ask(s, &format!("/both?v={want}&g={g}")),
+                n.to_string(),
+                "{note}: {want:?} and {g:?}"
+            );
+        }
+    }
+    for g in ["x", "y", ""] {
+        let by_hand: f64 = held.values().filter(|h| h.g == g).filter_map(|h| h.n).sum();
+        let got: f64 = ask(s, &format!("/sum?g={g}")).parse().unwrap();
+        assert!((got - by_hand).abs() < 1e-9, "{note}: sum {g:?} {got} vs {by_hand}");
+    }
+    let mut sorted = ids(&ask(s, "/allsort"));
+    assert_eq!(sorted.len(), held.len(), "{note}: sorting lost rows");
+    sorted.sort_unstable();
+    assert_eq!(sorted, held.keys().copied().collect::<Vec<_>>(), "{note}: wrong set of rows");
+}
+
+#[test]
+fn writes_keep_every_index_and_cache_honest() {
+    let mut rng = Rng(0x9e37_79b9_7f4a);
+    for round in 0..iterations(2) {
+        let rows = shape_rows(&mut rng, 1200);
+        let order: Vec<usize> = (0..rows.len()).collect();
+        let s = load(&rows, &order);
+        let mut held: std::collections::BTreeMap<usize, Held> =
+            rows.iter().map(|r| (r.id, Held { k: r.k.clone(), g: r.g.clone(), n: r.n })).collect();
+        let mut next = rows.len();
+        check(&s, &held, &format!("round {round} start"));
+
+        for step in 0..600 {
+            let ids_now: Vec<usize> = held.keys().copied().collect();
+            let roll = if held.len() < 800 {
+                5 + rng.below(4)
+            } else if held.len() > 1100 {
+                rng.below(10)
+            } else {
+                rng.below(9)
+            };
+            match roll {
+                0..=2 if !ids_now.is_empty() => {
+                    let id = ids_now[rng.below(ids_now.len())];
+                    let mut h = held[&id].clone();
+                    let patch = field_patch(&mut rng, &mut h);
+                    assert_eq!(send(&s, "PUT", &format!("/up/{id}"), &format!("{{{patch}}}")), 200);
+                    held.insert(id, h);
+                }
+                3..=4 if !ids_now.is_empty() => {
+                    let id = ids_now[rng.below(ids_now.len())];
+                    assert_eq!(send(&s, "DELETE", &format!("/del/{id}"), ""), 200);
+                    held.remove(&id);
+                    assert_eq!(send(&s, "DELETE", &format!("/del/{id}"), ""), 404, "already gone");
+                }
+                5..=6 => {
+                    let mut h = Held { k: String::new(), g: String::new(), n: None };
+                    let patch = field_patch(&mut rng, &mut h);
+                    let body = format!("{{\"id\":{next},{patch}}}");
+                    assert_eq!(send(&s, "POST", "/add", &body), 201);
+                    held.insert(next, h);
+                    next += 1;
+                }
+                7..=8 => {
+                    let reuse = !ids_now.is_empty() && rng.below(2) == 0;
+                    let id = if reuse { ids_now[rng.below(ids_now.len())] } else { next };
+                    let mut h = held.get(&id).cloned().unwrap_or(Held {
+                        k: String::new(),
+                        g: String::new(),
+                        n: None,
+                    });
+                    let patch = field_patch(&mut rng, &mut h);
+                    let code = send(&s, "PUT", &format!("/ups/{id}"), &format!("{{{patch}}}"));
+                    assert_eq!(code, 200);
+                    held.insert(id, h);
+                    if !reuse {
+                        next += 1;
+                    }
+                }
+                9 => {
+                    let g = ["x", "y", ""][rng.below(3)];
+                    let gone: Vec<usize> =
+                        held.iter().filter(|(_, h)| h.g == g).map(|(id, _)| *id).collect();
+                    assert_eq!(send(&s, "DELETE", &format!("/delw?g={g}"), ""), 200);
+                    for id in gone {
+                        held.remove(&id);
+                    }
+                }
+                _ => {
+                    let mut h = Held { k: String::new(), g: String::new(), n: None };
+                    let patch = field_patch(&mut rng, &mut h);
+                    let body = format!("{{\"id\":{next},{patch}}}");
+                    assert_eq!(send(&s, "POST", "/add", &body), 201);
+                    held.insert(next, h);
+                    next += 1;
+                }
+            }
+            let touched = ["a", "b", "c", "12", "true", ""][step % 6];
+            let expect = held.values().filter(|h| h.k == touched).count();
+            assert_eq!(
+                ask(&s, &format!("/eq?v={touched}")),
+                expect.to_string(),
+                "round {round} step {step}: a read straight after a write must see it"
+            );
+            assert_eq!(ask(&s, "/n"), held.len().to_string(), "round {round} step {step}: count");
+            if step % 30 == 29 {
+                check(&s, &held, &format!("round {round} step {step}"));
+            }
+        }
+        check(&s, &held, &format!("round {round} end"));
     }
 }

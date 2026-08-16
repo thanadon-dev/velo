@@ -2594,3 +2594,37 @@ fn a_repeated_key_keeps_the_last_value_once() {
     assert_eq!(call(&s, "GET", "/pick?v=last", "").1, r#"[{"id":"dup"}]"#);
     assert_eq!(call(&s, "GET", "/pick?v=first", "").1, "[]");
 }
+
+const PURGE_SRC: &str = r#"
+POST /add    => db.jobs.create(body)
+GET  /n      => db.jobs.count()
+GET  /done   => db.jobs.where("state", "done").count()
+GET  /rows   => db.jobs.where("state", "done").select("id")
+DELETE /purge => db.jobs.delete_where("state", query.s)
+"#;
+
+#[test]
+fn a_read_repeated_after_delete_where_sees_the_deletion() {
+    let s = Server::new(compile(PURGE_SRC, None).unwrap()).unwrap();
+    for i in 0..900 {
+        let state = if i % 3 == 0 { "done" } else { "open" };
+        let body = format!(r#"{{"id":{i},"state":"{state}"}}"#);
+        assert_eq!(call(&s, "POST", "/add", &body).0, 201);
+    }
+    assert_eq!(call(&s, "GET", "/done", "").1, "300");
+    assert_eq!(call(&s, "GET", "/done", "").1, "300", "the second read is served from cache");
+    assert_eq!(call(&s, "GET", "/rows", "").1.matches(r#""id""#).count(), 300);
+
+    assert_eq!(call(&s, "DELETE", "/purge?s=done", "").1, r#"{"deleted":300}"#);
+    assert_eq!(call(&s, "GET", "/n", "").1, "600");
+    assert_eq!(call(&s, "GET", "/done", "").1, "0", "the cached count must not survive the purge");
+    assert_eq!(call(&s, "GET", "/rows", "").1, "[]");
+
+    for i in 900..960 {
+        assert_eq!(call(&s, "POST", "/add", &format!(r#"{{"id":{i},"state":"done"}}"#)).0, 201);
+    }
+    assert_eq!(call(&s, "GET", "/done", "").1, "60");
+    assert_eq!(call(&s, "DELETE", "/purge?s=open", "").1, r#"{"deleted":600}"#);
+    assert_eq!(call(&s, "GET", "/done", "").1, "60", "purging others leaves these alone");
+    assert_eq!(call(&s, "GET", "/n", "").1, "60");
+}
