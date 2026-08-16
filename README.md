@@ -1,6 +1,6 @@
 # Velo
 
-**v1.24.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.25.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -72,6 +72,16 @@ include "parts/posts.velo"
 
 GET /health => "ok"
 ```
+
+Naming a directory takes every `.velo` file directly inside it, in name order, which keeps one line in the entry file however many parts there are:
+
+```velo
+include "parts"
+
+GET /health => "ok"
+```
+
+It does not descend into subdirectories, and anything that is not a `.velo` file is left alone, so notes and templates can live beside the routes. `--watch` follows the directory itself, so a part added while the server is running is picked up like an edit to an existing one. `examples/shop/app.velo` uses this form.
 
 Expressions:
 
@@ -603,11 +613,11 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-157 tests (122 integration + 14 CLI + 8 fuzz + 11 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, per-key rate limits, intersected filters, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+159 tests (122 integration + 16 CLI + 8 fuzz + 11 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, per-key rate limits, intersected filters, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
 
-`tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
+`tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, a directory named as a whole, a file appearing in a watched directory, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
 `tests/fuzz.rs` adds eight deterministic robustness tests. One of them mixes writes into the reads: it holds 1 200 rows, applies six hundred inserts, updates, upserts, deletes and bulk deletes chosen at random, keeps the collection above the size where the index switches on, and after every single write checks a filtered count and the total against the same figures tracked in the test. Another builds 1 200 rows of randomly shaped JSON, every field optional and in a random order, values drawn from numbers, text, `null`, `true` and the empty string, then checks every read against the same answer counted by hand in the test: equality and its negation must cover every row, two filters must agree whichever order they are written in, a sum must ignore the values that only look numeric, a list must hold exactly the ids the filter should have found, and every top-`n` must equal the full sort truncated. The same rows are loaded a second time in a shuffled order and must answer identically, which is what catches a read that depends on where the previous row happened to keep its fields. The rest are: 2 000 mutated sources and 2 000 random byte strings through the compiler, 300 connections of malformed and truncated HTTP, 400 connections carrying byte-level mutations of otherwise valid requests (every answer must still be a well-formed status line), and oversized header and body requests. They also cover slow drip-feeding clients. `VELO_FUZZ_ROUNDS` raises the iteration counts for a longer hunt; 40 000 compiler mutations and 4 000 mutated requests have been run clean. They assert the process never panics and that the server still answers a normal request afterwards.
 
@@ -666,6 +676,8 @@ The write path is bounded by the allocator rather than by anything velo does. An
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.25.0** — `include "parts"` takes every `.velo` file in a directory, in name order, instead of one line per file. It does not recurse, it ignores anything that is not a `.velo` file, and a file reached both through a directory and by name is still loaded once. `--watch` now watches the directory as well as the files, so a part dropped in while the server is running restarts it the same way editing an existing one does. `examples/shop/app.velo` went from three include lines to one.
 
 **v1.24.0** — the same treatment for the compiler and the router, and one of the faults turned out to be real. A route pattern with a parameter would match a path whose segment for it is empty, so `/a//b/2` answered `200` with the first parameter set to the empty string where it should have been a `404`. Nothing caught that, and now something does, across empty segments in the first, middle and last position. The other gap was a guard being const-folded along with its route: it changes no answer today, because the guard is evaluated before the constant body is written, but it is the layer that keeps a future reordering from turning into a leak, so a test now pins both halves, that a guarded route keeps no folded body and no compile-time ETag, and that its guard still refuses before anything is served. `HEAD` falling back to the matching `GET` was already covered.
 

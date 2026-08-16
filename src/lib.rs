@@ -69,7 +69,37 @@ fn load_into(
         r
     }));
     for include in part.includes {
-        load_into(prog, &dir.join(include), store, seen)?;
+        let target = dir.join(&include);
+        if target.is_dir() {
+            load_dir(prog, &target, store, seen)?;
+        } else {
+            load_into(prog, &target, store, seen)?;
+        }
+    }
+    Ok(())
+}
+
+fn load_dir(
+    prog: &mut Program,
+    dir: &std::path::Path,
+    store: &std::sync::Arc<Store>,
+    seen: &mut Vec<std::path::PathBuf>,
+) -> Result<(), String> {
+    let listing = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    for entry in listing.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|e| e == "velo") {
+            files.push(path);
+        }
+    }
+    files.sort();
+    let full = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    if !prog.sources.contains(&full) {
+        prog.sources.push(full);
+    }
+    for file in files {
+        load_into(prog, &file, store, seen)?;
     }
     Ok(())
 }

@@ -577,3 +577,89 @@ fn watch_follows_files_pulled_in_by_file() {
     stop(&mut child, "-TERM");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn including_a_directory_takes_every_velo_file_in_name_order() {
+    let dir = tmp("incdir");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("parts/nested")).unwrap();
+    write(&dir.join("app.velo"), "include \"parts\"\n\nGET /health => \"ok\"\n");
+    write(&dir.join("parts/b_posts.velo"), "GET /posts => db.posts.all()\n");
+    write(&dir.join("parts/a_users.velo"), "GET /users => db.users.all()\n");
+    write(&dir.join("parts/notes.txt"), "GET /nope => \"no\"\n");
+    write(&dir.join("parts/readme.md"), "not velo\n");
+    write(&dir.join("parts/nested/deep.velo"), "GET /deep => \"deep\"\n");
+
+    let out = Command::new(BIN).arg("routes").arg(dir.join("app.velo")).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(text.lines().count(), 3, "only the two velo files and app itself: {text}");
+    assert!(text.contains("/users") && text.contains("/posts") && text.contains("/health"));
+    assert!(!text.contains("/deep"), "a directory include does not recurse: {text}");
+    assert!(!text.contains("/nope"), "a file that is not .velo is left alone: {text}");
+    let users = text.find("/users").unwrap();
+    let posts = text.find("/posts").unwrap();
+    assert!(users < posts, "files load in name order, so a_users before b_posts: {text}");
+
+    write(&dir.join("both.velo"), "include \"parts\"\ninclude \"parts/a_users.velo\"\n");
+    let out = Command::new(BIN).arg("check").arg(dir.join("both.velo")).output().unwrap();
+    assert!(
+        out.status.success(),
+        "a file reached twice must not be loaded twice: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("2 routes"));
+
+    write(&dir.join("missing.velo"), "include \"gone\"\nGET /a => \"a\"\n");
+    let out = Command::new(BIN).arg("check").arg(dir.join("missing.velo")).output().unwrap();
+    assert!(!out.status.success(), "a missing include must fail");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(err.contains("gone"), "the error names the path it could not read: {err}");
+
+    std::fs::create_dir_all(dir.join("empty")).unwrap();
+    write(&dir.join("bare.velo"), "include \"empty\"\nGET /only => \"one\"\n");
+    let out = Command::new(BIN).arg("check").arg(dir.join("bare.velo")).output().unwrap();
+    assert!(
+        out.status.success(),
+        "an empty directory is not an error: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn watch_notices_a_file_appearing_in_an_included_directory() {
+    let dir = tmp("watchdir");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("parts")).unwrap();
+    write(&dir.join("app.velo"), "include \"parts\"\nGET /health => \"ok\"\n");
+    write(&dir.join("parts/one.velo"), "GET /one => \"first\"\n");
+
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(dir.join("app.velo"))
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--watch")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    assert!(get(port, "/one").ends_with("first"), "{}", get(port, "/one"));
+    assert!(get(port, "/two").contains("not found"), "the second route is not there yet");
+
+    write(&dir.join("parts/two.velo"), "GET /two => \"second\"\n");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if get(port, "/two").ends_with("second") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "watch never picked up the new file in the directory");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(get(port, "/one").ends_with("first"), "the file that was already there still serves");
+
+    stop(&mut child, "-TERM");
+    let _ = std::fs::remove_dir_all(&dir);
+}
