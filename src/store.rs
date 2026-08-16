@@ -1239,14 +1239,10 @@ fn as_row(v: Value) -> Value {
 fn with_id(v: Value, id: f64) -> Value {
     match v {
         Value::Obj(o) | Value::Row(o, _) => {
-            let mut row: Obj = Vec::with_capacity(o.len() + 1);
-            row.push((crate::value::intern("id"), Value::Num(id)));
-            for (k, val) in o.iter() {
-                if &**k != "id" {
-                    row.push((k.clone(), val.clone()));
-                }
-            }
-            Value::row(row)
+            let mut fields = Arc::try_unwrap(o).unwrap_or_else(|shared| (*shared).clone());
+            fields.retain(|(k, _)| &**k != "id");
+            fields.insert(0, (crate::value::intern("id"), Value::Num(id)));
+            Value::row(fields)
         }
         other => Value::row(vec![
             (crate::value::intern("id"), Value::Num(id)),
