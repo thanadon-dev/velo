@@ -51,6 +51,18 @@ impl Value {
         }
     }
 
+    pub fn get_at(&self, key: &str, at: &mut usize) -> Option<&Value> {
+        let (Value::Obj(o) | Value::Row(o, _)) = self else { return None };
+        if let Some((k, v)) = o.get(*at) {
+            if &**k == key {
+                return Some(v);
+            }
+        }
+        let found = o.iter().position(|(k, _)| &**k == key)?;
+        *at = found;
+        Some(&o[found].1)
+    }
+
     pub fn key_eq(&self, want: &str) -> bool {
         match self {
             Value::Str(s) => &**s == want,
@@ -323,7 +335,10 @@ impl<'a> P<'a> {
             self.i += 1;
             self.ws();
             let v = self.value()?;
-            fields.push((k, v));
+            match fields.iter_mut().find(|(seen, _)| *seen == k) {
+                Some(slot) => slot.1 = v,
+                None => fields.push((k, v)),
+            }
             self.ws();
             match self.b.get(self.i) {
                 Some(b',') => self.i += 1,

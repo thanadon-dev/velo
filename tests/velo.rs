@@ -2542,3 +2542,55 @@ fn sorting_orders_mixed_types_the_same_way_every_route_does() {
     );
     assert_eq!(call(&s, "GET", "/best", "").1, r#"{"id":"bool"}"#, "first() agrees as well");
 }
+
+const SHAPE_SRC: &str = r#"
+POST /add    => db.shapes.create(body)
+GET  /pick   => db.shapes.where("k", query.v).select("id")
+GET  /sorted => db.shapes.order("k").select("id")
+GET  /top    => db.shapes.order("-k").page(0, 3).select("id")
+GET  /hunt   => db.shapes.search("k", query.v).select("id")
+GET  /gone   => db.shapes.where("k", "<", query.v).count()
+GET  /one    => db.shapes.first("k", query.v).select("id")
+"#;
+
+#[test]
+fn rows_of_different_shapes_are_read_by_name_not_by_position() {
+    let s = Server::new(compile(SHAPE_SRC, None).unwrap()).unwrap();
+    let bodies = [
+        r#"{"id":"a","k":"m","pad":1}"#,
+        r#"{"id":"b","pad":1,"k":"m"}"#,
+        r#"{"id":"c","x":1,"y":2,"k":"z"}"#,
+        r#"{"id":"d","pad":9}"#,
+        r#"{"id":"e","k":"m"}"#,
+        r#"{"id":"f","p":1,"q":2,"r":3,"s":4,"k":"a"}"#,
+    ];
+    for body in bodies {
+        assert_eq!(call(&s, "POST", "/add", body).0, 201);
+    }
+    assert_eq!(
+        call(&s, "GET", "/pick?v=m", "").1,
+        r#"[{"id":"a"},{"id":"b"},{"id":"e"}]"#,
+        "the field sits at a different index in each of these rows"
+    );
+    assert_eq!(call(&s, "GET", "/pick?v=z", "").1, r#"[{"id":"c"}]"#);
+    assert_eq!(call(&s, "GET", "/one?v=m", "").1, r#"{"id":"a"}"#);
+    assert_eq!(
+        call(&s, "GET", "/sorted", "").1,
+        r#"[{"id":"d"},{"id":"f"},{"id":"a"},{"id":"b"},{"id":"e"},{"id":"c"}]"#,
+        "the row missing the field sorts as empty, then a, then the three m, then z"
+    );
+    assert_eq!(call(&s, "GET", "/top", "").1, r#"[{"id":"c"},{"id":"a"},{"id":"b"}]"#);
+    assert_eq!(call(&s, "GET", "/hunt?v=m", "").1, r#"[{"id":"a"},{"id":"b"},{"id":"e"}]"#);
+    assert_eq!(call(&s, "GET", "/gone?v=m", "").1, "1", "only k=a is below m");
+}
+
+#[test]
+fn a_repeated_key_keeps_the_last_value_once() {
+    let s = Server::new(compile(SHAPE_SRC, None).unwrap()).unwrap();
+    let (code, body, _) = call(&s, "POST", "/add", r#"{"id":"dup","k":"first","k":"last"}"#);
+    assert_eq!(code, 201);
+    assert_eq!(body, r#"{"id":"dup","k":"last"}"#, "one k, the later value");
+    assert_eq!(body.matches(r#""k""#).count(), 1);
+    assert_eq!(call(&s, "GET", "/pick?v=last", "").1, r#"[{"id":"dup"}]"#);
+    assert_eq!(call(&s, "GET", "/pick?v=first", "").1, "[]");
+}

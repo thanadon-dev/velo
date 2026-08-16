@@ -147,9 +147,10 @@ impl Snapshot {
             }
         }
         let mut by_value: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut at = 0;
         for (i, row) in self.rows.iter().enumerate() {
             if is_live(row) {
-                by_value.entry(index_key(row, field)).or_default().push(i as u32);
+                by_value.entry(index_key(row, field, &mut at)).or_default().push(i as u32);
             }
         }
         let hits = by_value.get(want).cloned().unwrap_or_default();
@@ -164,7 +165,8 @@ impl Snapshot {
 
     fn extend_index(&mut self, at: usize, row: &Value) {
         for (field, by_value) in self.index.get_mut().unwrap().iter_mut() {
-            by_value.entry(index_key(row, field)).or_default().push(at as u32);
+            let mut seen = 0;
+            by_value.entry(index_key(row, field, &mut seen)).or_default().push(at as u32);
         }
     }
 
@@ -421,7 +423,8 @@ impl Collection {
 
     pub fn first(&self, field: &str, want: &str) -> Option<Value> {
         let s = self.snap.read().unwrap();
-        let found = s.live().find(|r| field_eq(r, field, want)).cloned();
+        let mut at = 0;
+        let found = s.live().find(|r| field_eq(r, field, want, &mut at)).cloned();
         found
     }
 
@@ -573,9 +576,10 @@ impl Collection {
     pub fn delete_where(&self, field: &str, op: Cmp, want: &str) -> usize {
         let want_num = want.trim().parse::<f64>().ok();
         let mut s = self.snap.write().unwrap();
+        let mut at = 0;
         let hits: Vec<String> = s
             .live()
-            .filter(|r| field_cmp(r, field, op, want, want_num))
+            .filter(|r| field_cmp(r, field, op, want, want_num, &mut at))
             .map(|r| r.get("id").as_key())
             .collect();
         if hits.is_empty() {
@@ -811,16 +815,16 @@ fn sort_key(v: Option<&Value>) -> SortKey<'_> {
     }
 }
 
-fn field_has(row: &Value, field: &str, lower_needle: &str) -> bool {
-    match row.get_ref(field) {
+fn field_has(row: &Value, field: &str, lower_needle: &str, at: &mut usize) -> bool {
+    match row.get_at(field, at) {
         Some(Value::Str(s)) => s.to_lowercase().contains(lower_needle),
         Some(other) => other.as_key().to_lowercase().contains(lower_needle),
         None => lower_needle.is_empty(),
     }
 }
 
-fn field_eq(row: &Value, field: &str, want: &str) -> bool {
-    match row.get_ref(field) {
+fn field_eq(row: &Value, field: &str, want: &str, at: &mut usize) -> bool {
+    match row.get_at(field, at) {
         Some(v) => v.key_eq(want),
         None => want.is_empty(),
     }
@@ -829,7 +833,8 @@ fn field_eq(row: &Value, field: &str, want: &str) -> bool {
 fn filtered_json(rows: &Rows, field: &str, want: &str) -> Arc<Vec<u8>> {
     let mut out = Vec::with_capacity(256);
     out.push(b'[');
-    for (n, row) in rows.live().filter(|r| field_eq(r, field, want)).enumerate() {
+    let mut at = 0;
+    for (n, row) in rows.live().filter(|r| field_eq(r, field, want, &mut at)).enumerate() {
         if n > 0 {
             out.push(b',');
         }
@@ -843,7 +848,8 @@ fn searched_json(rows: &Rows, field: &str, needle: &str) -> Arc<Vec<u8>> {
     let lower = needle.to_lowercase();
     let mut out = Vec::with_capacity(256);
     out.push(b'[');
-    for (n, row) in rows.live().filter(|r| field_has(r, field, &lower)).enumerate() {
+    let mut at = 0;
+    for (n, row) in rows.live().filter(|r| field_has(r, field, &lower, &mut at)).enumerate() {
         if n > 0 {
             out.push(b',');
         }
@@ -906,11 +912,18 @@ impl Cmp {
     }
 }
 
-fn field_cmp(row: &Value, field: &str, op: Cmp, want: &str, want_num: Option<f64>) -> bool {
+fn field_cmp(
+    row: &Value,
+    field: &str,
+    op: Cmp,
+    want: &str,
+    want_num: Option<f64>,
+    at: &mut usize,
+) -> bool {
     if op == Cmp::Eq || op == Cmp::Ne {
-        return field_eq(row, field, want) == (op == Cmp::Eq);
+        return field_eq(row, field, want, at) == (op == Cmp::Eq);
     }
-    let Some(value) = row.get_ref(field) else { return false };
+    let Some(value) = row.get_at(field, at) else { return false };
     let ord = match (value, want_num) {
         (Value::Num(n), Some(w)) => n.partial_cmp(&w),
         (Value::Str(s), Some(w)) => match s.trim().parse::<f64>() {
@@ -991,8 +1004,8 @@ fn chain_key(stages: &[Stage]) -> String {
     key
 }
 
-fn index_key(row: &Value, field: &str) -> String {
-    row.get_ref(field).map(|v| v.as_key()).unwrap_or_default()
+fn index_key(row: &Value, field: &str, at: &mut usize) -> String {
+    row.get_at(field, at).map(|v| v.as_key()).unwrap_or_default()
 }
 
 fn plan_hits(s: &Snapshot, stages: &[Stage]) -> Option<Vec<u32>> {
@@ -1052,11 +1065,13 @@ fn apply_stages(cur: &mut Vec<&Value>, stages: &[Stage]) {
         match stage {
             Stage::Where(f, op, v) => {
                 let want_num = v.trim().parse::<f64>().ok();
-                cur.retain(|r| field_cmp(r, f, *op, v, want_num));
+                let mut seen = 0;
+                cur.retain(|r| field_cmp(r, f, *op, v, want_num, &mut seen));
             }
             Stage::Search(f, needle) => {
                 let lower = needle.to_lowercase();
-                cur.retain(|r| field_has(r, f, &lower));
+                let mut seen = 0;
+                cur.retain(|r| field_has(r, f, &lower, &mut seen));
             }
             Stage::Order(f) => {
                 let top = match stages.get(at + 1) {
@@ -1154,8 +1169,9 @@ fn extreme(rows: &[&Value], field: &str) -> Option<Value> {
     };
     let want = if desc { Ordering2::Greater } else { Ordering2::Less };
     let mut best: Option<(SortKey, &Value)> = None;
+    let mut at = 0;
     for row in rows {
-        let key = sort_key(row.get_ref(sort_field));
+        let key = sort_key(row.get_at(sort_field, &mut at));
         let better = match &best {
             Some((seen, _)) => cmp_keys(&key, seen) == want,
             None => true,
@@ -1176,8 +1192,12 @@ fn sort_rows_top<'a>(rows: &mut Vec<&'a Value>, field: &str, top: Option<usize>)
         Some(f) => (f, true),
         None => (field, false),
     };
-    let mut keyed: Vec<(SortKey, usize, &Value)> =
-        rows.iter().enumerate().map(|(at, r)| (sort_key(r.get_ref(sort_field)), at, *r)).collect();
+    let mut seen = 0;
+    let mut keyed: Vec<(SortKey, usize, &Value)> = rows
+        .iter()
+        .enumerate()
+        .map(|(at, r)| (sort_key(r.get_at(sort_field, &mut seen)), at, *r))
+        .collect();
     let order = |a: &(SortKey<'a>, usize, &'a Value), b: &(SortKey<'a>, usize, &'a Value)| {
         let ord = cmp_keys(&a.0, &b.0);
         let ord = if desc { ord.reverse() } else { ord };
