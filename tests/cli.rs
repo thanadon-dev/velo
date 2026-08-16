@@ -664,3 +664,62 @@ fn watch_notices_a_file_appearing_in_an_included_directory() {
     stop(&mut child, "-TERM");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_background_sweep_runs_while_the_server_serves() {
+    let dir = tmp("sweep");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write(
+        &dir.join("app.velo"),
+        "POST /add   => db.sessions.create(body)\n\
+         GET  /count => db.sessions.count()\n\
+         GET  /live  => db.sessions.where(\"kind\", \"live\").count()\n",
+    );
+
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(dir.join("app.velo"))
+        .arg(format!("127.0.0.1:{port}"))
+        .env("VELO_EXPIRE", "sessions.until")
+        .env("VELO_EXPIRE_MS", "100")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let now = || {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+            as u64
+    };
+    for i in 0..40 {
+        let until = if i % 2 == 0 { now() + 400 } else { now() + 600_000 };
+        let kind = if i % 2 == 0 { "short" } else { "live" };
+        post(port, "/add", &format!(r#"{{"id":"s{i}","until":{until},"kind":"{kind}"}}"#));
+    }
+    let body = |path: &str| {
+        let res = get(port, path);
+        res.rsplit("\r\n\r\n").next().unwrap_or_default().to_string()
+    };
+    assert_eq!(body("/count"), "40");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while body("/count") != "20" {
+        assert!(Instant::now() < deadline, "the sweep never ran: {}", body("/count"));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(body("/live"), "20", "it took a row it should not have");
+
+    post(port, "/add", &format!(r#"{{"id":"late","until":{},"kind":"live"}}"#, now() + 600_000));
+    post(port, "/add", &format!(r#"{{"id":"doomed","until":{},"kind":"short"}}"#, now() + 300));
+    assert_eq!(body("/count"), "22", "both writes landed");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while body("/count") != "21" {
+        assert!(Instant::now() < deadline, "the sweep stopped after the first pass");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(body("/live"), "21", "the row written after the first sweep is still there");
+    stop(&mut child, "-TERM");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -3012,3 +3012,100 @@ fn threads_hitting_different_reasons_keep_them_apart() {
         h.join().unwrap();
     }
 }
+
+const SWEEP_SRC: &str = r#"
+GET /count => db.sessions.count()
+GET /team  => db.sessions.where("team", query.t).count()
+"#;
+
+#[test]
+fn expiry_sweeping_beside_live_traffic_keeps_what_it_should() {
+    let store = velo::Store::new();
+    let s = Server::new(compile(SWEEP_SRC, Some(store.clone())).unwrap()).unwrap();
+    let sessions = store.collection("sessions");
+    let now = || {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+            as u64
+    };
+    for i in 0..600 {
+        let until = if i % 2 == 0 { now() - 5_000 } else { now() + 600_000 };
+        let raw = format!(r#"{{"id":"seed-{i}","until":{until},"team":"t{}"}}"#, i % 3);
+        sessions.create(parse_json(raw.as_bytes()).unwrap()).unwrap();
+    }
+    let rules = vec![("sessions".to_string(), "until".to_string())];
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen_short = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let sweeper = {
+        let (store, rules, stop) = (store.clone(), rules.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut gone = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                gone += store.expire_now(&rules);
+            }
+            gone
+        })
+    };
+    let writer = {
+        let (sessions, stop) = (sessions.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut made = 0u64;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let raw = format!(
+                    r#"{{"id":"live-{made}","until":{},"team":"t{}"}}"#,
+                    now() + 600_000,
+                    made % 3
+                );
+                sessions.create(parse_json(raw.as_bytes()).unwrap()).unwrap();
+                made += 1;
+            }
+            made
+        })
+    };
+    let reader = {
+        let (s, stop, seen_short) = (s.clone(), stop.clone(), seen_short.clone());
+        std::thread::spawn(move || {
+            let mut reads = 0u64;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let n: i64 = call(&s, "GET", "/count", "").1.parse().unwrap();
+                for t in ["t0", "t1", "t2"] {
+                    let part: i64 = call(&s, "GET", &format!("/team?t={t}"), "").1.parse().unwrap();
+                    assert!(part >= 0, "a filtered count came back negative");
+                }
+                assert!(n > 0, "the collection emptied while rows were still being written");
+                if n < 600 {
+                    seen_short.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                reads += 1;
+            }
+            reads
+        })
+    };
+
+    std::thread::sleep(Duration::from_millis(700));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let gone = sweeper.join().unwrap();
+    let made = writer.join().unwrap();
+    let reads = reader.join().unwrap();
+    assert!(gone >= 300, "the sweeper never removed the 300 expired rows: {gone}");
+    assert!(made > 10 && reads > 10, "writer {made} reader {reads} barely ran");
+    assert!(
+        seen_short.load(std::sync::atomic::Ordering::Relaxed),
+        "the reader never saw the collection shrink, so nothing was concurrent"
+    );
+
+    assert_eq!(store.expire_now(&rules), 0, "a final sweep finds nothing left to expire");
+    let left: i64 = call(&s, "GET", "/count", "").1.parse().unwrap();
+    let by_team: i64 = ["t0", "t1", "t2"]
+        .iter()
+        .map(|t| call(&s, "GET", &format!("/team?t={t}"), "").1.parse::<i64>().unwrap())
+        .sum();
+    assert_eq!(by_team, left, "with nothing writing, the parts must add up to the whole");
+    assert_eq!(left as u64, 300 + made, "every unexpired row survived, seeded and written alike");
+    for i in (1..600).step_by(2) {
+        assert!(sessions.find(&format!("seed-{i}")).is_some(), "seed-{i} was swept by mistake");
+    }
+    for i in (0..600).step_by(2) {
+        assert!(sessions.find(&format!("seed-{i}")).is_none(), "seed-{i} should have expired");
+    }
+}
