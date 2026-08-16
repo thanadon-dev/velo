@@ -2379,3 +2379,69 @@ fn limit_wants_a_key_and_a_rate() {
     let prog = compile(r#"GET /a => "x" when limit("k", 5)"#, None).unwrap();
     assert!(prog.routes[0].konst.is_none(), "a limited route must never fold to a constant");
 }
+
+const MULTI_SRC: &str = r#"
+POST /add    => db.users.create(body)
+GET  /both   => db.users.where("team", query.t).where("keep", query.k).count()
+GET  /rows   => db.users.where("team", query.t).where("keep", query.k).order("id").select("id")
+GET  /paged  => db.users.where("team", query.t).page(0, 5).where("keep", query.k).count()
+GET  /three  => db.users.where("team", query.t).where("keep", query.k).where("band", query.b).count()
+GET  /mixed  => db.users.where("team", query.t).where("score", ">", query.s).where("keep", query.k).count()
+"#;
+
+#[test]
+fn several_equality_filters_answer_what_one_scan_would() {
+    let s = Server::new(compile(MULTI_SRC, None).unwrap()).unwrap();
+    let mut want = std::collections::HashMap::new();
+    for i in 0..1500 {
+        let (team, keep, band) = (format!("t{}", i % 3), i % 2 == 0, format!("b{}", i % 7));
+        let body =
+            format!(r#"{{"team":"{team}","keep":{keep},"band":"{band}","score":{}}}"#, i % 100);
+        assert_eq!(call(&s, "POST", "/add", &body).0, 201);
+        *want.entry((team, keep)).or_insert(0) += 1;
+    }
+    for team in ["t0", "t1", "t2"] {
+        for keep in ["true", "false"] {
+            let got: i64 =
+                call(&s, "GET", &format!("/both?t={team}&k={keep}"), "").1.parse().unwrap();
+            let expect = *want.get(&(team.to_string(), keep == "true")).unwrap_or(&0);
+            assert_eq!(got, expect, "{team} keep={keep}");
+        }
+    }
+    assert_eq!(call(&s, "GET", "/both?t=nope&k=true", "").1, "0");
+    assert_eq!(call(&s, "GET", "/three?t=t0&k=true&b=b0", "").1, "36");
+    let scanned: i64 = call(&s, "GET", "/mixed?t=t0&s=50&k=true", "").1.parse().unwrap();
+    assert!(scanned > 0 && scanned < 250, "a non-equality step still narrows: {scanned}");
+}
+
+#[test]
+fn a_page_before_a_filter_is_not_reordered_by_the_index() {
+    let s = Server::new(compile(MULTI_SRC, None).unwrap()).unwrap();
+    for i in 0..600 {
+        let keep = i >= 5;
+        let body = format!(r#"{{"team":"t0","keep":{keep},"band":"b0","score":1}}"#);
+        assert_eq!(call(&s, "POST", "/add", &body).0, 201);
+    }
+    assert_eq!(
+        call(&s, "GET", "/paged?t=t0&k=true", "").1,
+        "0",
+        "the first five rows all have keep=false, so paging first must find none"
+    );
+    assert_eq!(call(&s, "GET", "/paged?t=t0&k=false", "").1, "5");
+    assert_eq!(call(&s, "GET", "/both?t=t0&k=false", "").1, "5");
+}
+
+#[test]
+fn intersected_filters_follow_later_writes() {
+    let s = Server::new(compile(MULTI_SRC, None).unwrap()).unwrap();
+    for i in 0..700 {
+        let body = format!(r#"{{"team":"t{}","keep":true,"band":"b0","score":1}}"#, i % 2);
+        assert_eq!(call(&s, "POST", "/add", &body).0, 201);
+    }
+    let before: i64 = call(&s, "GET", "/both?t=t0&k=true", "").1.parse().unwrap();
+    assert_eq!(before, 350);
+    assert_eq!(call(&s, "POST", "/add", r#"{"team":"t0","keep":true,"band":"b0"}"#).0, 201);
+    assert_eq!(call(&s, "GET", "/both?t=t0&k=true", "").1, "351", "an insert extends the index");
+    let rows = call(&s, "GET", "/rows?t=t0&k=true", "").1;
+    assert_eq!(rows.matches(r#""id""#).count(), 351);
+}

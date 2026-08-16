@@ -995,10 +995,41 @@ fn index_key(row: &Value, field: &str) -> String {
 }
 
 fn plan_hits(s: &Snapshot, stages: &[Stage]) -> Option<Vec<u32>> {
-    match stages.first() {
-        Some(Stage::Where(field, Cmp::Eq, want)) => s.candidates(field, want),
-        _ => None,
+    let mut hits: Option<Vec<u32>> = None;
+    for stage in stages {
+        match stage {
+            Stage::Page(_, _) => break,
+            Stage::Where(field, Cmp::Eq, want) => {
+                let Some(found) = s.candidates(field, want) else { continue };
+                hits = Some(match hits {
+                    None => found,
+                    Some(prev) => intersect(&prev, &found),
+                });
+                if hits.as_ref().is_some_and(|h| h.is_empty()) {
+                    break;
+                }
+            }
+            _ => {}
+        }
     }
+    hits
+}
+
+fn intersect(a: &[u32], b: &[u32]) -> Vec<u32> {
+    let (mut i, mut j) = (0, 0);
+    let mut out = Vec::with_capacity(a.len().min(b.len()));
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            Ordering2::Less => i += 1,
+            Ordering2::Greater => j += 1,
+            Ordering2::Equal => {
+                out.push(a[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out
 }
 
 fn run_stages_hit<'a>(rows: &'a Rows, stages: &[Stage], hits: Option<Vec<u32>>) -> Vec<&'a Value> {
