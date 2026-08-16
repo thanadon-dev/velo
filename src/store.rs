@@ -1047,7 +1047,7 @@ fn run_stages<'a>(rows: &'a Rows, stages: &[Stage]) -> Vec<&'a Value> {
 }
 
 fn apply_stages(cur: &mut Vec<&Value>, stages: &[Stage]) {
-    for stage in stages {
+    for (at, stage) in stages.iter().enumerate() {
         match stage {
             Stage::Where(f, op, v) => {
                 let want_num = v.trim().parse::<f64>().ok();
@@ -1057,7 +1057,13 @@ fn apply_stages(cur: &mut Vec<&Value>, stages: &[Stage]) {
                 let lower = needle.to_lowercase();
                 cur.retain(|r| field_has(r, f, &lower));
             }
-            Stage::Order(f) => sort_rows(cur, f),
+            Stage::Order(f) => {
+                let top = match stages.get(at + 1) {
+                    Some(Stage::Page(offset, limit)) if *limit > 0 => offset.checked_add(*limit),
+                    _ => None,
+                };
+                sort_rows_top(cur, f, top);
+            }
             Stage::Page(offset, limit) => {
                 let take = if *limit == 0 { usize::MAX } else { *limit };
                 *cur = cur.drain(..).skip(*offset).take(take).collect();
@@ -1161,22 +1167,31 @@ fn extreme(rows: &[&Value], field: &str) -> Option<Value> {
 }
 
 fn sort_rows(rows: &mut Vec<&Value>, field: &str) {
+    sort_rows_top(rows, field, None)
+}
+
+fn sort_rows_top(rows: &mut Vec<&Value>, field: &str, top: Option<usize>) {
     let (sort_field, desc) = match field.strip_prefix('-') {
         Some(f) => (f, true),
         None => (field, false),
     };
-    let mut keyed: Vec<(SortKey, &Value)> =
-        rows.iter().map(|r| (sort_key(r.get_ref(sort_field)), *r)).collect();
-    keyed.sort_by(|(a, _), (b, _)| {
-        let ord = cmp_keys(a, b);
-        if desc {
-            ord.reverse()
-        } else {
-            ord
+    let mut keyed: Vec<(SortKey, usize, &Value)> =
+        rows.iter().enumerate().map(|(at, r)| (sort_key(r.get_ref(sort_field)), at, *r)).collect();
+    let order = |a: &(SortKey, usize, &Value), b: &(SortKey, usize, &Value)| {
+        let ord = cmp_keys(&a.0, &b.0);
+        let ord = if desc { ord.reverse() } else { ord };
+        ord.then(a.1.cmp(&b.1))
+    };
+    match top {
+        Some(n) if n < keyed.len() => {
+            keyed.select_nth_unstable_by(n, order);
+            keyed.truncate(n);
+            keyed.sort_unstable_by(order);
         }
-    });
+        _ => keyed.sort_unstable_by(order),
+    }
     rows.clear();
-    rows.extend(keyed.into_iter().map(|(_, row)| row));
+    rows.extend(keyed.into_iter().map(|(_, _, row)| row));
 }
 
 fn sorted_json(rows: &Rows, field: &str) -> Arc<Vec<u8>> {

@@ -2445,3 +2445,58 @@ fn intersected_filters_follow_later_writes() {
     let rows = call(&s, "GET", "/rows?t=t0&k=true", "").1;
     assert_eq!(rows.matches(r#""id""#).count(), 351);
 }
+
+const TOPN_SRC: &str = r#"
+POST /add   => db.users.create(body)
+GET  /top   => db.users.where("team", query.t).order("-score").page(0, query.n).select("id")
+GET  /all   => db.users.where("team", query.t).order("-score").select("id")
+GET  /skip  => db.users.where("team", query.t).order("-score").page(query.o, query.n).select("id")
+GET  /open  => db.users.where("team", query.t).order("-score").page(0, 0).select("id")
+GET  /after => db.users.order("-score").page(0, 10).where("team", query.t).select("id")
+"#;
+
+#[test]
+fn a_top_n_matches_sorting_everything_and_taking_n() {
+    let s = Server::new(compile(TOPN_SRC, None).unwrap()).unwrap();
+    for i in 0..1200 {
+        let body = format!(r#"{{"team":"t{}","score":{}}}"#, i % 2, i % 17);
+        assert_eq!(call(&s, "POST", "/add", &body).0, 201);
+    }
+    let full: Vec<String> = call(&s, "GET", "/all?t=t0", "")
+        .1
+        .split("},{")
+        .map(|p| p.trim_matches(|c| c == '[' || c == ']' || c == '{' || c == '}').to_string())
+        .collect();
+    assert_eq!(full.len(), 600);
+    for n in [1usize, 5, 20, 599, 600, 601] {
+        let got = call(&s, "GET", &format!("/top?t=t0&n={n}"), "").1;
+        let want = format!("[{{{}}}]", full[..n.min(600)].join("},{"));
+        assert_eq!(got, want, "top {n} must equal the full sort truncated, ties and all");
+    }
+    for (o, n) in [(0usize, 10usize), (5, 10), (100, 25), (595, 10)] {
+        let got = call(&s, "GET", &format!("/skip?t=t0&o={o}&n={n}"), "").1;
+        let slice = &full[o.min(600)..(o + n).min(600)];
+        let want = if slice.is_empty() {
+            "[]".to_string()
+        } else {
+            format!("[{{{}}}]", slice.join("},{"))
+        };
+        assert_eq!(got, want, "offset {o} limit {n}");
+    }
+    assert_eq!(call(&s, "GET", "/open?t=t0", "").1, call(&s, "GET", "/all?t=t0", "").1);
+}
+
+#[test]
+fn a_filter_after_a_page_still_sees_the_page() {
+    let s = Server::new(compile(TOPN_SRC, None).unwrap()).unwrap();
+    for i in 0..800 {
+        let team = if i < 10 { "t1" } else { "t0" };
+        assert_eq!(call(&s, "POST", "/add", &format!(r#"{{"team":"{team}","score":{i}}}"#)).0, 201);
+    }
+    assert_eq!(
+        call(&s, "GET", "/after?t=t1", "").1,
+        "[]",
+        "the ten highest scores are all t0, so filtering after paging finds no t1"
+    );
+    assert_eq!(call(&s, "GET", "/after?t=t0", "").1.matches(r#""id""#).count(), 10);
+}
