@@ -25,6 +25,7 @@ pub struct Ctx<'a> {
     pub header: Value,
     pub header_raw: &'a [u8],
     pub cookies: RefCell<Vec<u8>>,
+    pub reason: RefCell<Option<Arc<str>>>,
 }
 
 impl<'a> Default for Ctx<'a> {
@@ -38,6 +39,7 @@ impl<'a> Default for Ctx<'a> {
             header: Value::Null,
             header_raw: &[],
             cookies: RefCell::new(Vec::new()),
+            reason: RefCell::new(None),
         }
     }
 }
@@ -102,6 +104,7 @@ pub enum Builtin {
     Verify,
     SetCookie,
     Limit,
+    Check,
 }
 
 pub enum Stage {
@@ -234,6 +237,13 @@ impl Expr {
                 let mut vals = Vec::with_capacity(args.len());
                 for a in args {
                     vals.push(a.eval(c)?);
+                }
+                if *f == Builtin::Check {
+                    if truthy(&vals[0]) {
+                        return Ok(Value::Bool(true));
+                    }
+                    *c.reason.borrow_mut() = Some(vals[1].as_key_arc());
+                    return Err(BAD_BODY);
                 }
                 if *f == Builtin::Limit {
                     let rate = match as_num(&vals[1]) {
@@ -531,6 +541,7 @@ pub fn call_builtin(f: Builtin, args: &[Value]) -> Value {
         }
         Builtin::SetCookie => args[1].clone(),
         Builtin::Limit => Value::Bool(true),
+        Builtin::Check => Value::Bool(true),
         Builtin::Verify => Value::Bool(match &args[1] {
             Value::Str(stored) => crate::crypto::verify(&args[0].as_key(), stored),
             _ => false,

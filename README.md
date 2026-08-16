@@ -1,6 +1,6 @@
 # Velo
 
-**v1.26.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.27.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -197,10 +197,11 @@ Built-in functions:
 | `verify(x, stored)` | whether `x` is the password behind `stored` |
 | `setcookie(name, x)` | sets a hardened `Set-Cookie` on the response and returns `x` |
 | `limit(key, per_second)` | `true` while that key is under its rate, `429` once it is not |
+| `check(condition, reason)` | `true` while the condition holds, `400` with that reason once it does not |
 | `openapi()` | this API's OpenAPI 3.0 document, rendered once at compile time |
 | `file("page.html")` | the file's contents, read at compile time, served with a content type from its extension |
 
-Everything but `now()`, `uuid()`, `date()`, `password()`, `verify()`, `setcookie()`, `limit()` and `openapi()` is folded at compile time when its arguments are constant, so `upper("velo")` costs nothing at runtime.
+Everything but `now()`, `uuid()`, `date()`, `password()`, `verify()`, `setcookie()`, `limit()`, `check()` and `openapi()` is folded at compile time when its arguments are constant, so `upper("velo")` costs nothing at runtime.
 
 ```velo
 GET  /users      => db.users.page(default(query.offset, 0), default(query.limit, 20))
@@ -301,6 +302,18 @@ GET  /admin  => db.audit.all() when header.authorization == env("ADMIN_TOKEN") e
 ```
 
 `velo openapi` uses the reason as the description of that status code, so the document says the same thing the server does. Without one the body stays `{"error":"unauthorized"}`, or `{"error":"invalid body"}` for a `400`.
+
+One `else` carries one reason, which is not enough when a route checks several things. `check(condition, reason)` gives each condition its own, and `and` stops at the first that fails, so the client is told what to fix one thing at a time:
+
+```velo
+POST /users => db.users.create(body.select("name", "email", "age"))
+  when check(body.name, "name is required")
+   and check(body.email, "email is required")
+   and check(body.age > 0, "age must be positive")
+   and check(len(body.name) < 20, "name must be under 20 characters")
+```
+
+A failed `check` always answers `400` with its reason, whatever `else` says, the way a failed `limit` always answers `429`. It mixes with the guards that were already there, so `when header.x_key and check(query.n, "n is required")` still answers `401` for the missing header and `400` for the missing query. Use it with `and`: an `or` reports the left-hand reason rather than trying the right-hand side, because a failed check refuses immediately.
 
 `examples/todo.velo` is a complete todo API using uuid keys, timestamps, sorting, and filters. `examples/shop/` splits a larger API over four files with `include`: a catalog with search, orders keyed by a customer header, and an admin section behind a token guard.
 
@@ -623,9 +636,9 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-162 tests (125 integration + 16 CLI + 8 fuzz + 11 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, per-key rate limits, intersected filters, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+165 tests (128 integration + 16 CLI + 8 fuzz + 11 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, per-key rate limits, intersected filters, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
-The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
+The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, a directory named as a whole, a file appearing in a watched directory, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -686,6 +699,8 @@ The write path is bounded by the allocator rather than by anything velo does. An
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.27.0** — `check(condition, reason)` gives every condition in a guard its own message. v1.26.0 let a route say why it refused, and immediately showed the limit of one `else` per route: a route checking four things could only name one of them. `and` stops at the first check that fails, so a client fixing a request is told about one problem at a time rather than all of them at once or none of them by name. A failed check answers `400` with its reason whatever `else` says, matching how a failed `limit` always answers `429`, and it composes with the guards that were already there, so a missing header still answers `401` while a missing field answers `400`. It works outside a guard too, where the same reason comes back.
 
 **v1.26.0** — a guard can say why it refused. `when body.name else 400 "name is required"` answers with that text rather than `{"error":"invalid body"}`, which is the difference between a client that can fix the request and one that can only see that something was wrong. The reason is optional and nothing changes without it. `velo openapi` uses it as the description of that status code, so the document and the server agree, and an empty reason is a compile error rather than an error body with nothing in it.
 

@@ -1,6 +1,6 @@
 GET  /health              => "ok"
 GET  /openapi.json        => openapi()
-GET  /version             => { name: "velo", version: "1.26.0" }
+GET  /version             => { name: "velo", version: "1.27.0" }
 
 GET  /users               => db.users.all()
 GET  /users/:id           => db.users.find(id)
@@ -18,7 +18,7 @@ GET  /users/top/one       => db.users.where("team", query.team).order("-score").
 GET  /users/strong        => db.users.where("score", ">=", query.min).order("-score").page(0, 20)
 GET  /users/cards         => db.users.where("team", query.team).select("id", "name")
 GET  /users/card/:id      => db.users.find(id).select("id", "name")
-POST /users/safe          => db.users.create(body.select("name", "team")) when body.name else 400 "name is required"
+POST /users/safe          => db.users.create(body.select("name", "team")) when check(body.name, "name is required") and check(len(body.name) < 40, "name must be under 40 characters")
 
 GET  /posts               => db.posts.all()
 POST /posts               => db.posts.create(body)

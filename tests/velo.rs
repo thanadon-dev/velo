@@ -2818,3 +2818,67 @@ fn a_reason_reaches_the_openapi_document() {
     assert!(doc.contains(r#""401":{"description":"error""#), "an unexplained guard stays generic");
     assert!(matches!(parse_json(doc.as_bytes()), Ok(Value::Obj(_))));
 }
+
+const CHECK_SRC: &str = r#"
+POST /users => db.users.create(body.select("name","email","age")) when check(body.name, "name is required") and check(body.email, "email is required") and check(body.age > 0, "age must be positive") and check(len(body.name) < 20, "name must be under 20 characters")
+GET  /mixed => "ok" when header.x_key and check(query.n, "n is required")
+GET  /body  => check(query.a, "a is required")
+GET  /after => "ok" when check(query.a, "a is required") and header.x_key
+"#;
+
+#[test]
+fn check_names_the_condition_that_failed() {
+    let s = Server::new(compile(CHECK_SRC, None).unwrap()).unwrap();
+    let post = |body: &str| {
+        let (code, out, _) = call(&s, "POST", "/users", body);
+        (code, out)
+    };
+    assert_eq!(post("{}"), (400, r#"{"error":"name is required"}"#.into()));
+    assert_eq!(post(r#"{"name":"ann"}"#), (400, r#"{"error":"email is required"}"#.into()));
+    assert_eq!(
+        post(r#"{"name":"ann","email":"a@b.c"}"#),
+        (400, r#"{"error":"age must be positive"}"#.into())
+    );
+    assert_eq!(
+        post(r#"{"name":"ann","email":"a@b.c","age":-1}"#),
+        (400, r#"{"error":"age must be positive"}"#.into())
+    );
+    assert_eq!(
+        post(r#"{"name":"a-name-that-is-far-too-long","email":"a@b.c","age":5}"#),
+        (400, r#"{"error":"name must be under 20 characters"}"#.into())
+    );
+    let (code, body) = post(r#"{"name":"ann","email":"a@b.c","age":5}"#);
+    assert_eq!(code, 201);
+    assert_eq!(body, r#"{"id":1,"name":"ann","email":"a@b.c","age":5}"#);
+}
+
+#[test]
+fn check_sits_beside_the_guards_that_were_already_there() {
+    let s = Server::new(compile(CHECK_SRC, None).unwrap()).unwrap();
+    let with_key = |path: &str, key: Option<&str>| {
+        let head = match key {
+            Some(k) => format!("GET {path} HTTP/1.1\r\nhost: x\r\nx-key: {k}\r\n\r\n"),
+            None => format!("GET {path} HTTP/1.1\r\nhost: x\r\n\r\n"),
+        };
+        let mut out = Vec::new();
+        let (code, _) = s.handle("GET", path, b"", head.as_bytes(), &mut out);
+        (code, String::from_utf8(out).unwrap())
+    };
+    assert_eq!(with_key("/mixed", None), (401, r#"{"error":"unauthorized"}"#.into()));
+    assert_eq!(with_key("/mixed", Some("k")), (400, r#"{"error":"n is required"}"#.into()));
+    assert_eq!(with_key("/mixed?n=1", Some("k")), (200, "ok".into()));
+    assert_eq!(with_key("/after", Some("k")).0, 400, "a failed check wins over the rest");
+    assert_eq!(with_key("/after?a=1", None), (401, r#"{"error":"unauthorized"}"#.into()));
+    assert_eq!(with_key("/after?a=1", Some("k")), (200, "ok".into()));
+}
+
+#[test]
+fn a_check_outside_a_guard_answers_the_same_way() {
+    let s = Server::new(compile(CHECK_SRC, None).unwrap()).unwrap();
+    assert_eq!(call(&s, "GET", "/body", ""), (400, r#"{"error":"a is required"}"#.into(), JSON));
+    assert_eq!(call(&s, "GET", "/body?a=1", "").0, 200);
+    assert!(compile(r#"GET /a => "x" when check(query.a)"#, None).is_err(), "check needs a reason");
+    assert!(compile(r#"GET /a => "x" when check()"#, None).is_err());
+    let prog = compile(r#"GET /a => "x" when check(1, "never")"#, None).unwrap();
+    assert!(prog.routes[0].konst.is_none(), "a checked route must not fold");
+}

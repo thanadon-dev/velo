@@ -232,12 +232,8 @@ impl Server {
                 Ok(v) if crate::parser::truthy(&v) => {}
                 Err(e) if e.status == 429 => return self.fail(Some(idx), e, out),
                 _ => {
-                    if let Some(reason) = &rt.guard_msg {
-                        self.failures.fetch_add(1, Ordering::Relaxed);
-                        out.extend_from_slice(b"{\"error\":");
-                        crate::value::write_string(out, reason);
-                        out.push(b'}');
-                        return (rt.guard_status, JSON, None, Some(idx));
+                    if let Some(answer) = self.refuse(idx, ctx, rt.guard_msg.as_deref(), out) {
+                        return answer;
                     }
                     let msg = if rt.guard_status == 400 { "invalid body" } else { "unauthorized" };
                     return self.fail(Some(idx), Err_ { status: rt.guard_status, msg }, out);
@@ -254,7 +250,10 @@ impl Server {
                 Ok(()) => (rt.status, JSON, None, Some(idx)),
                 Err(e) => {
                     out.truncate(mark);
-                    self.fail(Some(idx), e, out)
+                    match self.refuse(idx, ctx, None, out) {
+                        Some(answer) => answer,
+                        None => self.fail(Some(idx), e, out),
+                    }
                 }
             };
         }
@@ -267,8 +266,28 @@ impl Server {
                 v.write_json(out);
                 (rt.status, JSON, None, Some(idx))
             }
-            Err(e) => self.fail(Some(idx), e, out),
+            Err(e) => match self.refuse(idx, ctx, None, out) {
+                Some(answer) => answer,
+                None => self.fail(Some(idx), e, out),
+            },
         }
+    }
+
+    fn refuse(
+        &self,
+        idx: usize,
+        ctx: &Ctx,
+        fallback: Option<&str>,
+        out: &mut Vec<u8>,
+    ) -> Option<(u16, Ctype, Option<u64>, Option<usize>)> {
+        let given = ctx.reason.borrow().clone();
+        let reason = given.as_deref().or(fallback)?;
+        self.failures.fetch_add(1, Ordering::Relaxed);
+        out.extend_from_slice(b"{\"error\":");
+        crate::value::write_string(out, reason);
+        out.push(b'}');
+        let status = if given.is_some() { 400 } else { self.routes[idx].guard_status };
+        Some((status, JSON, None, Some(idx)))
     }
 
     fn write_metrics(&self, out: &mut Vec<u8>) {
