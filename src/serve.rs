@@ -475,9 +475,10 @@ pub(crate) fn worker(srv: &Server, listener: &Listener) -> std::io::Result<()> {
             }
         }
         let n = ep.wait(&mut events, if draining.is_some() { 20 } else { 250 })?;
-        if header_age.elapsed() >= Duration::from_secs(1) {
+        let now = Instant::now();
+        if now.duration_since(header_age) >= Duration::from_secs(1) {
             headers = response_headers(srv);
-            header_age = Instant::now();
+            header_age = now;
         }
         for ev in &events[..n] {
             let (flags, key) = (ev.events, ev.data);
@@ -486,7 +487,7 @@ pub(crate) fn worker(srv: &Server, listener: &Listener) -> std::io::Result<()> {
                 continue;
             }
             let Some(c) = conns.get_mut(&key) else { continue };
-            c.last = Instant::now();
+            c.last = now;
             let mut alive = true;
             if flags & (epoll::ERR | epoll::HUP) != 0 {
                 alive = false;
@@ -534,11 +535,14 @@ pub(crate) fn worker(srv: &Server, listener: &Listener) -> std::io::Result<()> {
                 srv.conns.fetch_sub(1, Ordering::Relaxed);
             }
         }
-        if last_sweep.elapsed() >= SWEEP {
-            last_sweep = Instant::now();
+        if now.duration_since(last_sweep) >= SWEEP {
+            last_sweep = now;
             conns.retain(|_, c| {
-                let alive =
-                    if c.served { c.last.elapsed() < idle } else { c.opened.elapsed() < opening };
+                let alive = if c.served {
+                    now.duration_since(c.last) < idle
+                } else {
+                    now.duration_since(c.opened) < opening
+                };
                 if alive {
                     return true;
                 }
