@@ -2628,3 +2628,86 @@ fn a_read_repeated_after_delete_where_sees_the_deletion() {
     assert_eq!(call(&s, "GET", "/done", "").1, "60", "purging others leaves these alone");
     assert_eq!(call(&s, "GET", "/n", "").1, "60");
 }
+
+#[test]
+fn a_request_ending_in_bare_newlines_is_still_served() {
+    let port = spawn();
+    let res = raw(port, b"GET /health HTTP/1.1\nHost: x\nConnection: close\n\n");
+    assert!(res.starts_with("HTTP/1.1 200"), "bare LF headers: {res}");
+    assert!(res.ends_with("ok"), "{res}");
+
+    let res = raw(port, b"POST /users HTTP/1.1\nHost: x\nContent-Length: 16\nConnection: close\n\n{\"name\":\"lf\"}   ");
+    assert!(res.starts_with("HTTP/1.1 201"), "bare LF with a body: {res}");
+    assert!(res.contains(r#""name":"lf""#), "{res}");
+
+    let res = raw(port, b"GET /health HTTP/1.1\r\nHost: x\nX-Mixed: y\r\nConnection: close\n\n");
+    assert!(res.starts_with("HTTP/1.1 200"), "mixed line endings: {res}");
+}
+
+#[test]
+fn ids_do_not_restart_after_a_reload() {
+    let dir = std::env::temp_dir().join(format!("velo-ids-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.json");
+    let store = velo::Store::new();
+    let s = Server::new(compile(SRC, Some(store.clone())).unwrap()).unwrap();
+    for name in ["a", "b", "c", "d", "e"] {
+        assert_eq!(call(&s, "POST", "/users", &format!(r#"{{"name":"{name}"}}"#)).0, 201);
+    }
+    for id in [4, 5] {
+        assert_eq!(call(&s, "DELETE", &format!("/users/{id}"), "").0, 200);
+    }
+    store.save_to(&path).unwrap();
+
+    let back = velo::Store::new();
+    back.load_file(&path).unwrap();
+    let s2 = Server::new(compile(SRC, Some(back.clone())).unwrap()).unwrap();
+    let (code, body, _) = call(&s2, "POST", "/users", r#"{"name":"d"}"#);
+    assert_eq!(code, 201, "{body}");
+    assert_eq!(
+        body, r#"{"id":6,"name":"d"}"#,
+        "an id that was handed out before the restart must never be handed out again"
+    );
+    assert_eq!(names(&call(&s2, "GET", "/users", "").1).len(), 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_snapshot_is_never_half_written() {
+    let dir = std::env::temp_dir().join(format!("velo-atomic-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("store.json");
+    let store = velo::Store::new();
+    let users = store.collection("users");
+    for i in 0..4000 {
+        let raw = format!(
+            r#"{{"id":{i},"name":"user number {i}","note":"padding to make the file large"}}"#
+        );
+        users.create(parse_json(raw.as_bytes()).unwrap()).unwrap();
+    }
+    store.save_to(&path).unwrap();
+    let full = std::fs::metadata(&path).unwrap().len();
+    assert!(full > 200_000, "the snapshot must be big enough to catch a partial write: {full}");
+
+    let writer = {
+        let (store, path) = (store.clone(), path.clone());
+        std::thread::spawn(move || {
+            for _ in 0..200 {
+                store.save_to(&path).unwrap();
+            }
+        })
+    };
+    let mut reads = 0;
+    while !writer.is_finished() {
+        let raw = std::fs::read(&path).unwrap();
+        assert!(
+            matches!(parse_json(&raw), Ok(velo::Value::Obj(_))),
+            "a reader saw {} bytes of a snapshot that was still being written",
+            raw.len()
+        );
+        reads += 1;
+    }
+    writer.join().unwrap();
+    assert!(reads > 20, "the reader never got a look in: {reads}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
