@@ -2711,3 +2711,50 @@ fn a_snapshot_is_never_half_written() {
     assert!(reads > 20, "the reader never got a look in: {reads}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const SEG_SRC: &str = r#"
+GET /users/:id     => { got: id }
+GET /a/:x/b/:y     => { x: x, y: y }
+GET /deep/:a/:b/:c => { a: a, b: b, c: c }
+"#;
+
+#[test]
+fn an_empty_path_segment_never_fills_a_param() {
+    let s = Server::new(compile(SEG_SRC, None).unwrap()).unwrap();
+    assert_eq!(call(&s, "GET", "/users/1", "").1, r#"{"got":"1"}"#);
+    assert_eq!(call(&s, "GET", "/a/1/b/2", "").1, r#"{"x":"1","y":"2"}"#);
+    for path in ["/users/", "/users//", "/a//b/2", "/a/1/b/", "/a//b/", "/deep/1//3", "/deep///"] {
+        let (code, body, _) = call(&s, "GET", path, "");
+        assert_eq!(code, 404, "{path} matched with an empty param: {body}");
+    }
+}
+
+const GUARDED_CONST_SRC: &str = r#"
+GET /plain  => "open"
+GET /gated  => "secret" when header.x_key == "root" else 403
+GET /envd   => "secret" when env("VELO_TEST_GATE") == "open" else 403
+GET /always => "yes" when 1 == 1
+"#;
+
+#[test]
+fn a_guarded_route_is_never_folded_and_its_guard_runs_first() {
+    let prog = compile(GUARDED_CONST_SRC, None).unwrap();
+    let of = |p: &str| prog.routes.iter().find(|r| r.pattern == p).unwrap();
+    assert!(of("/plain").konst.is_some(), "an unguarded constant still folds");
+    for p in ["/gated", "/envd", "/always"] {
+        assert!(of(p).konst.is_none(), "{p} folded to a constant despite its guard");
+        assert!(of(p).const_etag.is_none(), "{p} carries a compile-time ETag");
+    }
+
+    let s = Server::new(compile(GUARDED_CONST_SRC, None).unwrap()).unwrap();
+    let with_key = |key: &str| {
+        let req = format!("GET /gated HTTP/1.1\r\nhost: x\r\nx-key: {key}\r\n\r\n");
+        let mut out = Vec::new();
+        let (code, _) = s.handle("GET", "/gated", b"", req.as_bytes(), &mut out);
+        (code, String::from_utf8(out).unwrap())
+    };
+    assert_eq!(with_key("root"), (200, "secret".to_string()));
+    assert_eq!(with_key("nope").0, 403, "the guard must decide before the body is served");
+    assert_eq!(call(&s, "GET", "/gated", "").0, 403, "and with no header at all");
+    assert!(!call(&s, "GET", "/gated", "").1.contains("secret"), "a refusal must not leak it");
+}
