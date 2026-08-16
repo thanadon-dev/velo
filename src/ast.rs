@@ -132,7 +132,7 @@ pub enum Op {
     Upsert(Box<Expr>, Box<Expr>),
     Delete(Box<Expr>),
     Clear,
-    DeleteWhere(Box<Expr>, Box<Expr>),
+    DeleteWhere(Box<Expr>, Cmp, Box<Expr>),
     Chain(Vec<Stage>, Tail),
 }
 
@@ -302,10 +302,10 @@ impl Expr {
                     }
                 }
                 Op::Clear => Ok(deleted(col.clear())),
-                Op::DeleteWhere(f, v) => {
+                Op::DeleteWhere(f, op, v) => {
                     let field = f.eval(c)?;
                     let want = v.eval(c)?;
-                    Ok(deleted(col.delete_where(&field.as_key_ref(), &want.as_key_ref())))
+                    Ok(deleted(col.delete_where(&field.as_key_ref(), *op, &want.as_key_ref())))
                 }
                 Op::Chain(stages, tail) => {
                     let mut plan = Vec::with_capacity(stages.len());

@@ -1,6 +1,6 @@
 # Velo
 
-**v1.14.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.15.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -114,6 +114,7 @@ Built-in store (`db.<collection>.<op>`):
 | `upsert(key, value)` | merged row, or a new row keyed by `key` | never misses |
 | `delete(key)` | `{"deleted":true}` | 404 |
 | `delete_where(field, value)` | `{"deleted":n}` | `{"deleted":0}` |
+| `delete_where(field, op, value)` | same, with `op` one of `== != < <= > >=` | `{"deleted":0}` |
 | `clear()` | `{"deleted":n}`, resets generated ids | `{"deleted":0}` |
 | `select(field, ...)` | the rows with only those fields kept, or one row after `find`/`first` | `[]` / 404 |
 
@@ -255,6 +256,18 @@ DELETE /logout => [db.sessions.delete(cookie.session), setcookie("session", "")]
 Every cookie is written `Path=/; HttpOnly; SameSite=Lax`, and `VELO_COOKIE_SECURE=1` adds `Secure` for a TLS proxy. There are no per-call options: a cookie velo writes cannot be read by JavaScript and cannot be sent cross-site. An empty value expires it, which is how logout clears one. A name or value velo cannot write verbatim, because it holds a space, a semicolon, a quote or a control character, sets no cookie at all rather than a mangled one, so a token can never carry a forged header or a smuggled `Domain` into the response. An array evaluates left to right, which is how logout deletes the row and clears the cookie in one route.
 
 `examples/auth.velo` accepts the token from either place with `default(cookie.session, header.x_token)`, so the same API serves a browser and a script.
+
+Sessions are rows, and rows do not remove themselves. `VELO_EXPIRE=sessions.until` sweeps a collection every minute and deletes every row whose named field holds a Unix time in milliseconds that has passed, which is exactly the `until` a login writes. A row without that field, or with something that is not a number in it, is never swept. `VELO_EXPIRE_MS` changes how often, and several collections can be listed at once:
+
+```sh
+VELO_EXPIRE=sessions.until,resets.expires velo run app.velo :8080
+```
+
+The same thing can be done from a route, which is useful when the cadence should be yours:
+
+```velo
+DELETE /sessions/stale => db.sessions.delete_where("until", "<", now()) : 200
+```
 
 A session is a row like any other, so a token is checked with a `where(...).count()` guard, which the equality index answers without a scan, and expiry is a comparison against `now()`. `uuid()` draws from a SHA-256 generator seeded from `/dev/urandom`, so a token cannot be guessed from earlier ones. Never end a route on the row that holds the digest: `select` the fields a client may see. That works on one row as well as a list, so `db.users.find(id).select("id", "email")` is the safe way to serve a profile.
 
@@ -444,6 +457,8 @@ Env knobs:
 | `VELO_LOCAL_CACHE_BYTES` | 1 MB | per-worker budget for its thread-local view of those results |
 | `VELO_RATE` | off | requests per second allowed per client; over it answers 429 |
 | `VELO_REAL_IP_HEADER` | off | header holding the client IP behind a proxy, e.g. `CF-Connecting-IP`; without it the socket address is used |
+| `VELO_EXPIRE` | off | collections to sweep, as `collection.field`, comma separated, e.g. `sessions.until`; a row whose field is a Unix time in milliseconds now past is deleted |
+| `VELO_EXPIRE_MS` | 60000 | how often the sweep runs |
 | `VELO_COOKIE_SECURE` | off | add `Secure` to every cookie `setcookie()` writes; set it when a TLS proxy sits in front |
 | `VELO_ETAG` | off | send `ETag` on 200 `GET`/`HEAD` responses and answer 304 to a matching `If-None-Match`; constant routes carry a tag computed at compile time |
 
@@ -575,7 +590,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-131 tests (103 integration + 14 CLI + 6 fuzz + 8 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+139 tests (105 integration + 14 CLI + 6 fuzz + 11 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 `tests/cli.rs` drives the built binary end to end: `check` exit codes and error text, `new` refusing to overwrite, `openapi` output parsed back as JSON, a metrics endpoint, `include` across a directory of files, serving on a Unix socket, a program using every documented store operation and built-in, `--watch` restarting on a change to a route file or a folded-in asset and surviving a broken save, and a `POST` surviving a `SIGTERM` restart through the snapshot file.
 
@@ -634,6 +649,8 @@ velo: app.velo: line 2:15: unknown identifier "user"
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.15.0** — rows can expire. v1.9.0 told people to keep a session as a row and v1.10.0 handed the browser a cookie pointing at it, but nothing ever removed one, so a server that stayed up leaked a row per login until it ran out of memory. `VELO_EXPIRE=sessions.until` sweeps a collection on a timer and deletes every row whose named field holds a Unix time in milliseconds that has passed; a row missing the field, or holding something that is not a number, is never touched. The same sweep is available from a route because `delete_where` now takes the comparison operators `where` already took, so `db.sessions.delete_where("until", "<", now())` works and so does deleting by anything else that can be compared.
 
 **v1.14.0** — the event loop stops asking the kernel what time it is. Counted under `strace`, a keep-alive request cost 3.55 syscalls: one `recvfrom`, one `sendto`, and 1.55 `clock_gettime`, which came from three separate `Instant::now()` calls, one of them per connection serviced. A static musl binary does not get `clock_gettime` from the vDSO, so every one of those was a real syscall. The loop now reads the clock once per `epoll_wait` return and reuses it, taking the count to 2.30 per request. On a constant route that is 66 000 to 70 000 req/s where it was 60 000 to 66 000, measured in both orders on an idle four-core box. The idle timer is now accurate to one loop iteration rather than to the microsecond, which is irrelevant to a timeout measured in seconds.
 

@@ -2292,3 +2292,48 @@ fn a_bare_select_is_refused_wherever_it_appears() {
         assert!(compile(src, None).is_err(), "should not compile: {src}");
     }
 }
+
+const GC_SRC: &str = r#"
+POST /add    => db.jobs.create(body)
+GET  /count  => db.jobs.count()
+DELETE /old  => db.jobs.delete_where("score", "<", query.n)
+DELETE /team => db.jobs.delete_where("team", query.t)
+DELETE /not  => db.jobs.delete_where("team", "!=", query.t)
+"#;
+
+fn gc_server() -> Arc<Server> {
+    let s = Server::new(compile(GC_SRC, None).unwrap()).unwrap();
+    for (team, score) in [("red", 1), ("red", 5), ("blue", 9), ("blue", 20)] {
+        let body = format!(r#"{{"team":"{team}","score":{score}}}"#);
+        assert_eq!(call(&s, "POST", "/add", &body).0, 201);
+    }
+    s
+}
+
+#[test]
+fn delete_where_takes_the_same_operators_as_where() {
+    let s = gc_server();
+    assert_eq!(call(&s, "DELETE", "/old?n=6", "").1, r#"{"deleted":2}"#);
+    assert_eq!(call(&s, "GET", "/count", "").1, "2");
+    assert_eq!(call(&s, "DELETE", "/old?n=6", "").1, r#"{"deleted":0}"#);
+
+    let s = gc_server();
+    assert_eq!(
+        call(&s, "DELETE", "/team?t=red", "").1,
+        r#"{"deleted":2}"#,
+        "no operator is still =="
+    );
+    assert_eq!(call(&s, "GET", "/count", "").1, "2");
+
+    let s = gc_server();
+    assert_eq!(call(&s, "DELETE", "/not?t=red", "").1, r#"{"deleted":2}"#);
+    assert_eq!(call(&s, "GET", "/count", "").1, "2");
+}
+
+#[test]
+fn delete_where_wants_a_literal_operator() {
+    assert!(compile(r#"DELETE /a => db.x.delete_where("n", ">", 1)"#, None).is_ok());
+    assert!(compile(r#"DELETE /a => db.x.delete_where("n", "=>", 1)"#, None).is_err());
+    assert!(compile(r#"DELETE /a => db.x.delete_where("n", query.op, 1)"#, None).is_err());
+    assert!(compile(r#"DELETE /a => db.x.delete_where("n", ">", 1, 2)"#, None).is_err());
+}

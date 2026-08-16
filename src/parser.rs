@@ -746,10 +746,15 @@ fn single_op(
             want(0)?;
             Op::Clear
         }
+        "delete_where" if n == 3 => {
+            let f = Box::new(args.next().unwrap());
+            let cmp = cmp_arg(coll, &args.next().unwrap(), line, at_col)?;
+            Op::DeleteWhere(f, cmp, Box::new(args.next().unwrap()))
+        }
         "delete_where" => {
             want(2)?;
             let f = Box::new(args.next().unwrap());
-            Op::DeleteWhere(f, Box::new(args.next().unwrap()))
+            Op::DeleteWhere(f, crate::store::Cmp::Eq, Box::new(args.next().unwrap()))
         }
         "upsert" => {
             want(2)?;

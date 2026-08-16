@@ -570,10 +570,14 @@ impl Collection {
         removed
     }
 
-    pub fn delete_where(&self, field: &str, want: &str) -> usize {
+    pub fn delete_where(&self, field: &str, op: Cmp, want: &str) -> usize {
+        let want_num = want.trim().parse::<f64>().ok();
         let mut s = self.snap.write().unwrap();
-        let hits: Vec<String> =
-            s.live().filter(|r| field_eq(r, field, want)).map(|r| r.get("id").as_key()).collect();
+        let hits: Vec<String> = s
+            .live()
+            .filter(|r| field_cmp(r, field, op, want, want_num))
+            .map(|r| r.get("id").as_key())
+            .collect();
         if hits.is_empty() {
             return 0;
         }
@@ -724,6 +728,31 @@ impl Store {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    pub fn expire_now(self: &Arc<Self>, rules: &[(String, String)]) -> usize {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as f64)
+            .unwrap_or(0.0);
+        let mut cut = String::with_capacity(16);
+        crate::value::write_number_into(&mut cut, now);
+        let mut gone = 0;
+        for (name, field) in rules {
+            gone += self.collection(name).delete_where(field, Cmp::Lt, &cut);
+        }
+        gone
+    }
+
+    pub fn autoexpire(self: &Arc<Self>, rules: Vec<(String, String)>, every: std::time::Duration) {
+        if rules.is_empty() {
+            return;
+        }
+        let store = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(every);
+            store.expire_now(&rules);
+        });
     }
 
     pub fn autosave(self: &Arc<Self>, path: std::path::PathBuf, every: std::time::Duration) {
@@ -891,6 +920,20 @@ fn field_cmp(row: &Value, field: &str, op: Cmp, want: &str, want_num: Option<f64
         (other, _) => Some(other.as_key().as_str().cmp(want)),
     };
     ord.is_some_and(|ord| op.holds(ord))
+}
+
+pub fn expire_rules(spec: Option<String>) -> Vec<(String, String)> {
+    let Some(spec) = spec else { return Vec::new() };
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let Some((coll, field)) = part.trim().split_once('.') else { continue };
+        let (coll, field) = (coll.trim(), field.trim());
+        if coll.is_empty() || field.is_empty() {
+            continue;
+        }
+        out.push((coll.to_string(), field.to_string()));
+    }
+    out
 }
 
 fn push_usize(key: &mut String, mut n: usize) {
@@ -1175,6 +1218,53 @@ fn obj_of(v: &Value) -> Option<&Arc<Obj>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expire_rules_reads_a_list_of_collection_and_field() {
+        assert_eq!(expire_rules(None), Vec::new());
+        assert_eq!(expire_rules(Some(String::new())), Vec::new());
+        assert_eq!(
+            expire_rules(Some(" sessions.until , tokens.exp ".into())),
+            vec![("sessions".into(), "until".into()), ("tokens".into(), "exp".into())]
+        );
+        assert_eq!(
+            expire_rules(Some("nodot,.empty,coll.,ok.f".into())),
+            vec![("ok".into(), "f".into())]
+        );
+    }
+
+    #[test]
+    fn expiring_takes_the_past_and_leaves_the_future() {
+        let store = Store::new();
+        let sessions = store.collection("sessions");
+        let keep = store.collection("keep");
+        let now =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+                as u64;
+        for (id, until) in [("a", now - 1), ("b", now - 100_000), ("c", now + 100_000)] {
+            let raw = format!(r#"{{"id":"{id}","until":{until}}}"#);
+            sessions.create(crate::value::parse_json(raw.as_bytes()).unwrap()).unwrap();
+            keep.create(crate::value::parse_json(raw.as_bytes()).unwrap()).unwrap();
+        }
+        let rules = expire_rules(Some("sessions.until".into()));
+        assert_eq!(store.expire_now(&rules), 2);
+        assert_eq!(sessions.count(), 1);
+        assert!(sessions.find("c").is_some(), "the unexpired row survives");
+        assert_eq!(keep.count(), 3, "a collection outside the rules is untouched");
+        assert_eq!(store.expire_now(&rules), 0, "a second sweep finds nothing");
+    }
+
+    #[test]
+    fn a_row_without_the_field_is_never_expired() {
+        let store = Store::new();
+        let c = store.collection("sessions");
+        for raw in [r#"{"id":"a"}"#, r#"{"id":"b","until":"soon"}"#, r#"{"id":"c","until":1}"#] {
+            c.create(crate::value::parse_json(raw.as_bytes()).unwrap()).unwrap();
+        }
+        let rules = expire_rules(Some("sessions.until".into()));
+        assert_eq!(store.expire_now(&rules), 1, "only the numeric past goes");
+        assert!(c.find("a").is_some() && c.find("b").is_some());
+    }
 
     #[test]
     fn a_chain_key_pins_every_part_it_is_built_from() {

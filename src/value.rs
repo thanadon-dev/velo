@@ -141,6 +141,12 @@ impl Value {
     }
 }
 
+pub fn write_number_into(out: &mut String, n: f64) {
+    let mut bytes = Vec::with_capacity(24);
+    write_number(&mut bytes, n);
+    out.push_str(std::str::from_utf8(&bytes).unwrap_or("0"));
+}
+
 pub fn write_number(out: &mut Vec<u8>, f: f64) {
     if !f.is_finite() {
         out.extend_from_slice(b"null");

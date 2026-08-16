@@ -7,3 +7,5 @@ GET  /me     => db.users.find(db.sessions.find(default(cookie.session, header.x_
 DELETE /logout => [db.sessions.delete(default(cookie.session, header.x_token)), setcookie("session", "")] : 204 when db.sessions.where("id", default(cookie.session, header.x_token)).count()
 
 GET  /admin  => db.users.select("id", "email") when header.authorization == env("ADMIN_TOKEN") else 403
+
+DELETE /sessions/stale => db.sessions.delete_where("until", "<", now()) when header.authorization == env("ADMIN_TOKEN") else 403

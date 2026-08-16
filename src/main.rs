@@ -131,6 +131,13 @@ fn run(args: &[String]) {
         );
         store.autosave(path.clone(), every);
     }
+    let rules = velo::store::expire_rules(std::env::var("VELO_EXPIRE").ok());
+    if !rules.is_empty() {
+        let every = Duration::from_millis(
+            std::env::var("VELO_EXPIRE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(60_000),
+        );
+        store.autoexpire(rules, every.max(Duration::from_millis(100)));
+    }
     let n = prog.routes.len();
     let server = match Server::new(prog) {
         Ok(s) => s,
