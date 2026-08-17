@@ -182,7 +182,7 @@ fn slow_clients_are_dropped() {
     std::env::remove_var("VELO_HEADER_TIMEOUT");
 
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(6))).unwrap();
     c.write_all(b"GET /health HTTP/1.1\r\n").unwrap();
     for _ in 0..6 {
         std::thread::sleep(Duration::from_millis(400));
@@ -191,7 +191,11 @@ fn slow_clients_are_dropped() {
         }
     }
     let mut out = String::new();
-    let _ = c.read_to_string(&mut out);
+    let ended = c.read_to_string(&mut out);
+    assert!(
+        ended.is_ok(),
+        "a drip-feeding client must be closed by the server, not left waiting: {ended:?}"
+    );
     assert!(out.is_empty(), "slow client should be dropped, got {out}");
 
     let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();

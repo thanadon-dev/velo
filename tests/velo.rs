@@ -1211,6 +1211,24 @@ fn etag_round_trip() {
     let res = raw(port, req.as_bytes());
     assert!(res.starts_with("HTTP/1.1 304 Not Modified"), "{res}");
     assert!(!res.ends_with("ok"), "{res}");
+    let head = res.split("\r\n\r\n").next().unwrap_or_default();
+    assert!(
+        head.lines().all(|l| !l.starts_with("Content-Length:") || l.ends_with(" 0")),
+        "a 304 must not announce a body it will not send: {res}"
+    );
+    assert!(!head.contains("Content-Type:"), "a 304 describes no body: {res}");
+
+    let two = format!(
+        "GET /health HTTP/1.1\r\nHost: x\r\nIf-None-Match: {tag}\r\n\r\n\
+         GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+    );
+    let res = raw(port, two.as_bytes());
+    assert_eq!(
+        res.matches("HTTP/1.1 ").count(),
+        2,
+        "a 304 on a kept connection must not eat the request after it: {res}"
+    );
+    assert!(res.ends_with("ok"), "{res}");
 
     let req = "GET /health HTTP/1.1\r\nHost: x\r\nIf-None-Match: \"deadbeef\"\r\nConnection: close\r\n\r\n";
     let res = raw(port, req.as_bytes());
@@ -1350,6 +1368,21 @@ fn autosave_writes_and_keeps_up() {
         std::thread::sleep(Duration::from_millis(20));
     }
     let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_rate_window_lets_a_client_back_in_after_a_second() {
+    let key = "velo-test-window";
+    for i in 1..=5 {
+        assert!(velo::http::within_limit(key, 5), "request {i} of the first five was refused");
+    }
+    assert!(!velo::http::within_limit(key, 5), "the sixth in one second must be refused");
+    std::thread::sleep(Duration::from_millis(1100));
+    assert!(
+        velo::http::within_limit(key, 5),
+        "a client throttled once must be let back in when the window turns over"
+    );
+    assert!(velo::http::within_limit(key, 5));
 }
 
 #[test]
@@ -1834,6 +1867,29 @@ fn shutdown_drains_in_flight_connections() {
     let first = String::from_utf8_lossy(&buf[..n]).to_string();
     assert!(first.contains("Connection: keep-alive"), "{first}");
 
+    c.write_all(b"POST /users HTTP/1.1\r\nHost: x\r\nContent-Length: 18\r\n\r\n{\"name\"").unwrap();
+    s.shutdown();
+    std::thread::sleep(Duration::from_millis(150));
+    c.write_all(b":\"halfway\"}").unwrap();
+    let mut half = String::new();
+    c.read_to_string(&mut half).unwrap();
+    assert!(
+        half.starts_with("HTTP/1.1 201 Created"),
+        "a request already on the wire when shutdown began was dropped: {half:?}"
+    );
+    assert!(half.contains("Connection: close"), "{half}");
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let s = server();
+    let bg = s.clone();
+    let h2 = std::thread::spawn(move || bg.serve(velo::socket::Listener::Tcp(listener)));
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    let mut buf = [0u8; 512];
+    let n = c.read(&mut buf).unwrap();
+    assert!(String::from_utf8_lossy(&buf[..n]).contains("200 OK"));
     s.shutdown();
     c.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
     let mut rest = String::new();
@@ -1844,6 +1900,7 @@ fn shutdown_drains_in_flight_connections() {
 
     let started = std::time::Instant::now();
     h.join().unwrap().unwrap();
+    h2.join().unwrap().unwrap();
     assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err() || s.stopping());
 }

@@ -1109,3 +1109,53 @@ fn every_velo_snippet_in_the_readme_compiles() {
     }
     assert!(checked > 15, "only {checked} blocks were compiled");
 }
+
+#[test]
+fn a_full_server_refuses_a_new_connection_and_sweeps_an_idle_one() {
+    let app = tmp("limits.velo");
+    write(&app, "GET /health => \"ok\"\n");
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .env("VELO_MAX_CONNS", "2")
+        .env("VELO_KEEPALIVE", "1")
+        .env("VELO_WORKERS", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(get(port, "/health").ends_with("ok"));
+
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        c.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let mut buf = [0u8; 256];
+        let n = c.read(&mut buf).unwrap();
+        assert!(String::from_utf8_lossy(&buf[..n]).contains("200 OK"));
+        held.push(c);
+    }
+    let mut third = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    third.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    third.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    let mut buf = [0u8; 256];
+    let n = third.read(&mut buf).unwrap_or(0);
+    let said = String::from_utf8_lossy(&buf[..n]).to_string();
+    assert!(said.starts_with("HTTP/1.1 503"), "a full server must refuse: {said:?}");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let mut buf = [0u8; 256];
+        match held[0].read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => panic!("an idle connection was never swept: {e}"),
+        }
+        assert!(Instant::now() < deadline, "an idle connection was never swept");
+    }
+    stop(&mut child, "-TERM");
+    let _ = std::fs::remove_file(&app);
+}
