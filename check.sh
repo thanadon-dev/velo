@@ -17,8 +17,8 @@ cargo run --release --quiet --example embed >/dev/null
 "$BIN/velo" run examples/api.velo "$ADDR" &
 PID=$!
 sleep 1
-test "$(curl -sf "http://$ADDR/health")" = ok
-curl -sf -XPOST "http://$ADDR/users" -d '{"name":"check"}' | grep -q '"id":1'
+test "$(curl -sf --max-time 10 "http://$ADDR/health")" = ok
+curl -sf --max-time 10 -XPOST "http://$ADDR/users" -d '{"name":"check"}' | grep -q '"id":1'
 "$BIN/velobench" -c 8 -d 2 "http://$ADDR/health" | grep throughput
 kill $PID
 echo "all checks passed"

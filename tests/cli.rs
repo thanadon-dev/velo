@@ -5,7 +5,24 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_velo");
 
+fn watchdog() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let limit: u64 =
+            std::env::var("VELO_TEST_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(limit));
+            let note = format!(
+                "\nvelo tests: still running after {limit}s, something is waiting forever\n"
+            );
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), note.as_bytes());
+            std::process::exit(101);
+        });
+    });
+}
+
 fn tmp(name: &str) -> std::path::PathBuf {
+    watchdog();
     std::env::temp_dir().join(format!("velo-cli-{}-{name}", std::process::id()))
 }
 
@@ -14,6 +31,7 @@ fn write(path: &std::path::Path, body: &str) {
 }
 
 fn free_port() -> u16 {
+    watchdog();
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 

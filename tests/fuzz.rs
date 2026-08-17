@@ -12,7 +12,24 @@ GET  /q           => { a: query.a, n: len(query.a) }
 GET  /sorted      => db.users.order(query.by)
 "#;
 
+fn watchdog() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let limit: u64 =
+            std::env::var("VELO_TEST_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(limit));
+            let note = format!(
+                "\nvelo tests: still running after {limit}s, something is waiting forever\n"
+            );
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), note.as_bytes());
+            std::process::exit(101);
+        });
+    });
+}
+
 fn iterations(default: usize) -> usize {
+    watchdog();
     std::env::var("VELO_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
@@ -341,6 +358,7 @@ fn ids(body: &str) -> Vec<usize> {
 }
 
 fn load(rows: &[Row], order: &[usize]) -> std::sync::Arc<Server> {
+    watchdog();
     let s = Server::new(compile(SHAPE_SRC, None).unwrap()).unwrap();
     for at in order {
         let mut out = Vec::new();

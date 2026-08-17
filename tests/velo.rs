@@ -74,10 +74,28 @@ POST /events          => db.events.create({ at: now(), id: uuid(), data: body })
 "#;
 
 fn server() -> Arc<Server> {
+    watchdog();
     Server::new(compile(SRC, None).unwrap()).unwrap()
 }
 
+fn watchdog() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let limit: u64 =
+            std::env::var("VELO_TEST_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(limit));
+            let note = format!(
+                "\nvelo tests: still running after {limit}s, something is waiting forever\n"
+            );
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), note.as_bytes());
+            std::process::exit(101);
+        });
+    });
+}
+
 fn call(s: &Server, method: &str, path: &str, body: &str) -> (u16, String, Ctype) {
+    watchdog();
     let mut out = Vec::new();
     let (status, ct) = s.dispatch(method, path, body.as_bytes(), &mut out);
     (status, String::from_utf8(out).unwrap(), ct)
