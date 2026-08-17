@@ -10,9 +10,9 @@ cd "$(dirname "$0")"
 # keys behind, and a parameter count only ever read within range.
 EQUIVALENT="fnv-broken nparams-not-set"
 
-# Faults that are real and have no test yet. Removing the pending-write cap
-# needs a client that pipelines faster than it reads. Named rather than hidden.
-UNCOVERED="no-backpressure"
+# Faults that are real and have no test yet. Empty, and meant to stay that way:
+# a fault listed here is a hole someone has decided to live with.
+UNCOVERED=""
 
 if [ -n "$(git status --porcelain -- src/)" ]; then
   echo "mutants: src/ has uncommitted changes, commit or stash them first" >&2

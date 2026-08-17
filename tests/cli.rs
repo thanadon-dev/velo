@@ -1159,3 +1159,52 @@ fn a_full_server_refuses_a_new_connection_and_sweeps_an_idle_one() {
     stop(&mut child, "-TERM");
     let _ = std::fs::remove_file(&app);
 }
+
+#[test]
+fn a_client_that_pipelines_without_reading_cannot_make_the_server_grow() {
+    const REQUESTS: usize = 3_000;
+    let app = tmp("pending.velo");
+    let big = "x".repeat(60 << 10);
+    write(&app, &format!("GET /big => \"{big}\"\n"));
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .env("VELO_WORKERS", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(get(port, "/big").len() > 60 << 10);
+
+    let rss = |pid: u32| -> u64 {
+        std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .unwrap_or_default()
+            .lines()
+            .find(|l| l.starts_with("VmRSS:"))
+            .and_then(|l| l.split_whitespace().nth(1)?.parse().ok())
+            .unwrap_or(0)
+    };
+    let before = rss(child.id());
+    assert!(before > 0, "could not read the server's memory");
+
+    let mut c = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let one = "GET /big HTTP/1.1\r\nHost: x\r\n\r\n";
+    let flood = one.repeat(REQUESTS);
+    c.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    let _ = c.write_all(flood.as_bytes());
+    std::thread::sleep(Duration::from_millis(500));
+    let after = rss(child.id());
+    let asked = REQUESTS as u64 * 60;
+    assert!(
+        after < before + asked / 4,
+        "a client that never reads made the server hold {} kB for {} kB of unread answers",
+        after - before,
+        asked
+    );
+    drop(c);
+    assert!(get(port, "/big").len() > 60 << 10, "the server must still serve everyone else");
+    stop(&mut child, "-TERM");
+    let _ = std::fs::remove_file(&app);
+}
