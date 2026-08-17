@@ -1,6 +1,6 @@
 GET  /health              => "ok"
 GET  /openapi.json        => openapi()
-GET  /version             => { name: "velo", version: "1.48.0" }
+GET  /version             => { name: "velo", version: "1.49.0" }
 
 GET  /users               => db.users.all()
 GET  /users/:id           => db.users.find(id)

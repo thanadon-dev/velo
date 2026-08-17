@@ -787,7 +787,7 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
     let out = Command::new(BIN)
         .arg("bench")
         .arg(dir.join("app.velo"))
-        .args(["-c", "2", "-d", "1", "--data"])
+        .args(["-c", "2", "-d", "0.2", "--data"])
         .arg(dir.join("data.json"))
         .output()
         .unwrap();
@@ -831,7 +831,7 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
     let out = Command::new(BIN)
         .arg("bench")
         .arg(dir.join("app.velo"))
-        .args(["-c", "2", "-d", "1"])
+        .args(["-c", "2", "-d", "0.2"])
         .output()
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("the store is empty"), "no warning");
@@ -839,7 +839,7 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
     let out = Command::new(BIN)
         .arg("bench")
         .arg(dir.join("app.velo"))
-        .args(["-c", "2", "-d", "1", "-H", "x-key: open", "--data"])
+        .args(["-c", "2", "-d", "0.2", "-H", "x-key: open", "--data"])
         .arg(dir.join("data.json"))
         .output()
         .unwrap();

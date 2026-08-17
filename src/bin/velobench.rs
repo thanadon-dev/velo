@@ -1,5 +1,10 @@
 use velo::bench::{run, Args};
 
+fn seconds(text: &str) -> Option<std::time::Duration> {
+    let n: f64 = text.parse().ok()?;
+    (n > 0.0).then(|| std::time::Duration::from_secs_f64(n.clamp(0.01, 86_400.0)))
+}
+
 fn parse_args() -> Args {
     let mut a = Args::default();
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -12,7 +17,7 @@ fn parse_args() -> Args {
         };
         match arg {
             "-c" => a.conns = next().parse().unwrap_or(a.conns),
-            "-d" => a.secs = next().parse().unwrap_or(a.secs),
+            "-d" => a.run_for = seconds(&next()).unwrap_or(a.run_for),
             "-p" => a.pipeline = next().parse().unwrap_or(a.pipeline).max(1),
             "-m" => a.method = next().to_uppercase(),
             "-b" => a.body = next(),

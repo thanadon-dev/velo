@@ -342,7 +342,8 @@ fn sample_body(
 
 fn bench(args: &[String]) {
     let conns: usize = flag(args, "-c").and_then(|v| v.parse().ok()).unwrap_or(8);
-    let secs: u64 = flag(args, "-d").and_then(|v| v.parse().ok()).unwrap_or(2);
+    let secs: f64 = flag(args, "-d").and_then(|v| v.parse().ok()).unwrap_or(2.0);
+    let run_for = Duration::from_secs_f64(secs.clamp(0.01, 86_400.0));
     let store = Store::new();
     let prog = program(args, Some(store.clone()));
     if let Some(path) = flag(args, "--data") {
@@ -429,7 +430,7 @@ fn bench(args: &[String]) {
             method: method.clone(),
             body: body.clone(),
             conns,
-            secs,
+            run_for,
             headers: headers.clone(),
             ..Default::default()
         });

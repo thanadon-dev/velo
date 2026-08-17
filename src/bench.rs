@@ -13,7 +13,7 @@ pub struct Args {
     pub body: String,
     pub conns: usize,
     pub unix: Option<String>,
-    pub secs: u64,
+    pub run_for: Duration,
     pub pipeline: usize,
     pub headers: Vec<String>,
 }
@@ -28,7 +28,7 @@ impl Default for Args {
             body: String::new(),
             conns: 50,
             unix: None,
-            secs: 5,
+            run_for: Duration::from_secs(5),
             pipeline: 1,
             headers: Vec::new(),
         }
@@ -79,7 +79,7 @@ pub fn run(a: Args) -> Report {
         handles
             .push(std::thread::spawn(move || worker(a, req, stop, done, errors, bytes, refused)));
     }
-    std::thread::sleep(Duration::from_secs(a.secs));
+    std::thread::sleep(a.run_for);
     stop.store(true, Ordering::Relaxed);
     let mut lat: Vec<u64> = Vec::new();
     for h in handles {

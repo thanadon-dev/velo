@@ -38,14 +38,14 @@ for patch in mutants/*.patch; do
     skipped=$((skipped + 1))
     continue
   fi
-  if ! cargo build --release --tests >/dev/null 2>&1; then
+  if ! cargo build --profile mutants --tests >/dev/null 2>&1; then
     echo "BROKEN   $name (does not compile, proves nothing)"
     broken=$((broken + 1))
     git apply -R "$patch"
     current=""
     continue
   fi
-  if cargo test --release 2>&1 | grep -qE "^test result: FAILED"; then
+  if cargo test --profile mutants 2>&1 | grep -qE "^test result: FAILED"; then
     echo "caught   $name"
     caught=$((caught + 1))
   else

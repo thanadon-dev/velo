@@ -1,6 +1,6 @@
 [package]
 name = "velo"
-version = "1.48.0"
+version = "1.49.0"
 edition = "2021"
 rust-version = "1.75"
 description = "A tiny language for HTTP APIs"
@@ -22,3 +22,8 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[profile.mutants]
+inherits = "release"
+lto = false
+codegen-units = 16
