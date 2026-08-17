@@ -916,13 +916,18 @@ fn a_snapshot_leaves_only_the_writes_that_followed_it_in_the_wal() {
         post(port, "/users", &format!(r#"{{"id":"u{i}","n":{i}}}"#));
     }
     let deadline = Instant::now() + Duration::from_secs(15);
-    while !data.exists() {
-        assert!(Instant::now() < deadline, "no snapshot was ever written");
+    loop {
+        let saved = std::fs::metadata(&data).map(|m| m.len()).unwrap_or(0);
+        let logged = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(u64::MAX);
+        if saved > 0 && logged < saved {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a snapshot never trimmed the wal it covers: {logged} logged, {saved} saved"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
-    let logged = std::fs::metadata(&log).unwrap().len();
-    let saved = std::fs::metadata(&data).unwrap().len();
-    assert!(logged < saved, "a snapshot must trim the wal it covers: {logged} bytes left");
     let _ = Command::new("kill").arg("-9").arg(child.id().to_string()).status();
     let _ = child.wait();
 

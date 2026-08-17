@@ -41,6 +41,16 @@ GET  /gone/:id        => db.nested.find(id).select("id", "nope.deep")
 GET  /wrong/:id       => db.nested.find(id).select("id", "team.name")
 GET  /items/:id       => db.nested.find(id).select("orders.item")
 POST /nested          => db.nested.create(body)
+GET  /pby             => db.nested.where("profile.city", query.c).select("id")
+GET  /pdeep           => db.nested.where("profile.address.city", query.c).select("id")
+GET  /pcmp            => db.nested.where("profile.age", ">", query.min).select("id")
+GET  /pin             => db.nested.where("profile.city", "in", query.cs).select("id")
+GET  /psort           => db.nested.order("profile.name").select("id")
+GET  /pgroup          => db.nested.group("profile.city").count()
+GET  /psum            => db.nested.group("profile.city").sum("profile.age")
+GET  /ptotal          => db.nested.sum("profile.age")
+GET  /pfirst          => db.nested.first("profile.city", query.c).select("id")
+GET  /psearch         => db.nested.search("profile.name", query.q).select("id")
 GET  /grp             => db.users.group("team").count()
 GET  /grpname         => db.users.group("name").count()
 GET  /grpsum          => db.users.group("team").sum("score")
@@ -306,6 +316,55 @@ fn ids_of(body: &str) -> Vec<String> {
 
 const NESTED: &str = r#"{"id":"a","team":"t","profile":{"name":"mark","city":"bkk","secret":"no",
   "address":{"city":"bkk","street":"hidden"}},"orders":[{"item":"x","cost":9},{"item":"y","cost":3}]}"#;
+
+fn nested_row(id: &str, name: &str, city: &str, age: u32) -> String {
+    format!(
+        r#"{{"id":"{id}","profile":{{"name":"{name}","city":"{city}","age":{age},
+           "address":{{"city":"{city}"}}}}}}"#
+    )
+}
+
+#[test]
+fn a_query_reads_a_path_the_way_select_does() {
+    let s = server();
+    for (id, name, city, age) in
+        [("a", "ann", "bkk", 30), ("b", "bob", "cnx", 20), ("c", "cat", "bkk", 40)]
+    {
+        call(&s, "POST", "/nested", &nested_row(id, name, city, age));
+    }
+    call(&s, "POST", "/nested", r#"{"id":"d","note":"no profile"}"#);
+    assert_eq!(ids_of(&call(&s, "GET", "/pby?c=bkk", "").1), ["a", "c"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/pdeep?c=cnx", "").1), ["b"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/pcmp?min=25", "").1), ["a", "c"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/pin?cs=cnx,bkk", "").1), ["a", "b", "c"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/psort", "").1), ["d", "a", "b", "c"]);
+    assert_eq!(call(&s, "GET", "/pgroup", "").1, r#"{"bkk":2,"cnx":1}"#);
+    assert_eq!(call(&s, "GET", "/psum", "").1, r#"{"bkk":70,"cnx":20}"#);
+    assert_eq!(call(&s, "GET", "/ptotal", "").1, "90");
+    assert_eq!(call(&s, "GET", "/pfirst?c=cnx", "").1, r#"{"id":"b"}"#);
+    assert_eq!(ids_of(&call(&s, "GET", "/psearch?q=AN", "").1), ["a"]);
+}
+
+#[test]
+fn a_path_query_holds_once_the_index_is_carrying_it() {
+    let s = server();
+    for i in 0..700 {
+        let city = format!("c{}", i % 5);
+        call(&s, "POST", "/nested", &nested_row(&format!("u{i}"), "n", &city, i as u32 % 9));
+    }
+    let hits = ids_of(&call(&s, "GET", "/pby?c=c3", "").1);
+    assert_eq!(hits.len(), 140, "an indexed path must find every row");
+    assert!(hits.contains(&"u3".to_string()) && hits.contains(&"u698".to_string()));
+    assert_eq!(ids_of(&call(&s, "GET", "/pby?c=gone", "").1), Vec::<String>::new());
+    assert_eq!(ids_of(&call(&s, "GET", "/pin?cs=c1,c3", "").1).len(), 280);
+    assert_eq!(call(&s, "GET", "/pgroup", "").1.matches(':').count(), 5);
+    call(&s, "POST", "/nested", &nested_row("late", "n", "c3", 1));
+    assert_eq!(
+        ids_of(&call(&s, "GET", "/pby?c=c3", "").1).len(),
+        141,
+        "a write must reach an index built over a path"
+    );
+}
 
 #[test]
 fn select_reaches_into_a_nested_object() {

@@ -58,9 +58,13 @@ impl Value {
                 return Some(v);
             }
         }
-        let found = o.iter().position(|(k, _)| &**k == key)?;
-        *at = found;
-        Some(&o[found].1)
+        match o.iter().position(|(k, _)| &**k == key) {
+            Some(found) => {
+                *at = found;
+                Some(&o[found].1)
+            }
+            None => walk_path(self, key),
+        }
     }
 
     pub fn key_eq(&self, want: &str) -> bool {
@@ -541,6 +545,17 @@ fn slot(into: &mut Vec<Keep>, name: &str, leaf: bool) -> usize {
     let children = if leaf { None } else { Some(Vec::new()) };
     into.push(Keep { name: intern(name), children });
     into.len() - 1
+}
+
+#[cold]
+fn walk_path<'a>(row: &'a Value, field: &str) -> Option<&'a Value> {
+    let (head, mut rest) = field.split_once('.')?;
+    let mut at = row.get_ref(head)?;
+    while let Some((next, tail)) = rest.split_once('.') {
+        at = at.get_ref(next)?;
+        rest = tail;
+    }
+    at.get_ref(rest)
 }
 
 pub fn keep_selected(v: &Value, plan: &[Keep]) -> Value {

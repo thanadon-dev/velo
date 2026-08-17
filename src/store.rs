@@ -1365,7 +1365,8 @@ fn selected_json(rows: &[&Value], fields: &[Arc<str>]) -> Arc<Vec<u8>> {
         out.push(b'{');
         let mut first = true;
         for field in fields {
-            let Some(value) = row.get_ref(field) else { continue };
+            let mut at = 0;
+            let Some(value) = row.get_at(field, &mut at) else { continue };
             if !first {
                 out.push(b',');
             }
@@ -1400,8 +1401,9 @@ fn aggregate_json(rows: &Rows, op: Agg, field: &str) -> Arc<Vec<u8>> {
 fn aggregate_over<'a>(rows: impl Iterator<Item = &'a Value>, op: Agg, field: &str) -> Arc<Vec<u8>> {
     let mut acc: Option<f64> = None;
     let mut n = 0u64;
+    let mut at = 0;
     for row in rows {
-        let Some(Value::Num(v)) = row.get_ref(field) else { continue };
+        let Some(Value::Num(v)) = row.get_at(field, &mut at) else { continue };
         n += 1;
         acc = Some(match (acc, op) {
             (None, _) => *v,
