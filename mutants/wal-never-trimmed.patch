@@ -1,0 +1,14 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..85a5145 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -978,9 +978,6 @@ impl Store {
+                     let mark = store.wal().map(|w| w.len()).unwrap_or(0);
+                     match store.save_to(&path) {
+                         Ok(()) => {
+-                            if let Some(wal) = store.wal() {
+-                                wal.drop_prefix(mark);
+-                            }
+                         }
+                         Err(e) => eprintln!("velo: save {}: {e}", path.display()),
+                     }

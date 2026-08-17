@@ -1,0 +1,15 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..a683927 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -182,9 +182,7 @@ impl Snapshot {
+     fn holds(&self, field: &str, want: &str, skip: usize) -> bool {
+         let same = |row: &Value| is_live(row) && row.get(field).as_key() == want;
+         match self.candidates(field, want) {
+-            Some(hits) => hits
+-                .iter()
+-                .any(|i| *i as usize != skip && self.rows.get(*i as usize).is_some_and(same)),
++            Some(_) => false,
+             None => self.rows.iter().enumerate().any(|(i, row)| i != skip && same(row)),
+         }
+     }

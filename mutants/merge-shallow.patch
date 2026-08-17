@@ -1,0 +1,13 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..02d5740 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1616,7 +1616,7 @@ fn merge(base: &Value, patch: &Value) -> Value {
+             continue;
+         }
+         match out.iter_mut().find(|(ek, _)| ek == k) {
+-            Some(slot) => slot.1 = deep(&slot.1, v),
++            Some(slot) => slot.1 = v.clone(),
+             None => out.push((k.clone(), v.clone())),
+         }
+     }

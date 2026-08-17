@@ -1,0 +1,17 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..8e6cce4 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1259,7 +1259,11 @@ fn plan_hits(s: &Snapshot, stages: &[Stage]) -> Option<Vec<u32>> {
+                 let mut indexed = true;
+                 for part in want.split(',') {
+                     match s.candidates(field, part.trim()) {
+-                        Some(list) => found.extend(list),
++                        Some(list) => {
++                            if found.is_empty() {
++                                found.extend(list);
++                            }
++                        }
+                         None => {
+                             indexed = false;
+                             break;

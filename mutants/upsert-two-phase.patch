@@ -1,0 +1,18 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..50ba836 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -683,10 +683,10 @@ impl Collection {
+     }
+ 
+     pub fn upsert(&self, id: &str, value: Value, unique: &[&str]) -> Option<Value> {
+-        let mut s = self.snap.write().unwrap();
+-        if let Some(&i) = s.by_id.get(id) {
+-            return self.merge_locked(&mut s, id, i, &value, unique);
++        if let Some(row) = self.update(id, value.clone(), unique) {
++            return Some(row);
+         }
++        let mut s = self.snap.write().unwrap();
+         let keyed = match &value {
+             Value::Obj(o) | Value::Row(o, _) => {
+                 let mut fields: Obj = Vec::with_capacity(o.len() + 1);

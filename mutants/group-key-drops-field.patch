@@ -1,0 +1,13 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..8ce8f4e 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -556,7 +556,7 @@ impl Collection {
+         self.derived_with(
+             "qg",
+             &key,
+-            by,
++            "",
+             |s| {
+                 let counted = if whole { s.group_counts(by) } else { None };
+                 let hits = if counted.is_some() { None } else { plan_hits(s, stages) };

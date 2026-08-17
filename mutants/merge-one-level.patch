@@ -1,0 +1,13 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..0c1a652 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1628,7 +1628,7 @@ fn deep(base: &Value, patch: &Value) -> Value {
+     let mut out: Obj = b.as_ref().clone();
+     for (k, v) in p.iter() {
+         match out.iter_mut().find(|(ek, _)| ek == k) {
+-            Some(slot) => slot.1 = deep(&slot.1, v),
++            Some(slot) => slot.1 = v.clone(),
+             None => out.push((k.clone(), v.clone())),
+         }
+     }

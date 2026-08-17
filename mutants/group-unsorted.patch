@@ -1,0 +1,14 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..987e222 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1480,8 +1480,7 @@ fn group_json(rows: &[&Value], by: &str, op: Option<(Agg, &str)>) -> Arc<Vec<u8>
+             (Some(a), Agg::Max) => a.max(*v),
+         });
+     }
+-    let mut keys: Vec<&String> = groups.keys().collect();
+-    keys.sort_unstable();
++    let keys: Vec<&String> = groups.keys().collect();
+     let mut out = Vec::with_capacity(keys.len() * 24 + 2);
+     out.push(b'{');
+     for (i, key) in keys.iter().enumerate() {

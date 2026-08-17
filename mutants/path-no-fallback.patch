@@ -1,0 +1,13 @@
+diff --git a/src/value.rs b/src/value.rs
+index 2c69a74..bddf7e9 100644
+--- a/src/value.rs
++++ b/src/value.rs
+@@ -63,7 +63,7 @@ impl Value {
+                 *at = found;
+                 Some(&o[found].1)
+             }
+-            None => walk_path(self, key),
++            None => None,
+         }
+     }
+ 

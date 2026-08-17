@@ -6,7 +6,13 @@
 set -u
 cd "$(dirname "$0")"
 
-EQUIVALENT="fnv-broken nparams-not-set no-backpressure"
+# Faults that change no behaviour at all: a weaker hash the map still compares
+# keys behind, and a parameter count only ever read within range.
+EQUIVALENT="fnv-broken nparams-not-set"
+
+# Faults that are real and have no test yet. Removing the pending-write cap
+# needs a client that pipelines faster than it reads. Named rather than hidden.
+UNCOVERED="no-backpressure"
 
 if [ -n "$(git status --porcelain -- src/)" ]; then
   echo "mutants: src/ has uncommitted changes, commit or stash them first" >&2
@@ -20,6 +26,7 @@ only=${1:-}
 caught=0
 survived=0
 skipped=0
+broken=0
 
 for patch in mutants/*.patch; do
   name=$(basename "$patch" .patch)
@@ -31,15 +38,27 @@ for patch in mutants/*.patch; do
     skipped=$((skipped + 1))
     continue
   fi
-  if cargo test --release 2>&1 | grep -qE "^test result: FAILED|^error"; then
+  if ! cargo build --release --tests >/dev/null 2>&1; then
+    echo "BROKEN   $name (does not compile, proves nothing)"
+    broken=$((broken + 1))
+    git apply -R "$patch"
+    current=""
+    continue
+  fi
+  if cargo test --release 2>&1 | grep -qE "^test result: FAILED"; then
     echo "caught   $name"
     caught=$((caught + 1))
   else
     case " $EQUIVALENT " in
       *" $name "*) echo "same     $name (changes no behaviour)" ;;
       *)
-        echo "SURVIVED $name"
-        survived=$((survived + 1))
+        case " $UNCOVERED " in
+          *" $name "*) echo "open     $name (a real fault with no test yet)" ;;
+          *)
+            echo "SURVIVED $name"
+            survived=$((survived + 1))
+            ;;
+        esac
         ;;
     esac
   fi
@@ -47,5 +66,5 @@ for patch in mutants/*.patch; do
   current=""
 done
 
-echo "$caught caught, $survived survived, $skipped skipped"
+echo "$caught caught, $survived survived, $broken broken, $skipped skipped"
 [ "$survived" -eq 0 ] || exit 1

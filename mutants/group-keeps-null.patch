@@ -1,0 +1,14 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..02a6d52 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1462,7 +1462,8 @@ fn group_json(rows: &[&Value], by: &str, op: Option<(Agg, &str)>) -> Arc<Vec<u8>
+     let mut seen = 0;
+     for row in rows {
+         let key = match row.get_at(by, &mut at) {
+-            None | Some(Value::Null) => continue,
++            None => continue,
++            Some(Value::Null) => std::borrow::Cow::Borrowed(""),
+             Some(v) => v.as_key_ref(),
+         };
+         let slot = match groups.get_mut(&*key) {

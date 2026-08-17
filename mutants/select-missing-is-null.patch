@@ -1,0 +1,16 @@
+diff --git a/src/value.rs b/src/value.rs
+index 2c69a74..952a0bd 100644
+--- a/src/value.rs
++++ b/src/value.rs
+@@ -585,10 +585,7 @@ pub fn keep_object_planned(v: &Value, plan: &[Keep]) -> Value {
+                 match &keep.children {
+                     None => kept.push((keep.name.clone(), found.clone())),
+                     Some(kids) => {
+-                        let narrowed = keep_planned(found, kids);
+-                        if !matches!(narrowed, Value::Null) {
+-                            kept.push((keep.name.clone(), narrowed));
+-                        }
++                        kept.push((keep.name.clone(), keep_planned(found, kids)));
+                     }
+                 }
+             }

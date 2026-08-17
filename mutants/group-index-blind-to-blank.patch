@@ -1,0 +1,14 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..3316de8 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -167,9 +167,6 @@ impl Snapshot {
+         self.candidates(field, "")?;
+         let map = self.index.read().unwrap();
+         let by_value = map.get(field)?;
+-        if by_value.get("").is_some_and(|rows| !rows.is_empty()) {
+-            return None;
+-        }
+         let mut out: Vec<(String, u64)> = by_value
+             .iter()
+             .filter(|(value, _)| !value.is_empty())

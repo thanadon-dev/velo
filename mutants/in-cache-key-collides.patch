@@ -1,0 +1,13 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..9962842 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1126,7 +1126,7 @@ impl Cmp {
+             Cmp::Le => '(',
+             Cmp::Gt => '>',
+             Cmp::Ge => ')',
+-            Cmp::In => '@',
++            Cmp::In => '=',
+         }
+     }
+ 

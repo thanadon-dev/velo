@@ -1,0 +1,14 @@
+diff --git a/src/value.rs b/src/value.rs
+index 2c69a74..cd8e33f 100644
+--- a/src/value.rs
++++ b/src/value.rs
+@@ -531,6 +531,9 @@ fn add_path(into: &mut Vec<Keep>, path: &str) {
+         }
+         Some((head, rest)) => {
+             let at = slot(into, head, false);
++            if into[at].children.is_none() {
++                into[at].children = Some(Vec::new());
++            }
+             if let Some(kids) = into[at].children.as_mut() {
+                 add_path(kids, rest);
+             }

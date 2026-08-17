@@ -1,0 +1,13 @@
+diff --git a/src/wal.rs b/src/wal.rs
+index 5f1c22e..5afa7fd 100644
+--- a/src/wal.rs
++++ b/src/wal.rs
+@@ -132,7 +132,7 @@ impl Wal {
+         if upto == 0 || upto > end {
+             return;
+         }
+-        let tail = match tail_from(&self.path, upto, end) {
++        let tail = match tail_from(&self.path, end, end) {
+             Ok(tail) => tail,
+             Err(e) => {
+                 eprintln!("velo: wal {}: {e}", self.path.display());

@@ -1,0 +1,14 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..a5f21be 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -626,9 +626,6 @@ impl Collection {
+         s.all_json = reuse;
+         s.append_json(&row, self.limits.append_max);
+         s.list_used.store(false, Ordering::Relaxed);
+-        if let Some(wal) = self.log() {
+-            wal.put(&self.name, &row);
+-        }
+         self.bump();
+         self.touch();
+         row

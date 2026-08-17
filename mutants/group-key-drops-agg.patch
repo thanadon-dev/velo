@@ -1,0 +1,14 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..f1a6cc3 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -546,8 +546,7 @@ impl Collection {
+         let mut key = String::with_capacity(64);
+         match &op {
+             Some((agg, field)) => {
+-                key.push_str(agg.name());
+-                push_part(&mut key, field);
++                key.push_str("count");
+             }
+             None => key.push_str("count"),
+         }

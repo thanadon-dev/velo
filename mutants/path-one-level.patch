@@ -1,0 +1,15 @@
+diff --git a/src/value.rs b/src/value.rs
+index 2c69a74..dd39272 100644
+--- a/src/value.rs
++++ b/src/value.rs
+@@ -551,10 +551,6 @@ fn slot(into: &mut Vec<Keep>, name: &str, leaf: bool) -> usize {
+ fn walk_path<'a>(row: &'a Value, field: &str) -> Option<&'a Value> {
+     let (head, mut rest) = field.split_once('.')?;
+     let mut at = row.get_ref(head)?;
+-    while let Some((next, tail)) = rest.split_once('.') {
+-        at = at.get_ref(next)?;
+-        rest = tail;
+-    }
+     at.get_ref(rest)
+ }
+ 

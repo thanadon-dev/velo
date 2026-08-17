@@ -1,0 +1,13 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..5da5445 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1155,7 +1155,7 @@ fn field_cmp(
+         return field_eq(row, field, want, at) == (op == Cmp::Eq);
+     }
+     if op == Cmp::In {
+-        return want.split(',').any(|part| field_eq(row, field, part.trim(), at));
++        return want.split(',').any(|part| field_eq(row, field, part, at));
+     }
+     let Some(value) = row.get_at(field, at) else { return false };
+     let ord = match (value, want_num) {

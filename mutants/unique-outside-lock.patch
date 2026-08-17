@@ -1,0 +1,21 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..dcd7624 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -594,10 +594,13 @@ impl Collection {
+             Some(key) => (key, as_row(v)),
+             None => (String::new(), v),
+         };
+-        let mut s = self.snap.write().unwrap();
+-        if collides(&s, &row, unique, usize::MAX) {
+-            return None;
++        {
++            let s = self.snap.read().unwrap();
++            if collides(&s, &row, unique, usize::MAX) {
++                return None;
++            }
+         }
++        let mut s = self.snap.write().unwrap();
+         let (key, row) = if key.is_empty() {
+             let mut id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+             while s.by_id.contains_key(&id.to_string()) {

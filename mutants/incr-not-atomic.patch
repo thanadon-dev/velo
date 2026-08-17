@@ -1,0 +1,24 @@
+diff --git a/src/store.rs b/src/store.rs
+index 86f5e3c..7b736f3 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -773,6 +773,10 @@ impl Collection {
+         if field == "id" || field.is_empty() {
+             return Incr::NotNumber;
+         }
++        let seen = {
++            let s = self.snap.read().unwrap();
++            s.by_id.get(id).and_then(|i| s.rows.get(*i)).map(|r| r.get(field))
++        };
+         let mut s = self.snap.write().unwrap();
+         let Some(&i) = s.by_id.get(id) else {
+             return Incr::Missing;
+@@ -780,7 +784,7 @@ impl Collection {
+         let Some(row) = s.rows.get(i) else {
+             return Incr::Missing;
+         };
+-        let next = match row.get(field) {
++        let next = match seen.unwrap_or(Value::Null) {
+             Value::Null => by,
+             Value::Num(n) => n + by,
+             _ => return Incr::NotNumber,
