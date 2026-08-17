@@ -343,6 +343,15 @@ fn group_agrees_with_itself_once_the_index_is_on() {
         .join(",");
     assert_eq!(sums, format!("{{{want_sums}}}"), "a sum must not be served the counts");
     assert_eq!(call(&s, "GET", "/grpwhere?min=3", "").1.matches(':').count(), 7);
+    call(&s, "POST", "/users", r#"{"id":"blank","team":"","score":1}"#);
+    let counted = call(&s, "GET", "/grp", "").1;
+    assert!(counted.starts_with(r#"{"":1,"t0":"#), "an empty team is its own group: {counted}");
+    call(&s, "POST", "/users", r#"{"id":"missing","score":1}"#);
+    let counted = call(&s, "GET", "/grp", "").1;
+    assert!(counted.starts_with(r#"{"":1,"t0":"#), "a row with no team joins no group: {counted}");
+    call(&s, "POST", "/users", r#"{"id":"nulled","team":null,"score":1}"#);
+    let counted = call(&s, "GET", "/grp", "").1;
+    assert!(counted.starts_with(r#"{"":1,"t0":"#), "a null team joins no group: {counted}");
 }
 
 #[test]

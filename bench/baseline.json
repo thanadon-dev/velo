@@ -9,5 +9,6 @@
   "chain": 1.007,
   "select": 4.569,
   "batch": 3.4,
-  "write_then_group": 232.0
+  "write_then_group": 5.7,
+  "filtered_group": 447.0
 }

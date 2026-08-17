@@ -163,6 +163,22 @@ impl Snapshot {
         Some(hits)
     }
 
+    fn group_counts(&self, field: &str) -> Option<Vec<(String, u64)>> {
+        self.candidates(field, "")?;
+        let map = self.index.read().unwrap();
+        let by_value = map.get(field)?;
+        if by_value.get("").is_some_and(|rows| !rows.is_empty()) {
+            return None;
+        }
+        let mut out: Vec<(String, u64)> = by_value
+            .iter()
+            .filter(|(value, _)| !value.is_empty())
+            .map(|(value, rows)| (value.clone(), rows.len() as u64))
+            .collect();
+        out.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Some(out)
+    }
+
     fn holds(&self, field: &str, want: &str, skip: usize) -> bool {
         let same = |row: &Value| is_live(row) && row.get(field).as_key() == want;
         match self.candidates(field, want) {
@@ -526,14 +542,22 @@ impl Collection {
             None => key.push_str("count"),
         }
         push_chain(&mut key, stages);
+        let whole = stages.is_empty() && op.is_none();
         self.derived_with(
             "qg",
             &key,
             by,
-            |s| plan_hits(s, stages),
-            |rows, hits| {
-                let picked = run_stages_hit(rows, stages, hits);
-                group_json(&picked, by, op.as_ref().map(|(a, f)| (*a, &**f)))
+            |s| {
+                let counted = if whole { s.group_counts(by) } else { None };
+                let hits = if counted.is_some() { None } else { plan_hits(s, stages) };
+                (counted, hits)
+            },
+            |rows, (counted, hits)| match counted {
+                Some(counts) => counts_json(&counts),
+                None => {
+                    let picked = run_stages_hit(rows, stages, hits);
+                    group_json(&picked, by, op.as_ref().map(|(a, f)| (*a, &**f)))
+                }
             },
         )
     }
@@ -1280,6 +1304,21 @@ fn aggregate_over<'a>(rows: impl Iterator<Item = &'a Value>, op: Agg, field: &st
         (None, Agg::Sum) => out.extend_from_slice(b"0"),
         (None, _) => out.extend_from_slice(b"null"),
     }
+    Arc::new(out)
+}
+
+fn counts_json(counts: &[(String, u64)]) -> Arc<Vec<u8>> {
+    let mut out = Vec::with_capacity(counts.len() * 24 + 2);
+    out.push(b'{');
+    for (i, (value, rows)) in counts.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        crate::value::write_string(&mut out, value);
+        out.push(b':');
+        crate::value::write_i64(&mut out, *rows as i64);
+    }
+    out.push(b'}');
     Arc::new(out)
 }
 

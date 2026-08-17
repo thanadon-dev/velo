@@ -1,6 +1,6 @@
 # Velo
 
-**v1.33.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.34.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -183,7 +183,7 @@ GET /users/spend/team => db.users.group("team").sum("score")
 GET /orders/today     => db.orders.where("at", ">", now() - 86400000).group("status").count()
 ```
 
-`{"blue":12,"red":5}` rather than one request per team. Keys come back sorted, so the same data always renders the same bytes and an `ETag` on the route means something. A row whose field is missing or `null` belongs to no group. `count` counts rows; `sum`, `avg`, `min` and `max` take a second field and follow the same rules they do on their own, so a group with no numeric values sums to `0` and averages to `null`. Every step that can come before it still can: filter, search and order first, group last. Grouping is a walk over the rows that survive, cached like any other read and rebuilt on the next write: 6 500 rows cost 232 us cold, and nothing on a repeat.
+`{"blue":12,"red":5}` rather than one request per team. Keys come back sorted, so the same data always renders the same bytes and an `ETag` on the route means something. A row whose field is missing or `null` belongs to no group. `count` counts rows; `sum`, `avg`, `min` and `max` take a second field and follow the same rules they do on their own, so a group with no numeric values sums to `0` and averages to `null`. Every step that can come before it still can: filter, search and order first, group last. A bare `group(field).count()` over a whole collection is answered from the equality index, which already holds each value's rows, so it costs the number of groups rather than the number of rows: 5.7 us on 6 500 rows against 232 us for the walk it replaced. It falls back to the walk whenever the index cannot answer honestly, which is when a step comes first, when an aggregate needs the values themselves, below the 512 rows an index needs, or when any row is missing the field, since the index cannot tell a missing value from an empty one and `group` must. The walk is cached like any other read and rebuilt on the next write.
 
 `select` also follows `find` and `first`, which is how a route returns one row without the fields a client must not see:
 
@@ -782,6 +782,8 @@ The write path is bounded by the allocator rather than by anything velo does. An
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.34.0** — a grouped count over a whole collection no longer walks it. Profiling 1.33.0 showed where its 232 us went: replacing the field lookup with a constant dropped it to 107, so more than half the time was `get_at` chasing a pointer per row, and that is structural rather than a mistake. The equality index already holds each value's rows, which is a grouping, so `group(field).count()` with nothing before it is now answered from the index: 5.7 us against 232, and the cost is the number of groups rather than the number of rows. It falls back to the walk whenever the index cannot answer honestly, which includes a case worth naming: the index cannot tell a row missing the field from a row holding an empty string, and `group` puts the first in no group and the second in its own, so any row under the empty key sends the whole query back to the walk. A test covers that, and removing the check fails it. `velomicro` now guards both paths, one benchmark for the index and one for a filtered group that has to walk.
 
 **v1.33.0** — `db.x.group(field).count()` answers a whole dashboard in one request. Counting rows per team meant one request per team, or reading everything and counting in the client. `group` closes a chain the way `count` and the aggregates do, so filter, search and order all still come first, and it returns one object keyed by the field's distinct values: `{"blue":12,"red":5}`. `sum`, `avg`, `min` and `max` take a field and follow the same rules they do alone, a group with no numeric values summing to `0` and averaging to `null`. A row whose field is missing or `null` is in no group. Keys are sorted, so the same data renders the same bytes and an `ETag` on the route holds. The first version collected a vector of rows per group and hashed with SipHash: 4 084 us on 6 500 rows grouped by a unique field. Accumulating in place and hashing with the same Fnv the caches use brought a realistic grouping to 232 us, and `velomicro` measures it cold, after a write, so the number is the walk and not the cache. Four mutations were tried against the tests; two of them, an unsorted key list and a cache key that ignored the grouped field, were caught only after the tests were widened.
 
