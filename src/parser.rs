@@ -763,6 +763,17 @@ fn single_op(
             let k = Box::new(args.next().unwrap());
             Op::Update(k, Box::new(args.next().unwrap()))
         }
+        "incr" if n == 3 => {
+            let k = Box::new(args.next().unwrap());
+            let f = Box::new(args.next().unwrap());
+            Op::Incr(k, f, Box::new(args.next().unwrap()))
+        }
+        "incr" => {
+            want(2)?;
+            let k = Box::new(args.next().unwrap());
+            let f = Box::new(args.next().unwrap());
+            Op::Incr(k, f, Box::new(Expr::Const(crate::value::Value::Num(1.0))))
+        }
         "clear" => {
             want(0)?;
             Op::Clear

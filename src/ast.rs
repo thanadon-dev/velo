@@ -15,6 +15,7 @@ pub const NOT_FOUND: Err_ = Err_ { status: 404, msg: "not found" };
 pub const BAD_BODY: Err_ = Err_ { status: 400, msg: "invalid body" };
 pub const CONFLICT: Err_ = Err_ { status: 409, msg: "already exists" };
 pub const TOO_MANY: Err_ = Err_ { status: 429, msg: "too many requests" };
+pub const NOT_NUMBER: Err_ = Err_ { status: 409, msg: "not a number" };
 
 pub struct Ctx<'a> {
     pub params: [&'a str; MAX_PARAMS],
@@ -134,6 +135,7 @@ pub enum Op {
     Page(Box<Expr>, Box<Expr>),
     Create(Box<Expr>),
     Update(Box<Expr>, Box<Expr>),
+    Incr(Box<Expr>, Box<Expr>, Box<Expr>),
     Upsert(Box<Expr>, Box<Expr>),
     Delete(Box<Expr>),
     Clear,
@@ -312,6 +314,21 @@ impl Expr {
                     };
                     let patch = v.eval(c)?;
                     col.update(&key, patch).ok_or(NOT_FOUND)
+                }
+                Op::Incr(k, f, by) => {
+                    let key = match fast_key(k, c) {
+                        Some(raw) => raw.to_string(),
+                        None => k.eval(c)?.as_key(),
+                    };
+                    let field = f.eval(c)?;
+                    let Some(by) = as_num(&by.eval(c)?) else {
+                        return Err(BAD_BODY);
+                    };
+                    match col.incr(&key, &field.as_key_ref(), by) {
+                        crate::store::Incr::Done(row) => Ok(row),
+                        crate::store::Incr::Missing => Err(NOT_FOUND),
+                        crate::store::Incr::NotNumber => Err(NOT_NUMBER),
+                    }
                 }
                 Op::Upsert(k, v) => {
                     let key = match fast_key(k, c) {

@@ -634,6 +634,31 @@ impl Collection {
         Some(merged)
     }
 
+    pub fn incr(&self, id: &str, field: &str, by: f64) -> Incr {
+        if field == "id" || field.is_empty() {
+            return Incr::NotNumber;
+        }
+        let mut s = self.snap.write().unwrap();
+        let Some(&i) = s.by_id.get(id) else {
+            return Incr::Missing;
+        };
+        let Some(row) = s.rows.get(i) else {
+            return Incr::Missing;
+        };
+        let next = match row.get(field) {
+            Value::Null => by,
+            Value::Num(n) => n + by,
+            _ => return Incr::NotNumber,
+        };
+        let patch = Value::row(vec![(crate::value::intern(field), Value::Num(next))]);
+        let merged = as_row(merge(row, &patch));
+        s.rows.set(i, merged.clone());
+        s.invalidate();
+        self.bump();
+        self.touch();
+        Incr::Done(merged)
+    }
+
     pub fn delete(&self, id: &str) -> bool {
         let mut s = self.snap.write().unwrap();
         let Some(i) = s.by_id.remove(id) else { return false };
@@ -864,6 +889,12 @@ pub enum Stage {
     Search(Arc<str>, Arc<str>),
     Order(Arc<str>),
     Page(usize, usize),
+}
+
+pub enum Incr {
+    Done(Value),
+    Missing,
+    NotNumber,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

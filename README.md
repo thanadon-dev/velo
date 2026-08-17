@@ -1,6 +1,6 @@
 # Velo
 
-**v1.28.1** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.29.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -23,7 +23,9 @@ Linux only: the event loop is epoll, and the build stops with a clear message an
 
 Velo suits a JSON API whose data fits in memory on one machine: an internal service, a mobile or web backend, a prototype that has to be fast, a sidecar that shapes data for something else. It compiles a fixed set of routes and precomputes as much of each response as it can.
 
-It is deliberately not: a database (the store is memory-bound, single-process, snapshot-persisted), a TLS terminator, an HTTP/2 or WebSocket server, a file-upload endpoint, or a cluster. Put a proxy in front for TLS, compression, and HTTP/2, and keep the dataset within RAM.
+What a whole API needs is in the language rather than around it: CRUD, filters, sorting, paging and aggregates; password hashing and session lookups; cookies; per-key rate limits; per-condition validation with the reason the client is told; row expiry; atomic counters; field allowlists so a row never leaves with more than it should. A generated OpenAPI document, per-route metrics, request logs, `ETag`, CORS and a draining shutdown come with the server, not with a stack around it.
+
+It is deliberately not: a database (the store is memory-bound, single-process, snapshot-persisted), a TLS terminator, an HTTP/2 or WebSocket server, a file-upload endpoint, or a cluster. It has no joins, no transactions across two collections, and no user-defined functions: a request either fits one collection and one expression or belongs somewhere else. Put a proxy in front for TLS, compression, and HTTP/2, and keep the dataset within RAM.
 
 Protocol notes: HTTP/1.1 with keep-alive and pipelining; HTTP/1.0 works and closes unless the client asks otherwise; request targets are origin-form (`/path?query`), so proxy-style absolute URLs answer 404; chunked request bodies are refused with 411; methods are case-sensitive, as the spec says.
 
@@ -122,12 +124,22 @@ Built-in store (`db.<collection>.<op>`):
 | `order(field)` | rows sorted by `field`, `"-field"` for descending | `[]` |
 | `create(value)` | the stored row; `id` is generated unless the value carries one | 400 on an empty body, 409 on a duplicate `id` |
 | `update(key, patch)` | merged row | 404 |
+| `incr(key, field)` | the row with `field` one higher, atomically; `incr(key, field, n)` to step by `n` | 404, 409 if the field holds something other than a number |
 | `upsert(key, value)` | merged row, or a new row keyed by `key` | never misses |
 | `delete(key)` | `{"deleted":true}` | 404 |
 | `delete_where(field, value)` | `{"deleted":n}` | `{"deleted":0}` |
 | `delete_where(field, op, value)` | same, with `op` one of `== != < <= > >=` | `{"deleted":0}` |
 | `clear()` | `{"deleted":n}`, resets generated ids | `{"deleted":0}` |
 | `select(field, ...)` | the rows with only those fields kept, or one row after `find`/`first` | `[]` / 404 |
+
+A counter cannot be written as a read and a write. `db.posts.update(id, { views: db.posts.find(id).views + 1 })` reads one snapshot and writes into another, so two requests that land together both read the same number and one of the two increments is lost. `incr` does the whole step inside the collection's write lock:
+
+```velo
+POST /posts/:id/view => db.posts.incr(id, "views") : 200
+POST /posts/:id/vote => db.posts.incr(id, "score", body.by) : 200
+```
+
+Eight threads calling the first route 250 times each leave `views` at exactly 2 000. A missing field starts at the step rather than failing, so a row never has to be created with its counters already in it; a negative step counts down; a field holding anything but a number answers `409 {"error":"not a number"}` and changes nothing, and `id` cannot be stepped because it is the key.
 
 Read operations chain, so one line can filter, sort and page:
 
@@ -655,7 +667,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-171 tests (132 integration + 18 CLI + 8 fuzz + 11 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, per-key rate limits, intersected filters, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+173 tests (134 integration + 18 CLI + 8 fuzz + 11 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, per-key rate limits, intersected filters, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
 
@@ -721,6 +733,8 @@ The write path is bounded by the allocator rather than by anything velo does. An
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.29.0** — `db.x.incr(key, field)` counts without losing counts. Anything a route wanted to increment had to be read and then written back, and those are two snapshots: two requests landing together read the same number and one increment disappears. Eight threads stepping one row 250 times each proved it, ending at 1 452 instead of 2 000. `incr` does the read, the addition and the write inside the collection's write lock, so the same test now ends at 2 000 exactly. A third argument steps by any amount, negative to count down; a missing field starts from the step so a row need not be created with its counters in it; a field holding something other than a number answers 409 and changes nothing rather than overwriting what is there. The `Scope` section was rewritten at the same time: it described velo before it had auth, cookies, rate limits, validation and expiry, and it now says what the language covers and, as plainly, what it does not.
 
 **v1.28.1** — a sweep for tests that measure the machine rather than the code, prompted by the flaky one found in 1.28.0. The suite was run three times over on a box loaded to four times its capacity: it took four times as long and passed every time, so the waiting is sound where it matters. One test was sleeping two hundred milliseconds and then reading a log file, which would fail on a slow machine for no good reason; it now waits for the line it wants. Reading the rest confirmed the remaining sleeps are deliberate: one feeds a request in pieces, one starves a connection until the server drops it, and one gives `--watch` time to notice a file that does not compile. An attempt to tighten that last one failed and taught me something: a file that does not compile does take the server down until the next good save, which is what the test was already proving.
 

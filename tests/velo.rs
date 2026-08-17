@@ -14,6 +14,10 @@ GET  /users/:id       => db.users.find(id)
 POST /users           => db.users.create(body)
 PUT  /users/:id       => db.users.update(id, body)
 PUT  /put/:id         => db.users.upsert(id, body)
+POST /bump/:id        => db.users.incr(id, "score") : 200
+POST /bumpby/:id      => db.users.incr(id, "score", query.by) : 200
+POST /bumpbad/:id     => db.users.incr(id, "name") : 200
+POST /bumpid/:id      => db.users.incr(id, "id") : 200
 DELETE /wipe          => db.users.clear()
 DELETE /team/:t       => db.users.delete_where("team", t)
 PUT  /keyed/:id       => db.keyed.upsert(id, body)
@@ -249,6 +253,46 @@ fn http_split_request() {
     let mut out = String::new();
     c.read_to_string(&mut out).unwrap();
     assert!(out.starts_with("HTTP/1.1 201 Created"), "{out}");
+}
+
+#[test]
+fn incr_counts_and_refuses_what_it_cannot_add_to() {
+    let s = server();
+    call(&s, "POST", "/users", r#"{"id":"a","name":"mark"}"#);
+    assert_eq!(call(&s, "POST", "/bump/a", "").1, r#"{"id":"a","name":"mark","score":1}"#);
+    assert_eq!(call(&s, "POST", "/bump/a", "").1, r#"{"id":"a","name":"mark","score":2}"#);
+    assert_eq!(call(&s, "POST", "/bumpby/a?by=10", "").1, r#"{"id":"a","name":"mark","score":12}"#);
+    assert_eq!(call(&s, "POST", "/bumpby/a?by=-5", "").1, r#"{"id":"a","name":"mark","score":7}"#);
+    assert_eq!(call(&s, "GET", "/users/a", "").1, r#"{"id":"a","name":"mark","score":7}"#);
+    assert_eq!(call(&s, "POST", "/bump/nobody", "").0, 404);
+    assert_eq!(call(&s, "POST", "/bumpbad/a", "").0, 409);
+    assert!(call(&s, "POST", "/bumpbad/a", "").1.contains("not a number"));
+    assert_eq!(call(&s, "POST", "/bumpid/a", "").0, 409);
+    assert_eq!(call(&s, "POST", "/bumpby/a?by=x", "").0, 400);
+    assert_eq!(call(&s, "GET", "/users/a", "").1, r#"{"id":"a","name":"mark","score":7}"#);
+    assert!(compile(r#"GET /a => db.x.incr("k")"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.incr("k", "f", 1, 2)"#, None).is_err());
+}
+
+#[test]
+fn incr_never_loses_a_count_under_concurrency() {
+    let s = server();
+    call(&s, "POST", "/users", r#"{"id":"a","score":0}"#);
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let s = s.clone();
+            std::thread::spawn(move || {
+                for _ in 0..250 {
+                    let mut out = Vec::new();
+                    s.dispatch("POST", "/bump/a", b"", &mut out);
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    assert_eq!(call(&s, "GET", "/users/a", "").1, r#"{"id":"a","score":2000}"#);
 }
 
 #[test]
