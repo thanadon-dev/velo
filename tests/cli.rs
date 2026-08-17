@@ -1066,3 +1066,35 @@ fn one_process_owns_a_data_file() {
         let _ = std::fs::remove_file(path);
     }
 }
+
+#[test]
+fn every_velo_snippet_in_the_readme_compiles() {
+    let readme = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("README.md");
+    let text = std::fs::read_to_string(&readme).unwrap();
+    let mut blocks = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(open) = rest.find("```velo\n") {
+        rest = &rest[open + 8..];
+        let Some(close) = rest.find("```") else { break };
+        blocks.push(rest[..close].to_string());
+        rest = &rest[close + 3..];
+    }
+    assert!(blocks.len() > 15, "only {} velo blocks found, the reader is broken", blocks.len());
+    let mut checked = 0;
+    for (i, block) in blocks.iter().enumerate() {
+        if block.contains("include ") || block.contains("file(") {
+            continue;
+        }
+        let path = tmp(&format!("readme-{i}.velo"));
+        write(&path, block);
+        let out = Command::new(BIN).arg("check").arg(&path).output().unwrap();
+        assert!(
+            out.status.success(),
+            "README block {i} does not compile:\n{block}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_file(&path);
+        checked += 1;
+    }
+    assert!(checked > 15, "only {checked} blocks were compiled");
+}
