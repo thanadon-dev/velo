@@ -8,5 +8,6 @@
   "find": 0.172,
   "chain": 1.007,
   "select": 4.569,
-  "batch": 3.4
+  "batch": 3.4,
+  "write_then_group": 232.0
 }

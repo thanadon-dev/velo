@@ -805,6 +805,12 @@ fn single_op(
             want(1)?;
             Op::Delete(Box::new(args.next().unwrap()))
         }
+        "group" => {
+            return Err(format!(
+            "line {}:{}: db.{}.group(field) needs .count() or .sum/.avg/.min/.max(field) after it",
+            line, at_col, coll
+        ))
+        }
         other => {
             return Err(format!(
                 "line {}:{}: unknown operation db.{}.{}",
@@ -872,6 +878,7 @@ fn chain_op(
     let mut stages = Vec::new();
     let mut tail = Tail::List;
     let mut closed = false;
+    let mut group: Option<Box<Expr>> = None;
     let mut proj = Some(proj);
     for (op, args) in calls {
         if closed {
@@ -918,6 +925,15 @@ fn chain_op(
                 let o = Box::new(args.next().unwrap());
                 stages.push(Stage::Page(o, Box::new(args.next().unwrap())));
             }
+            "group" => {
+                want(1)?;
+                if group.is_some() {
+                    return Err(format!(
+                        "line {line}:{at_col}: db.{coll}: only one group(field) per chain"
+                    ));
+                }
+                group = Some(Box::new(args.next().unwrap()));
+            }
             "count" => {
                 want(0)?;
                 tail = Tail::Count;
@@ -956,6 +972,17 @@ fn chain_op(
                 ))
             }
         }
+    }
+    if let Some(by) = group {
+        tail = match tail {
+            Tail::Count => Tail::Group(by, None),
+            Tail::Agg(agg, field) => Tail::Group(by, Some((agg, field))),
+            _ => {
+                return Err(format!(
+                    "line {line}:{at_col}: db.{coll}.group(field) needs .count() or .sum/.avg/.min/.max(field) after it"
+                ))
+            }
+        };
     }
     Ok(Op::Chain(stages, tail))
 }

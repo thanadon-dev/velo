@@ -31,6 +31,12 @@ GET  /echo/:a/x/:b    => { a: a, b: b }
 POST /name            => body.name
 GET  /list            => [1, 2, "three", true, null]
 GET  /search          => db.users.where("name", query.name)
+GET  /grp             => db.users.group("team").count()
+GET  /grpname         => db.users.group("name").count()
+GET  /grpsum          => db.users.group("team").sum("score")
+GET  /grpavg          => db.users.group("team").avg("score")
+GET  /grpmax          => db.users.group("name").max("score")
+GET  /grpwhere        => db.users.where("score", ">", query.min).group("team").count()
 GET  /batch           => db.users.where("id", "in", query.ids).order("id")
 GET  /eqlist          => db.users.where("id", "==", query.ids).order("id")
 GET  /inteam          => db.users.where("team", "in", query.teams).where("name", query.name).count()
@@ -268,6 +274,75 @@ fn ids_of(body: &str) -> Vec<String> {
     let v = parse_json(body.as_bytes()).unwrap();
     let Value::Arr(rows) = v else { panic!("not a list: {body}") };
     rows.iter().map(|r| r.get("id").as_key()).collect()
+}
+
+#[test]
+fn group_counts_and_aggregates_by_field() {
+    let s = server();
+    for row in [
+        r#"{"id":"1","team":"b","name":"x","score":5}"#,
+        r#"{"id":"2","team":"a","name":"y","score":10}"#,
+        r#"{"id":"3","team":"a","name":"z","score":20}"#,
+        r#"{"id":"4","team":"b","name":"x","score":1}"#,
+        r#"{"id":"5","name":"no team","score":9}"#,
+        r#"{"id":"6","team":"c","name":"w"}"#,
+        r#"{"id":"8","team":null,"name":"v","score":3}"#,
+    ] {
+        call(&s, "POST", "/users", row);
+    }
+    assert_eq!(call(&s, "GET", "/grp", "").1, r#"{"a":2,"b":2,"c":1}"#);
+    assert_eq!(call(&s, "GET", "/grpsum", "").1, r#"{"a":30,"b":6,"c":0}"#);
+    assert_eq!(call(&s, "GET", "/grpavg", "").1, r#"{"a":15,"b":3,"c":null}"#);
+    assert_eq!(
+        call(&s, "GET", "/grpmax", "").1,
+        r#"{"no team":9,"v":3,"w":null,"x":5,"y":10,"z":20}"#
+    );
+    assert_eq!(
+        call(&s, "GET", "/grpname", "").1,
+        r#"{"no team":1,"v":1,"w":1,"x":2,"y":1,"z":1}"#,
+        "a count by name must not be served the count by team"
+    );
+    assert_eq!(call(&s, "GET", "/grp", "").1, r#"{"a":2,"b":2,"c":1}"#);
+    assert_eq!(call(&s, "GET", "/grpwhere?min=4", "").1, r#"{"a":2,"b":1}"#);
+    assert_eq!(call(&s, "GET", "/grpwhere?min=100", "").1, "{}");
+    assert_eq!(call(&s, "GET", "/grp", "").1, r#"{"a":2,"b":2,"c":1}"#);
+    assert_eq!(call(&s, "GET", "/grpsum", "").1, r#"{"a":30,"b":6,"c":0}"#);
+    call(&s, "POST", "/users", r#"{"id":"7","team":"a","score":100}"#);
+    assert_eq!(call(&s, "GET", "/grp", "").1, r#"{"a":3,"b":2,"c":1}"#);
+    assert_eq!(call(&s, "GET", "/grpsum", "").1, r#"{"a":130,"b":6,"c":0}"#);
+    call(&s, "DELETE", "/users/7", "");
+    assert_eq!(call(&s, "GET", "/grp", "").1, r#"{"a":2,"b":2,"c":1}"#);
+    assert!(compile(r#"GET /a => db.x.group("t")"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.group("t").select("n")"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.group("t").group("u").count()"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.group("t").first()"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.group().count()"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.group("t").count()"#, None).is_ok());
+}
+
+#[test]
+fn group_agrees_with_itself_once_the_index_is_on() {
+    let s = server();
+    for i in 0..700 {
+        let body = format!(r#"{{"id":"u{i}","team":"t{}","score":{}}}"#, i % 7, i % 5);
+        call(&s, "POST", "/users", &body);
+    }
+    let counted = call(&s, "GET", "/grp", "").1;
+    let want: String = (0..7)
+        .map(|t| format!(r#""t{t}":{}"#, (0..700).filter(|i| i % 7 == t).count()))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(counted, format!("{{{want}}}"));
+    let sums = call(&s, "GET", "/grpsum", "").1;
+    let want_sums: String = (0..7)
+        .map(|t| {
+            let sum: usize = (0..700).filter(|i| i % 7 == t).map(|i| i % 5).sum();
+            format!(r#""t{t}":{sum}"#)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(sums, format!("{{{want_sums}}}"), "a sum must not be served the counts");
+    assert_eq!(call(&s, "GET", "/grpwhere?min=3", "").1.matches(':').count(), 7);
 }
 
 #[test]

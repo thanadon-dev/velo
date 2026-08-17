@@ -95,6 +95,7 @@ fn main() {
                GET /c => db.users.where(\"team\", query.t).order(\"name\").page(0, 20)\n\
                GET /s => db.users.select(\"id\", \"name\")\n\
                GET /b => db.users.where(\"id\", \"in\", query.ids)\n\
+               GET /g => db.users.group(\"team\").count()\n\
                POST /w => db.users.create(body)\n\
                DELETE /d/:id => db.users.delete(id)\n";
     let store = velo::Store::new();
@@ -184,6 +185,20 @@ fn main() {
         }
         let per = t0.elapsed().as_secs_f64() / n as f64;
         report.add("batch", per, out.len());
+    }
+    {
+        let t0 = Instant::now();
+        let n = 2_000;
+        let mut out = Vec::new();
+        for i in 0..n {
+            out.clear();
+            let body = format!("{{\"team\":\"x\",\"name\":\"g{i}\"}}");
+            s.dispatch("POST", "/w", body.as_bytes(), &mut out);
+            out.clear();
+            s.dispatch("GET", "/g", b"", &mut out);
+        }
+        let per = t0.elapsed().as_secs_f64() / n as f64;
+        report.add("write_then_group", per, out.len());
     }
     std::process::exit(report.finish());
 }

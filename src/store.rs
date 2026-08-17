@@ -516,6 +516,28 @@ impl Collection {
         )
     }
 
+    pub fn query_group(&self, stages: &[Stage], by: &str, op: Option<(Agg, Arc<str>)>) -> Value {
+        let mut key = String::with_capacity(64);
+        match &op {
+            Some((agg, field)) => {
+                key.push_str(agg.name());
+                push_part(&mut key, field);
+            }
+            None => key.push_str("count"),
+        }
+        push_chain(&mut key, stages);
+        self.derived_with(
+            "qg",
+            &key,
+            by,
+            |s| plan_hits(s, stages),
+            |rows, hits| {
+                let picked = run_stages_hit(rows, stages, hits);
+                group_json(&picked, by, op.as_ref().map(|(a, f)| (*a, &**f)))
+            },
+        )
+    }
+
     pub fn query_first(&self, stages: &[Stage]) -> Option<Value> {
         let (head, pick) = match stages.split_last() {
             Some((Stage::Order(field), rest)) => (rest, Some(&**field)),
@@ -1258,6 +1280,62 @@ fn aggregate_over<'a>(rows: impl Iterator<Item = &'a Value>, op: Agg, field: &st
         (None, Agg::Sum) => out.extend_from_slice(b"0"),
         (None, _) => out.extend_from_slice(b"null"),
     }
+    Arc::new(out)
+}
+
+#[derive(Default)]
+struct Group {
+    rows: u64,
+    nums: u64,
+    acc: Option<f64>,
+}
+
+fn group_json(rows: &[&Value], by: &str, op: Option<(Agg, &str)>) -> Arc<Vec<u8>> {
+    let mut groups: Keyed<Group> = HashMap::default();
+    let mut at = 0;
+    let mut seen = 0;
+    for row in rows {
+        let key = match row.get_at(by, &mut at) {
+            None | Some(Value::Null) => continue,
+            Some(v) => v.as_key_ref(),
+        };
+        let slot = match groups.get_mut(&*key) {
+            Some(slot) => slot,
+            None => groups.entry(key.into_owned()).or_default(),
+        };
+        slot.rows += 1;
+        let Some((agg, field)) = op else { continue };
+        let Some(Value::Num(v)) = row.get_at(field, &mut seen) else { continue };
+        slot.nums += 1;
+        slot.acc = Some(match (slot.acc, agg) {
+            (None, _) => *v,
+            (Some(a), Agg::Sum | Agg::Avg) => a + v,
+            (Some(a), Agg::Min) => a.min(*v),
+            (Some(a), Agg::Max) => a.max(*v),
+        });
+    }
+    let mut keys: Vec<&String> = groups.keys().collect();
+    keys.sort_unstable();
+    let mut out = Vec::with_capacity(keys.len() * 24 + 2);
+    out.push(b'{');
+    for (i, key) in keys.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        crate::value::write_string(&mut out, key);
+        out.push(b':');
+        let g = &groups[*key];
+        match (op, g.acc) {
+            (None, _) => crate::value::write_i64(&mut out, g.rows as i64),
+            (Some((Agg::Avg, _)), Some(a)) => {
+                crate::value::write_number(&mut out, a / g.nums as f64)
+            }
+            (Some(_), Some(a)) => crate::value::write_number(&mut out, a),
+            (Some((Agg::Sum, _)), None) => out.extend_from_slice(b"0"),
+            (Some(_), None) => out.extend_from_slice(b"null"),
+        }
+    }
+    out.push(b'}');
     Arc::new(out)
 }
 

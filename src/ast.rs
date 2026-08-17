@@ -121,6 +121,7 @@ pub enum Tail {
     Agg(Agg, Box<Expr>),
     First(Vec<Expr>),
     Select(Vec<Expr>),
+    Group(Box<Expr>, Option<(Agg, Box<Expr>)>),
 }
 
 pub enum Op {
@@ -382,6 +383,14 @@ impl Expr {
                         });
                     }
                     match tail {
+                        Tail::Group(by, agg) => {
+                            let by = by.eval(c)?.as_key_arc();
+                            let op = match agg {
+                                Some((a, f)) => Some((*a, f.eval(c)?.as_key_arc())),
+                                None => None,
+                            };
+                            Ok(col.query_group(&plan, &by, op))
+                        }
                         Tail::List => Ok(col.query(&plan)),
                         Tail::Count => Ok(col.query_count(&plan)),
                         Tail::Agg(agg, f) => Ok(col.query_agg(&plan, *agg, &f.eval(c)?.as_key())),

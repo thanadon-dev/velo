@@ -1,6 +1,6 @@
 # Velo
 
-**v1.32.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.33.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -135,6 +135,8 @@ Built-in store (`db.<collection>.<op>`):
 | `delete_where(field, op, value)` | same, with `op` one of `== != < <= > >=`, `"in"` included | `{"deleted":0}` |
 | `clear()` | `{"deleted":n}`, resets generated ids | `{"deleted":0}` |
 | `select(field, ...)` | the rows with only those fields kept, or one row after `find`/`first` | `[]` / 404 |
+| `group(field).count()` | `{value: rows}` for each distinct value of `field` | `{}` |
+| `group(field).sum(f)` | same shape, holding the aggregate of `f` per group; `avg`, `min` and `max` too | `{}` |
 
 A counter cannot be written as a read and a write. `db.posts.update(id, { views: db.posts.find(id).views + 1 })` reads one snapshot and writes into another, so two requests that land together both read the same number and one of the two increments is lost. `incr` does the whole step inside the collection's write lock:
 
@@ -172,6 +174,16 @@ GET /users/spend => db.users.where("team", query.team).sum("score")
 GET /users/best  => db.users.where("team", query.team).order("-score").first()
 GET /users/cards => db.users.where("team", query.team).select("id", "name")
 ```
+
+`group` turns a chain into one object keyed by a field's distinct values, which is the shape a dashboard wants:
+
+```velo
+GET /users/by/team    => db.users.group("team").count()
+GET /users/spend/team => db.users.group("team").sum("score")
+GET /orders/today     => db.orders.where("at", ">", now() - 86400000).group("status").count()
+```
+
+`{"blue":12,"red":5}` rather than one request per team. Keys come back sorted, so the same data always renders the same bytes and an `ETag` on the route means something. A row whose field is missing or `null` belongs to no group. `count` counts rows; `sum`, `avg`, `min` and `max` take a second field and follow the same rules they do on their own, so a group with no numeric values sums to `0` and averages to `null`. Every step that can come before it still can: filter, search and order first, group last. Grouping is a walk over the rows that survive, cached like any other read and rebuilt on the next write: 6 500 rows cost 232 us cold, and nothing on a repeat.
 
 `select` also follows `find` and `first`, which is how a route returns one row without the fields a client must not see:
 
@@ -704,7 +716,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-180 tests (141 integration + 18 CLI + 8 fuzz + 13 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, intersected filters, list membership through the index, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+182 tests (143 integration + 18 CLI + 8 fuzz + 13 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, intersected filters, list membership through the index, grouped counts and aggregates, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
 
@@ -770,6 +782,8 @@ The write path is bounded by the allocator rather than by anything velo does. An
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.33.0** — `db.x.group(field).count()` answers a whole dashboard in one request. Counting rows per team meant one request per team, or reading everything and counting in the client. `group` closes a chain the way `count` and the aggregates do, so filter, search and order all still come first, and it returns one object keyed by the field's distinct values: `{"blue":12,"red":5}`. `sum`, `avg`, `min` and `max` take a field and follow the same rules they do alone, a group with no numeric values summing to `0` and averaging to `null`. A row whose field is missing or `null` is in no group. Keys are sorted, so the same data renders the same bytes and an `ETag` on the route holds. The first version collected a vector of rows per group and hashed with SipHash: 4 084 us on 6 500 rows grouped by a unique field. Accumulating in place and hashing with the same Fnv the caches use brought a realistic grouping to 232 us, and `velomicro` measures it cold, after a write, so the number is the walk and not the cache. Four mutations were tried against the tests; two of them, an unsorted key list and a cache key that ignored the grouped field, were caught only after the tests were widened.
 
 **v1.32.0** — `db.x.where(field, "in", list)` and a `Concurrency` section that says what velo does and does not promise. A batch endpoint had no way to be written: fetching twenty rows by id meant twenty requests, or a scan through `search`. `in` takes a comma-separated list from a query string or a JSON array from a body, looks each value up in the equality index and merges the results: on 4 500 rows, three ids cost 3.4 us against 2 141 us for the same query with the index turned off, and `velomicro` now measures it with a fresh list every iteration so the number is the index rather than the cache. The `Concurrency` section is the other half of the last three releases: every store operation is one step, a route is not a transaction, two reads in one route are two snapshots, and there is no rollback. It carries the table of what to write instead of a read followed by a write. A mutation found while testing this one: `in` and `==` shared a cache mark, so `where("id", "==", "a,c")` could be served the result of `where("id", "in", "a,c")`; a test now covers it.
 
