@@ -29,7 +29,7 @@ fn usage(code: i32) -> ! {
         "velo {VERSION}\n\
          \n\
          usage:\n\
-         \x20 velo run <file.velo> [addr] [--data file.json] [--watch]\n\
+         \x20 velo run <file.velo> [addr] [--data file.json] [--wal file.log] [--watch]\n\
          \x20                               start the server (default :8080, env VELO_ADDR)\n\
          \x20 velo check <file.velo>        compile only, report errors\n\
          \x20 velo routes <file.velo>       list compiled routes\n\
@@ -123,6 +123,7 @@ fn run(args: &[String]) {
         .unwrap_or_else(|| ":8080".to_string());
     let addr =
         if let Some(port) = addr.strip_prefix(':') { format!("0.0.0.0:{port}") } else { addr };
+    let wal = flag(args, "--wal").or_else(|| std::env::var("VELO_WAL").ok()).map(PathBuf::from);
     let store = Store::new();
     let prog = program(args, Some(store.clone()));
     if let Some(path) = &data {
@@ -130,6 +131,18 @@ fn run(args: &[String]) {
             eprintln!("velo: {}: {e}", path.display());
             exit(1)
         }
+    }
+    if let Some(path) = &wal {
+        match store.attach_wal(path) {
+            Ok(0) => {}
+            Ok(n) => println!("velo: replayed {n} writes from {}", path.display()),
+            Err(e) => {
+                eprintln!("velo: {}: {e}", path.display());
+                exit(1)
+            }
+        }
+    }
+    if let Some(path) = &data {
         let every = Duration::from_millis(
             std::env::var("VELO_SAVE_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200),
         );
@@ -160,9 +173,13 @@ fn run(args: &[String]) {
         exit(1)
     }
     if let Some(path) = &data {
+        let mark = store.wal().map(|w| w.len()).unwrap_or(0);
         if let Err(e) = store.save_to(path) {
             eprintln!("velo: save {}: {e}", path.display());
             exit(1)
+        }
+        if let Some(w) = store.wal() {
+            w.drop_prefix(mark);
         }
     }
     println!("velo: stopped");

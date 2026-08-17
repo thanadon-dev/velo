@@ -15,6 +15,7 @@ pub(crate) mod serve;
 pub mod socket;
 pub mod store;
 pub mod value;
+pub mod wal;
 
 pub use http::{Ctype, Server};
 pub use parser::{compile, compile_in, Method, Program, Route};

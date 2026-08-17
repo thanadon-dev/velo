@@ -1,6 +1,6 @@
 # Velo
 
-**v1.34.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.35.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -44,7 +44,7 @@ CLI:
 
 | command | what it does |
 | --- | --- |
-| `velo run <file> [addr] [--data f.json] [--watch]` | start the server; `addr` is `:8080`, `127.0.0.1:8080`, or `unix:/run/velo.sock` |
+| `velo run <file> [addr] [--data f.json] [--wal f.log] [--watch]` | start the server; `addr` is `:8080`, `127.0.0.1:8080`, or `unix:/run/velo.sock` |
 | `velo check <file>` | compile only, report errors with the offending line, column, and a caret |
 | `velo routes <file>` | list compiled routes with their kind, status, guard, and source file and line |
 | `velo bench <file> [-c n] [-d secs] [--data f.json]` | serve the file and load every plain `GET` route in turn, slowest first |
@@ -426,7 +426,23 @@ The store is in memory, so a collection is bounded by RAM and a snapshot is the 
 velo run examples/api.velo :8080 --data data.json
 ```
 
-Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothing was written, so a read-only workload never touches the disk. A save takes only a read lock and skips tombstoned rows as it writes, so it neither compacts nor blocks writers: inserting at 41 000 req/s into a 200 000-row collection continues while snapshots of 16 MB are being written. The gap between snapshots adapts: velo measures how long the last save took and waits until that save has cost at most `VELO_SAVE_DUTY` percent of wall time, so a 5 MB dataset under sustained writes is not rewritten five times a second. `SIGINT` and `SIGTERM` stop the event loop and write a final snapshot before exiting, so an orderly shutdown loses nothing. Shutdown drains: velo stops accepting, answers whatever is already in flight with `Connection: close`, and exits once the last connection is gone or `VELO_DRAIN_MS` passes. A client benchmarking through a `SIGTERM` sees zero errors. a hard kill can lose at most the last save interval.
+A snapshot on its own means a hard kill costs whatever was written since the last one, and that window grows with the dataset because `VELO_SAVE_DUTY` widens the gap as saves get slower. `--wal file.log` closes it. Every write appends one line to a log before the response goes out, and a server started with the same log replays it over the snapshot, in order, before it accepts a connection:
+
+```sh
+velo run app.velo :8080 --data data.json --wal data.log
+```
+
+`kill -9` then loses nothing. A test does exactly that: writes rows, creates, updates, increments and deletes, kills the process with `SIGKILL` before any snapshot exists, starts it again and compares. Replay is ordered and idempotent, so a log that overlaps the snapshot it sits beside costs time and nothing else, and a half-written last line, which is what a crash mid-append leaves, is dropped while everything before it is kept. Each successful snapshot trims the log to the writes that arrived after the snapshot began, so it does not grow without end; the mark is taken before the save and the log is appended to after the row is in memory, which is what makes trimming safe.
+
+| | writes per second |
+| --- | --- |
+| no log | 40 219 |
+| `--wal` | 37 404 |
+| `--wal` with `VELO_WAL_SYNC=1` | 1 851 |
+
+The default is one `write` per request into the operating system's buffer, which survives velo being killed but not the machine losing power. `VELO_WAL_SYNC=1` calls `fsync` on every write, which survives that too and costs a factor of twenty; it is a disk speaking, not velo. Pick per API: a session store can lose a second of writes, a ledger cannot.
+
+Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothing was written, so a read-only workload never touches the disk. A save takes only a read lock and skips tombstoned rows as it writes, so it neither compacts nor blocks writers: inserting at 41 000 req/s into a 200 000-row collection continues while snapshots of 16 MB are being written. The gap between snapshots adapts: velo measures how long the last save took and waits until that save has cost at most `VELO_SAVE_DUTY` percent of wall time, so a 5 MB dataset under sustained writes is not rewritten five times a second. `SIGINT` and `SIGTERM` stop the event loop and write a final snapshot before exiting, so an orderly shutdown loses nothing. Shutdown drains: velo stops accepting, answers whatever is already in flight with `Connection: close`, and exits once the last connection is gone or `VELO_DRAIN_MS` passes. A client benchmarking through a `SIGTERM` sees zero errors. without a `--wal` a hard kill can lose at most the last save interval.
 
 ## Concurrency
 
@@ -553,6 +569,8 @@ Env knobs:
 | `VELO_DRAIN_MS` | 2000 | how long shutdown waits for in-flight connections to finish |
 | `VELO_HEADER_TIMEOUT` | 10 | seconds a connection may spend before its first complete request; drip-feeding headers does not extend it |
 | `VELO_DATA` | off | snapshot file, same as `--data` |
+| `VELO_WAL` | off | write-ahead log, same as `--wal`; every write is appended and replayed at boot |
+| `VELO_WAL_SYNC` | off | `fsync` the log on every write, so a power cut loses nothing and throughput drops about twentyfold |
 | `VELO_SAVE_MS` | 200 | minimum gap between snapshots |
 | `VELO_SAVE_DUTY` | 10 | percent of wall time a snapshot may cost; the gap grows with the file so big datasets are not rewritten every 200 ms |
 | `VELO_HEADERS` | off | extra response headers, e.g. `X-Content-Type-Options: nosniff; Cache-Control: no-store` |
@@ -716,7 +734,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-182 tests (143 integration + 18 CLI + 8 fuzz + 13 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, intersected filters, list membership through the index, grouped counts and aggregates, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+187 tests (143 integration + 20 CLI + 8 fuzz + 16 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, a write-ahead log replayed after a SIGKILL, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, intersected filters, list membership through the index, grouped counts and aggregates, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
 
@@ -782,6 +800,8 @@ The write path is bounded by the allocator rather than by anything velo does. An
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.35.0** — `--wal file.log` makes a hard kill lose nothing. A snapshot alone leaves a window that widens as the dataset grows, since `VELO_SAVE_DUTY` spaces saves out as they get slower, and a `kill -9` costs everything written inside it. Every write now appends one line to a log before the response goes out, and a server started with the same log replays it over the snapshot before it accepts a connection. A test writes, updates, increments and deletes, kills the process with `SIGKILL` before any snapshot exists, starts it again and compares; removing the append fails it. The log costs 7 per cent of write throughput, 40 219 to 37 404 writes a second, because the write goes into the operating system's buffer rather than to the platter: that survives velo dying, not the machine. `VELO_WAL_SYNC=1` fsyncs each write and survives that too, at 1 851 a second, which is the disk speaking. Each snapshot trims the log to the writes that arrived after the save began, so it cannot grow without end, and the ordering that makes trimming safe, mark before the save and append after the row is in memory, is now tested on its own after an end-to-end test proved unable to force the race. A crash mid-append leaves a half-written last line, which replay drops while keeping everything before it.
 
 **v1.34.0** — a grouped count over a whole collection no longer walks it. Profiling 1.33.0 showed where its 232 us went: replacing the field lookup with a constant dropped it to 107, so more than half the time was `get_at` chasing a pointer per row, and that is structural rather than a mistake. The equality index already holds each value's rows, which is a grouping, so `group(field).count()` with nothing before it is now answered from the index: 5.7 us against 232, and the cost is the number of groups rather than the number of rows. It falls back to the walk whenever the index cannot answer honestly, which includes a case worth naming: the index cannot tell a row missing the field from a row holding an empty string, and `group` puts the first in no group and the second in its own, so any row under the empty key sends the whole query back to the walk. A test covers that, and removing the check fails it. `velomicro` now guards both paths, one benchmark for the index and one for a filtered group that has to walk.
 

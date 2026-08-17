@@ -5,7 +5,7 @@ Requires=velo.socket
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/velo run /srv/api/app.velo unix:/run/user/1000/velo.sock --data /srv/api/data.json
+ExecStart=/usr/local/bin/velo run /srv/api/app.velo unix:/run/user/1000/velo.sock --data /srv/api/data.json --wal /srv/api/data.log
 WorkingDirectory=/srv/api
 Environment=VELO_WORKERS=4
 Environment=VELO_METRICS=/_metrics

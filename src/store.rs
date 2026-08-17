@@ -283,10 +283,15 @@ pub struct Collection {
     snap: RwLock<Snapshot>,
     next_id: AtomicU64,
     dirty: Arc<AtomicBool>,
+    wal: Arc<std::sync::OnceLock<crate::wal::Wal>>,
 }
 
 impl Collection {
-    fn new(name: &str, dirty: Arc<AtomicBool>) -> Collection {
+    fn new(
+        name: &str,
+        dirty: Arc<AtomicBool>,
+        wal: Arc<std::sync::OnceLock<crate::wal::Wal>>,
+    ) -> Collection {
         Collection {
             name: name.to_string(),
             tag: tag_for(NEXT_COLLECTION_ID.fetch_add(1, Ordering::Relaxed)),
@@ -305,7 +310,12 @@ impl Collection {
             }),
             next_id: AtomicU64::new(0),
             dirty,
+            wal,
         }
+    }
+
+    fn log(&self) -> Option<&crate::wal::Wal> {
+        self.wal.get()
     }
 
     fn touch(&self) {
@@ -616,6 +626,9 @@ impl Collection {
         s.all_json = reuse;
         s.append_json(&row, self.limits.append_max);
         s.list_used.store(false, Ordering::Relaxed);
+        if let Some(wal) = self.log() {
+            wal.put(&self.name, &row);
+        }
         self.bump();
         self.touch();
         row
@@ -628,6 +641,9 @@ impl Collection {
         s.holes = 0;
         s.by_id.clear();
         s.invalidate();
+        if let Some(wal) = self.log() {
+            wal.clear(&self.name);
+        }
         self.bump();
         self.next_id.store(0, Ordering::Relaxed);
         if removed > 0 {
@@ -658,6 +674,9 @@ impl Collection {
             s.compact();
         }
         s.invalidate();
+        if let Some(wal) = self.log() {
+            wal.delete_where(&self.name, field, op, want);
+        }
         self.bump();
         self.touch();
         hits.len()
@@ -690,6 +709,22 @@ impl Collection {
         Some(self.insert_locked(&mut s, id.to_string(), keyed))
     }
 
+    pub fn put(&self, id: &str, row: Value) {
+        let row = as_row(row);
+        let mut s = self.snap.write().unwrap();
+        match s.by_id.get(id) {
+            Some(&i) => {
+                s.rows.set(i, row);
+                s.invalidate();
+                self.bump();
+                self.touch();
+            }
+            None => {
+                self.insert_locked(&mut s, id.to_string(), row);
+            }
+        }
+    }
+
     pub fn has(&self, id: &str) -> bool {
         self.snap.read().unwrap().by_id.contains_key(id)
     }
@@ -713,6 +748,9 @@ impl Collection {
         }
         s.rows.set(i, merged.clone());
         s.invalidate();
+        if let Some(wal) = self.log() {
+            wal.put(&self.name, &merged);
+        }
         self.bump();
         self.touch();
         Some(merged)
@@ -738,6 +776,9 @@ impl Collection {
         let merged = as_row(merge(row, &patch));
         s.rows.set(i, merged.clone());
         s.invalidate();
+        if let Some(wal) = self.log() {
+            wal.put(&self.name, &merged);
+        }
         self.bump();
         self.touch();
         Incr::Done(merged)
@@ -752,6 +793,9 @@ impl Collection {
             s.compact();
         }
         s.invalidate();
+        if let Some(wal) = self.log() {
+            wal.delete(&self.name, id);
+        }
         self.bump();
         self.touch();
         true
@@ -762,6 +806,7 @@ impl Collection {
 pub struct Store {
     cols: Mutex<HashMap<String, Arc<Collection>>>,
     dirty: Arc<AtomicBool>,
+    wal: Arc<std::sync::OnceLock<crate::wal::Wal>>,
 }
 
 impl Store {
@@ -774,7 +819,7 @@ impl Store {
         if let Some(c) = cols.get(name) {
             return c.clone();
         }
-        let c = Arc::new(Collection::new(name, self.dirty.clone()));
+        let c = Arc::new(Collection::new(name, self.dirty.clone(), self.wal.clone()));
         cols.insert(name.to_string(), c.clone());
         c
     }
@@ -835,6 +880,39 @@ impl Store {
         std::fs::rename(&tmp, path)
     }
 
+    pub fn wal(&self) -> Option<&crate::wal::Wal> {
+        self.wal.get()
+    }
+
+    pub fn attach_wal(&self, path: &std::path::Path) -> Result<usize, String> {
+        let entries = crate::wal::read(path)?;
+        let replayed = entries.len();
+        for entry in entries {
+            match entry {
+                crate::wal::Entry::Put(coll, row) => {
+                    let id = row.get("id").as_key();
+                    if !id.is_empty() {
+                        self.collection(&coll).put(&id, row);
+                    }
+                }
+                crate::wal::Entry::Delete(coll, id) => {
+                    self.collection(&coll).delete(&id);
+                }
+                crate::wal::Entry::DeleteWhere(coll, field, op, want) => {
+                    self.collection(&coll).delete_where(&field, op, &want);
+                }
+                crate::wal::Entry::Clear(coll) => {
+                    self.collection(&coll).clear();
+                }
+            }
+        }
+        let wal = crate::wal::Wal::open(path).map_err(|e| e.to_string())?;
+        if self.wal.set(wal).is_err() {
+            return Err("wal already attached".to_string());
+        }
+        Ok(replayed)
+    }
+
     pub fn load_file(&self, path: &std::path::Path) -> Result<(), String> {
         match std::fs::read(path) {
             Ok(raw) => self.load_json(&raw),
@@ -881,8 +959,14 @@ impl Store {
                 std::thread::sleep(every.max(cost * (100 / duty).saturating_sub(1)));
                 if store.take_dirty() {
                     let started = std::time::Instant::now();
-                    if let Err(e) = store.save_to(&path) {
-                        eprintln!("velo: save {}: {e}", path.display());
+                    let mark = store.wal().map(|w| w.len()).unwrap_or(0);
+                    match store.save_to(&path) {
+                        Ok(()) => {
+                            if let Some(wal) = store.wal() {
+                                wal.drop_prefix(mark);
+                            }
+                        }
+                        Err(e) => eprintln!("velo: save {}: {e}", path.display()),
                     }
                     cost = started.elapsed();
                 }
@@ -1004,6 +1088,18 @@ impl Cmp {
             "in" => Cmp::In,
             _ => return None,
         })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Cmp::Eq => "==",
+            Cmp::Ne => "!=",
+            Cmp::Lt => "<",
+            Cmp::Le => "<=",
+            Cmp::Gt => ">",
+            Cmp::Ge => ">=",
+            Cmp::In => "in",
+        }
     }
 
     fn mark(self) -> char {

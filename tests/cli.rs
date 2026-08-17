@@ -794,3 +794,128 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("nothing to bench"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_wal_survives_a_kill_that_the_snapshot_does_not() {
+    let app = tmp("wal.velo");
+    let data = tmp("wal-data.json");
+    let log = tmp("wal-data.log");
+    let _ = std::fs::remove_file(&data);
+    let _ = std::fs::remove_file(&log);
+    write(
+        &app,
+        "POST /users => db.users.create(body)\n\
+         GET /users => db.users.all()\n\
+         PUT /users/:id => db.users.upsert(id, body)\n\
+         POST /bump/:id => db.users.incr(id, \"n\") : 200\n\
+         DELETE /users/:id => db.users.delete(id) : 204\n\
+         DELETE /old => db.users.delete_where(\"team\", \"gone\")\n",
+    );
+    let port = free_port();
+    let boot = |port: u16| {
+        Command::new(BIN)
+            .arg("run")
+            .arg(&app)
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--data")
+            .arg(&data)
+            .arg("--wal")
+            .arg(&log)
+            .env("VELO_SAVE_MS", "600000")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut child = boot(port);
+    post(port, "/users", r#"{"id":"a","name":"a"}"#);
+    post(port, "/users", r#"{"id":"b","name":"b","team":"gone"}"#);
+    post(port, "/users", r#"{"id":"c","name":"c"}"#);
+    request(
+        port,
+        "PUT /users/a HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"name\":\"A\"}",
+    );
+    post(port, "/bump/a", "");
+    post(port, "/bump/a", "");
+    request(port, "DELETE /users/c HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    request(port, "DELETE /old HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    let before = get(port, "/users");
+    let before = before.split("\r\n\r\n").nth(1).unwrap().to_string();
+    assert!(before.contains(r#""n":2"#), "{before}");
+
+    let _ = Command::new("kill").arg("-9").arg(child.id().to_string()).status();
+    let _ = child.wait();
+    assert!(!data.exists(), "no snapshot should have been written yet");
+
+    let port = free_port();
+    let mut child = boot(port);
+    let after = get(port, "/users");
+    let after = after.split("\r\n\r\n").nth(1).unwrap().to_string();
+    assert_eq!(after, before, "a hard kill must lose nothing with a wal");
+    stop(&mut child, "-TERM");
+
+    let left = std::fs::metadata(&log).unwrap().len();
+    assert_eq!(left, 0, "a clean stop snapshots and empties the wal");
+    assert!(data.exists());
+
+    let port = free_port();
+    let mut child = boot(port);
+    let again = get(port, "/users");
+    let again = again.split("\r\n\r\n").nth(1).unwrap().to_string();
+    assert_eq!(again, before, "the snapshot alone must carry the same rows");
+    stop(&mut child, "-TERM");
+    let _ = std::fs::remove_file(&data);
+    let _ = std::fs::remove_file(&log);
+}
+
+#[test]
+fn a_snapshot_leaves_only_the_writes_that_followed_it_in_the_wal() {
+    const ROWS: usize = 300;
+    let app = tmp("wal2.velo");
+    let data = tmp("wal2-data.json");
+    let log = tmp("wal2-data.log");
+    let _ = std::fs::remove_file(&data);
+    let _ = std::fs::remove_file(&log);
+    write(&app, "POST /users => db.users.create(body)\nGET /count => db.users.count()\n");
+    let boot = |port: u16, every: &str| {
+        Command::new(BIN)
+            .arg("run")
+            .arg(&app)
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--data")
+            .arg(&data)
+            .arg("--wal")
+            .arg(&log)
+            .env("VELO_SAVE_MS", every)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let port = free_port();
+    let mut child = boot(port, "20");
+    for i in 0..ROWS {
+        post(port, "/users", &format!(r#"{{"id":"u{i}","n":{i}}}"#));
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !data.exists() {
+        assert!(Instant::now() < deadline, "no snapshot was ever written");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let logged = std::fs::metadata(&log).unwrap().len();
+    let saved = std::fs::metadata(&data).unwrap().len();
+    assert!(logged < saved, "a snapshot must trim the wal it covers: {logged} bytes left");
+    let _ = Command::new("kill").arg("-9").arg(child.id().to_string()).status();
+    let _ = child.wait();
+
+    let port = free_port();
+    let mut child = boot(port, "600000");
+    let count = get(port, "/count");
+    assert!(
+        count.ends_with(&ROWS.to_string()),
+        "writes that landed while a snapshot was being written must survive: {count}"
+    );
+    stop(&mut child, "-TERM");
+    let _ = std::fs::remove_file(&data);
+    let _ = std::fs::remove_file(&log);
+}
