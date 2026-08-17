@@ -16,6 +16,7 @@ fn parse_args() -> Args {
             "-p" => a.pipeline = next().parse().unwrap_or(a.pipeline).max(1),
             "-m" => a.method = next().to_uppercase(),
             "-b" => a.body = next(),
+            "-H" => a.headers.push(next()),
             "-h" | "--help" => {
                 eprintln!("usage: velobench [-c conns] [-d secs] [-p depth] [-m method] [-b body] <http://host:port/path | unix:/sock//path>");
                 std::process::exit(0);

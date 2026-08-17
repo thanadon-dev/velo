@@ -776,7 +776,7 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
     );
     std::fs::write(
         dir.join("data.json"),
-        r#"{"users":{"next_id":2,"rows":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}}"#,
+        r#"{"users":{"next_id":9,"rows":[{"id":7,"name":"a"},{"id":8,"name":"b"}]}}"#,
     )
     .unwrap();
 
@@ -789,16 +789,17 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(text.contains("benching 3 route(s)"), "{text}");
+    assert!(text.contains("benching 5 route(s)"), "{text}");
     assert!(text.contains("2 row(s) loaded"), "the data file was not read: {text}");
     assert!(!text.contains("the store is empty"), "{text}");
     for path in ["GET /health", "GET /users", "GET /count"] {
         assert!(text.contains(path), "{path} missing from {text}");
     }
-    assert!(text.contains("GET /users/:id"), "{text}");
-    assert!(text.contains("needs a path parameter"), "{text}");
+    assert!(text.contains("GET /users/7"), "a path parameter takes a real id: {text}");
+    assert!(!text.contains("GET /users/:id"), "{text}");
     assert!(text.contains("POST /users") && text.contains("not a GET"), "{text}");
-    assert!(text.contains("GET /gated") && text.contains("behind a guard"), "{text}");
+    let gated = text.lines().find(|l| l.contains("GET /gated")).unwrap_or_default();
+    assert!(gated.contains("refused"), "a guard that says no must be counted: {gated}");
     assert!(text.contains("req/s") && text.contains("p99"), "{text}");
     let rates: Vec<f64> = text
         .lines()
@@ -816,10 +817,22 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("the store is empty"), "no warning");
 
+    let out = Command::new(BIN)
+        .arg("bench")
+        .arg(dir.join("app.velo"))
+        .args(["-c", "2", "-d", "1", "-H", "x-key: open", "--data"])
+        .arg(dir.join("data.json"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let gated = text.lines().find(|l| l.contains("GET /gated")).unwrap_or_default();
+    assert!(!gated.contains("refused"), "a header the guard wants must get through: {gated}");
+
     write(&dir.join("all.velo"), "GET /a/:id => db.x.find(id)\n");
     let out = Command::new(BIN).arg("bench").arg(dir.join("all.velo")).output().unwrap();
     assert!(!out.status.success(), "nothing benchable must fail");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("nothing to bench"));
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(said.contains("nothing to bench"), "{said}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

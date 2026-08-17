@@ -15,6 +15,7 @@ pub struct Args {
     pub unix: Option<String>,
     pub secs: u64,
     pub pipeline: usize,
+    pub headers: Vec<String>,
 }
 
 impl Default for Args {
@@ -29,6 +30,7 @@ impl Default for Args {
             unix: None,
             secs: 5,
             pipeline: 1,
+            headers: Vec::new(),
         }
     }
 }
@@ -36,6 +38,7 @@ impl Default for Args {
 pub struct Report {
     pub requests: u64,
     pub errors: u64,
+    pub refused: u64,
     pub bytes: u64,
     pub elapsed: f64,
     pub p50: f64,
@@ -59,13 +62,22 @@ pub fn run(a: Args) -> Report {
     let done = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(AtomicU64::new(0));
     let bytes = Arc::new(AtomicU64::new(0));
+    let refused = Arc::new(AtomicU64::new(0));
 
     let start = Instant::now();
     let mut handles = Vec::new();
     for _ in 0..a.conns {
-        let (a, req, stop, done, errors, bytes) =
-            (a.clone(), req.clone(), stop.clone(), done.clone(), errors.clone(), bytes.clone());
-        handles.push(std::thread::spawn(move || worker(a, req, stop, done, errors, bytes)));
+        let (a, req, stop, done, errors, bytes, refused) = (
+            a.clone(),
+            req.clone(),
+            stop.clone(),
+            done.clone(),
+            errors.clone(),
+            bytes.clone(),
+            refused.clone(),
+        );
+        handles
+            .push(std::thread::spawn(move || worker(a, req, stop, done, errors, bytes, refused)));
     }
     std::thread::sleep(Duration::from_secs(a.secs));
     stop.store(true, Ordering::Relaxed);
@@ -84,6 +96,7 @@ pub fn run(a: Args) -> Report {
     Report {
         requests: done.load(Ordering::Relaxed),
         errors: errors.load(Ordering::Relaxed),
+        refused: refused.load(Ordering::Relaxed),
         bytes: bytes.load(Ordering::Relaxed),
         elapsed,
         p50: pick(0.50),
@@ -92,11 +105,21 @@ pub fn run(a: Args) -> Report {
     }
 }
 
+fn refused(head: &[u8]) -> bool {
+    let Some(code) = head.split(|b| *b == b' ').nth(1) else { return false };
+    let code = std::str::from_utf8(code).unwrap_or("");
+    code.parse::<u16>().is_ok_and(|status| status >= 400)
+}
+
 fn build_request(a: &Args) -> Vec<u8> {
     let mut req = format!(
         "{} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: keep-alive\r\n",
         a.method, a.path, a.host, a.port
     );
+    for header in &a.headers {
+        req.push_str(header.trim());
+        req.push_str("\r\n");
+    }
     if !a.body.is_empty() {
         req.push_str(&format!(
             "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -116,6 +139,7 @@ fn worker(
     done: Arc<AtomicU64>,
     errors: Arc<AtomicU64>,
     bytes: Arc<AtomicU64>,
+    refused: Arc<AtomicU64>,
 ) -> Vec<u64> {
     let mut lat = Vec::with_capacity(1 << 16);
     let mut at = 0usize;
@@ -187,6 +211,7 @@ fn worker(
     }
     done.fetch_add(local_done, Ordering::Relaxed);
     bytes.fetch_add(local_bytes, Ordering::Relaxed);
+    refused.fetch_add(counter.refused, Ordering::Relaxed);
     lat
 }
 
@@ -194,6 +219,7 @@ fn worker(
 struct Counter {
     head: Vec<u8>,
     body_left: usize,
+    refused: u64,
 }
 
 impl Counter {
@@ -221,6 +247,9 @@ impl Counter {
                     return done;
                 };
                 let len = content_length(&chunk[..end]);
+                if refused(&chunk[..end]) {
+                    self.refused += 1;
+                }
                 chunk = &chunk[end + 4..];
                 if len == 0 {
                     done += 1;
@@ -236,6 +265,9 @@ impl Counter {
             let consumed = chunk.len() - (self.head.len() - (end + 4));
             chunk = &chunk[consumed..];
             let len = content_length(&self.head[..end]);
+            if refused(&self.head[..end]) {
+                self.refused += 1;
+            }
             self.head.clear();
             if len == 0 {
                 done += 1;

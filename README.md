@@ -1,6 +1,6 @@
 # Velo
 
-**v1.41.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.42.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -47,11 +47,11 @@ CLI:
 | `velo run <file> [addr] [--data f.json] [--wal f.log] [--watch]` | start the server; `addr` is `:8080`, `127.0.0.1:8080`, or `unix:/run/velo.sock` |
 | `velo check <file>` | compile only, report errors with the offending line, column, and a caret |
 | `velo routes <file>` | list compiled routes with their kind, status, guard, and source file and line |
-| `velo bench <file> [-c n] [-d secs] [--data f.json]` | serve the file and load every plain `GET` route in turn, slowest first |
+| `velo bench <file> [-c n] [-d secs] [-H hdr] [--data f.json]` | serve the file and load every `GET` route in turn, slowest first; `-H` is repeatable and passes a header to every request |
 | `velo openapi <file>` | print an OpenAPI 3.0 document for the routes |
 | `velo new <file>` | write a starter file |
 | `velo version` | print version |
-| `velobench [-c n] [-d secs] [-p depth] [-m method] [-b body] <url>` | built-in keep-alive load generator; `unix:/sock//path` targets a Unix socket |
+| `velobench [-c n] [-d secs] [-p depth] [-m method] [-b body] [-H hdr] <url>` | built-in keep-alive load generator; `unix:/sock//path` targets a Unix socket |
 | `velomicro [rows] [--json] [--check <baseline>]` | microbenchmark of the dispatch path; `--check` fails when an operation is far slower than `bench/baseline.json` |
 
 ## Language
@@ -387,6 +387,8 @@ A failed `check` always answers `400` with its reason, whatever `else` says, the
 `examples/todo.velo` is a complete todo API using uuid keys, timestamps, sorting, and filters. `examples/shop/` splits a larger API over four files with `include`: a catalog with search, orders keyed by a customer header, and an admin section behind a token guard.
 
 ## OpenAPI
+
+`velo bench app.velo --data data.json` compiles the file, serves it on a port of its own and drives every `GET` route in turn. A route with one path parameter is given a real id taken from the collection the route reads, so `GET /users/:id` is benched as `GET /users/7` rather than skipped. A route behind a guard is driven too, and every answer of 400 or above is counted and printed beside the rate, so a guard that refuses every request says so rather than looking like a fast endpoint; `-H "x-key: secret"` passes a header to every request and is repeatable, which is how a guarded route gets benched for real. What is left over is listed with the reason: a route that is not a `GET`, one that needs more than one path parameter, or one whose collection holds no row to take an id from.
 
 `velo openapi app.velo` prints an OpenAPI 3.0 document built from the compiled routes: paths with `{param}` placeholders, path/query/header parameters taken from what each route actually reads, request bodies for routes that use `body`, and the status codes each route can answer including guard failures.
 
@@ -821,6 +823,8 @@ The write path is bounded by the allocator rather than by anything velo does. An
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.42.0** — `velo bench` covers the routes a real API is made of. It drove `GET` routes with no path parameter and no guard, which in any file worth benchmarking is the smallest part of it: the file in its own test had six routes and three of them were skipped. A route with one path parameter now takes a real id from the collection its expression reads, so `GET /users/:id` is benched as `GET /users/7`. A guarded route is driven rather than skipped, and answers of 400 and above are counted and printed beside the rate, so a guard refusing every request reads as `54642 refused` instead of a suspiciously fast endpoint. `-H` passes a header to every request, repeatable, on both `velo bench` and `velobench`, which is how a guarded route is benched for real: the same `/admin` route reads 54 575 req/s all refused without the header and 44 854 req/s with it, and the difference is the work the route actually does.
 
 **v1.41.0** — a patch merges as deep as the object goes. `update(id, { profile: { city: "cnx" } })` replaced the whole of `profile`, so a request that looked like it set one field quietly threw away every other field beside it, which is data loss dressed as an edit and the natural end of the last two releases teaching velo to read nested rows. It now merges at every depth, the way a `PATCH` is normally understood. A list is replaced rather than merged, since merging two lists has no obvious answer, and writing a plain value over an object replaces it, which is what leaves a way to clear a nested object out and rebuild it. `upsert` merges the same way, so the language has one rule rather than two, and the log carries the patch rather than the row, so a replayed patch merges exactly as the write did: a test kills the server after a nested patch and compares. What this release removes is the old way of dropping a nested key, which was to overwrite its parent; that was the footgun, and the trade is deliberate.
 

@@ -512,6 +512,22 @@ fn keep_fields(v: Value, names: &[Arc<str>]) -> Value {
     crate::value::keep_selected(&v, &crate::value::keep_plan(names))
 }
 
+pub fn first_collection(e: &Expr) -> Option<&Arc<Collection>> {
+    match e {
+        Expr::Db(col, _) => Some(col),
+        Expr::Field(base, _) => first_collection(base),
+        Expr::Select(base, fields) => {
+            first_collection(base).or_else(|| fields.iter().find_map(first_collection))
+        }
+        Expr::Object(fields) => fields.iter().find_map(|(_, e)| first_collection(e)),
+        Expr::Array(items) | Expr::Call(_, items) => items.iter().find_map(first_collection),
+        Expr::Cmp(l, _, r) | Expr::And(l, r) | Expr::Or(l, r) | Expr::Bin(_, l, r) => {
+            first_collection(l).or_else(|| first_collection(r))
+        }
+        _ => None,
+    }
+}
+
 pub fn truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,

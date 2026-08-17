@@ -725,6 +725,12 @@ impl Collection {
         }
     }
 
+    pub fn sample_id(&self) -> Option<String> {
+        let s = self.snap.read().unwrap();
+        let first = s.rows.live().next().map(|row| row.get("id").as_key());
+        first
+    }
+
     pub fn has(&self, id: &str) -> bool {
         self.snap.read().unwrap().by_id.contains_key(id)
     }

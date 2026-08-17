@@ -33,7 +33,7 @@ fn usage(code: i32) -> ! {
          \x20                               start the server (default :8080, env VELO_ADDR)\n\
          \x20 velo check <file.velo>        compile only, report errors\n\
          \x20 velo routes <file.velo>       list compiled routes\n\
-         \x20 velo bench <file.velo> [-c n] [-d secs] [--data file.json]\n\
+         \x20 velo bench <file.velo> [-c n] [-d secs] [-H header] [--data file.json]\n\
          \x20                               serve the file and load every plain GET route\n\
          \x20 velo openapi <file.velo>      print an OpenAPI 3 document\n\
          \x20 velo new <file.velo>          write a starter file\n\
@@ -245,6 +245,34 @@ fn check(args: &[String]) {
     }
 }
 
+fn flags(args: &[String], name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut at = args.iter();
+    while let Some(a) = at.next() {
+        if a == name {
+            if let Some(v) = at.next() {
+                out.push(v.clone());
+            }
+        }
+    }
+    out
+}
+
+fn sample_path(
+    pattern: &str,
+    col: Option<&std::sync::Arc<velo::store::Collection>>,
+) -> Option<String> {
+    let id = col?.sample_id()?;
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b)) {
+        return None;
+    }
+    let filled: Vec<String> = pattern
+        .split('/')
+        .map(|seg| if seg.starts_with(':') { id.clone() } else { seg.to_string() })
+        .collect();
+    Some(filled.join("/"))
+}
+
 fn bench(args: &[String]) {
     let conns: usize = flag(args, "-c").and_then(|v| v.parse().ok()).unwrap_or(8);
     let secs: u64 = flag(args, "-d").and_then(|v| v.parse().ok()).unwrap_or(2);
@@ -257,18 +285,25 @@ fn bench(args: &[String]) {
         }
     }
     let loaded: usize = store.names().iter().map(|n| store.collection(n).count()).sum();
+    let headers: Vec<String> = flags(args, "-H");
     let mut targets = Vec::new();
     let mut skipped = Vec::new();
     for r in &prog.routes {
         let why = if r.method.name() != "GET" {
             "not a GET"
-        } else if !r.params.is_empty() {
-            "needs a path parameter"
-        } else if r.guard.is_some() {
-            "behind a guard"
-        } else {
+        } else if r.params.len() > 1 {
+            "needs more than one path parameter"
+        } else if r.params.is_empty() {
             targets.push((r.method.name().to_string(), r.pattern.clone()));
             continue;
+        } else {
+            match sample_path(&r.pattern, velo::ast::first_collection(&r.expr)) {
+                Some(path) => {
+                    targets.push((r.method.name().to_string(), path));
+                    continue;
+                }
+                None => "no row to take a path parameter from",
+            }
         };
         skipped.push((r.method.name().to_string(), r.pattern.clone(), why));
     }
@@ -308,6 +343,7 @@ fn bench(args: &[String]) {
             method: method.clone(),
             conns,
             secs,
+            headers: headers.clone(),
             ..Default::default()
         });
         rows.push((format!("{method} {path}"), r));
@@ -322,7 +358,12 @@ fn bench(args: &[String]) {
             r.p50,
             r.p99,
             r.bytes as f64 / r.elapsed / 1e6,
-            if r.errors > 0 { format!("  {} errors", r.errors) } else { String::new() }
+            match (r.errors, r.refused) {
+                (0, 0) => String::new(),
+                (0, n) => format!("  {n} refused"),
+                (e, 0) => format!("  {e} errors"),
+                (e, n) => format!("  {e} errors, {n} refused"),
+            }
         );
     }
     for (method, path, why) in &skipped {
