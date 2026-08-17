@@ -919,3 +919,87 @@ fn a_snapshot_leaves_only_the_writes_that_followed_it_in_the_wal() {
     let _ = std::fs::remove_file(&data);
     let _ = std::fs::remove_file(&log);
 }
+
+#[test]
+fn one_process_owns_a_data_file() {
+    let app = tmp("lock.velo");
+    let data = tmp("lock-data.json");
+    let lock = tmp("lock-data.json.lock");
+    let _ = std::fs::remove_file(&data);
+    let _ = std::fs::remove_file(&lock);
+    write(&app, "GET /health => \"ok\"\nPOST /users => db.users.create(body)\n");
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--data")
+        .arg(&data)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(get(port, "/health").ends_with("ok"));
+
+    let mut second = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{}", free_port()))
+        .arg("--data")
+        .arg(&data)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let gave_up = loop {
+        match second.try_wait().unwrap() {
+            Some(status) => break status,
+            None if Instant::now() > deadline => {
+                let _ = second.kill();
+                let _ = second.wait();
+                panic!("a second owner started instead of refusing");
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    assert!(!gave_up.success(), "a second owner must refuse to start");
+    let mut said = String::new();
+    second.stderr.take().unwrap().read_to_string(&mut said).unwrap();
+    assert!(said.contains("held by another velo"), "{said}");
+    assert!(get(port, "/health").ends_with("ok"), "the owner keeps serving");
+
+    let elsewhere = tmp("lock-other.json");
+    let _ = std::fs::remove_file(&elsewhere);
+    let other_port = free_port();
+    let mut other = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{other_port}"))
+        .arg("--data")
+        .arg(&elsewhere)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(get(other_port, "/health").ends_with("ok"), "another data file is not blocked");
+    stop(&mut other, "-TERM");
+    stop(&mut child, "-TERM");
+
+    let port = free_port();
+    let mut again = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--data")
+        .arg(&data)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(get(port, "/health").ends_with("ok"), "the lock goes when the owner does");
+    stop(&mut again, "-TERM");
+    for path in [&data, &lock, &elsewhere, &tmp("lock-other.json.lock")] {
+        let _ = std::fs::remove_file(path);
+    }
+}

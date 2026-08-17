@@ -4,6 +4,35 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+}
+
+const LOCK_EX: i32 = 2;
+const LOCK_NB: i32 = 4;
+
+pub struct Lock(#[allow(dead_code)] std::fs::File);
+
+impl Lock {
+    pub fn take(path: &Path) -> Result<Lock, String> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let taken =
+            unsafe { flock(std::os::unix::io::AsRawFd::as_raw_fd(&file), LOCK_EX | LOCK_NB) };
+        if taken != 0 {
+            return Err(format!(
+                "{} is held by another velo; one process owns a data file",
+                path.display()
+            ));
+        }
+        Ok(Lock(file))
+    }
+}
+
 pub struct Wal {
     path: PathBuf,
     file: Mutex<std::fs::File>,

@@ -124,6 +124,18 @@ fn run(args: &[String]) {
     let addr =
         if let Some(port) = addr.strip_prefix(':') { format!("0.0.0.0:{port}") } else { addr };
     let wal = flag(args, "--wal").or_else(|| std::env::var("VELO_WAL").ok()).map(PathBuf::from);
+    let owned = data.as_ref().or(wal.as_ref());
+    let _lock = owned.map(|p| {
+        let mut path = p.clone().into_os_string();
+        path.push(".lock");
+        match velo::wal::Lock::take(std::path::Path::new(&path)) {
+            Ok(lock) => lock,
+            Err(e) => {
+                eprintln!("velo: {e}");
+                exit(1)
+            }
+        }
+    });
     let store = Store::new();
     let prog = program(args, Some(store.clone()));
     if let Some(path) = &data {
