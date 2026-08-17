@@ -1,0 +1,13 @@
+diff --git a/src/serve.rs b/src/serve.rs
+index d0a6c6b..22beb48 100644
+--- a/src/serve.rs
++++ b/src/serve.rs
+@@ -376,7 +376,7 @@ fn process(srv: &Server, c: &mut Conn, headers: &[u8]) {
+         let method = std::str::from_utf8(&req[head.method.0..head.method.1]).unwrap_or("");
+         let path = std::str::from_utf8(&req[head.path.0..head.path.1]).unwrap_or("/");
+         if srv.rate > 0 {
+-            let key = match &srv.real_ip_header {
++            let key = match &None::<String> {
+                 Some(name) => header_value(&req[..head.head_end], name).unwrap_or(&c.peer),
+                 None => &c.peer,
+             };

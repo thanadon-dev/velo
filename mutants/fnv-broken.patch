@@ -1,0 +1,13 @@
+diff --git a/src/router.rs b/src/router.rs
+index 5726b23..8b2668f 100644
+--- a/src/router.rs
++++ b/src/router.rs
+@@ -13,7 +13,7 @@ impl Hasher for Fnv {
+         let mut h = if self.0 == 0 { 0xcbf29ce484222325 } else { self.0 };
+         for b in bytes {
+             h ^= *b as u64;
+-            h = h.wrapping_mul(0x100000001b3);
++            h = h.wrapping_mul(1);
+         }
+         self.0 = h;
+     }

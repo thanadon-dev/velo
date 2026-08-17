@@ -1,0 +1,13 @@
+diff --git a/src/http.rs b/src/http.rs
+index c2c2de6..8fe9586 100644
+--- a/src/http.rs
++++ b/src/http.rs
+@@ -520,7 +520,7 @@ fn take_token(limiter: &[Mutex<RateShard>], key: &str, rate: u32) -> bool {
+             *slot = (now, 0);
+         }
+         slot.1 += 1;
+-        return slot.1 <= rate;
++        return slot.1 <= rate + 1;
+     }
+     shard.insert(key.to_string(), (now, 1));
+     true

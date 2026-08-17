@@ -1,0 +1,13 @@
+diff --git a/src/serve.rs b/src/serve.rs
+index d0a6c6b..a7e75ca 100644
+--- a/src/serve.rs
++++ b/src/serve.rs
+@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
+ const READ_BUF: usize = 8 << 10;
+ const EVENTS: usize = 256;
+ const SWEEP: Duration = Duration::from_secs(1);
+-const MAX_PENDING: usize = 256 << 10;
++const MAX_PENDING: usize = usize::MAX;
+ 
+ struct Head {
+     method: (usize, usize),

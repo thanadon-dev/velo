@@ -1,0 +1,13 @@
+diff --git a/src/serve.rs b/src/serve.rs
+index d0a6c6b..492c8cf 100644
+--- a/src/serve.rs
++++ b/src/serve.rs
+@@ -470,7 +470,7 @@ pub(crate) fn worker(srv: &Server, listener: &Listener) -> std::io::Result<()> {
+             draining = Some(Instant::now());
+         }
+         if let Some(started) = draining {
+-            if conns.is_empty() || started.elapsed() >= Duration::from_millis(srv.drain_ms.max(1)) {
++            if true {
+                 break;
+             }
+         }

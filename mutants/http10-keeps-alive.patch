@@ -1,0 +1,13 @@
+diff --git a/src/serve.rs b/src/serve.rs
+index d0a6c6b..8b819f4 100644
+--- a/src/serve.rs
++++ b/src/serve.rs
+@@ -38,7 +38,7 @@ fn parse_head(buf: &[u8], scanned: &mut usize) -> Option<Head> {
+     let method = (0, m.len());
+     let path = (m.len() + 1, m.len() + 1 + p.len());
+     let http11 = v.starts_with(b"HTTP/1.1");
+-    let mut keep_alive = http11;
++    let mut keep_alive = true;
+     let mut content_len = 0usize;
+     let mut seen_len = false;
+     let mut chunked = false;

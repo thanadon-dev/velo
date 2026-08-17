@@ -1,0 +1,13 @@
+diff --git a/src/parser.rs b/src/parser.rs
+index 71c3393..062381b 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -241,7 +241,7 @@ impl<'a> Parser<'a> {
+         self.cookie_fields.clear();
+         self.file_ctype = None;
+         let expr = self.expr()?;
+-        let mut status = if method == Method::Post { 201 } else { 200 };
++        let mut status = 200;
+         if self.tok.kind == Kind::Colon {
+             self.advance()?;
+             let code = self.expect(Kind::Num)?;

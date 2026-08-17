@@ -1,0 +1,16 @@
+diff --git a/src/router.rs b/src/router.rs
+index 5726b23..093a23b 100644
+--- a/src/router.rs
++++ b/src/router.rs
+@@ -138,10 +138,7 @@ impl Router {
+                 None => (rest, ""),
+             };
+             rest = next;
+-            if let Some(&(_, nx)) = self.nodes[cur].static_kids.iter().find(|(s, _)| s == seg) {
+-                cur = nx;
+-                continue;
+-            }
++
+             match self.nodes[cur].param {
+                 Some(nx) if !seg.is_empty() => {
+                     if n < MAX_PARAMS {

@@ -1,0 +1,13 @@
+diff --git a/src/serve.rs b/src/serve.rs
+index d0a6c6b..e6ed910 100644
+--- a/src/serve.rs
++++ b/src/serve.rs
+@@ -184,7 +184,7 @@ fn contains_ignore_case(hay: &[u8], needle: &[u8]) -> bool {
+ }
+ 
+ fn empty_status(status: u16) -> bool {
+-    status == 204 || status == 304
++    status == 204
+ }
+ 
+ fn write_head(

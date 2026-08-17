@@ -1,0 +1,13 @@
+diff --git a/src/router.rs b/src/router.rs
+index 5726b23..21eebcb 100644
+--- a/src/router.rs
++++ b/src/router.rs
+@@ -157,7 +157,7 @@ impl Router {
+         }
+         let idx = self.nodes[cur].route?;
+         if let Some(c) = c {
+-            c.nparams = n.min(MAX_PARAMS);
++            c.nparams = MAX_PARAMS;
+         }
+         Some(idx)
+     }

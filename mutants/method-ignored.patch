@@ -1,0 +1,14 @@
+diff --git a/src/router.rs b/src/router.rs
+index 5726b23..ea2a475 100644
+--- a/src/router.rs
++++ b/src/router.rs
+@@ -109,7 +109,8 @@ impl Router {
+     }
+ 
+     pub fn lookup<'a>(&self, m: Method, path: &'a str, c: &mut Ctx<'a>) -> Option<usize> {
+-        self.lookup_index(m.index(), path, Some(c))
++        let _ = m;
++        self.lookup_index(0, path, Some(c))
+     }
+ 
+     pub fn allows(&self, path: &str) -> bool {

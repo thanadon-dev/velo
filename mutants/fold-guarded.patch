@@ -1,0 +1,12 @@
+diff --git a/src/parser.rs b/src/parser.rs
+index 71c3393..c09ea4b 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -253,7 +253,6 @@ impl<'a> Parser<'a> {
+         let guard = if self.tok.kind == Kind::Ident && self.tok.text == "when" {
+             self.advance()?;
+             let g = self.expr()?;
+-            self.pure = false;
+             Some(g)
+         } else {
+             None

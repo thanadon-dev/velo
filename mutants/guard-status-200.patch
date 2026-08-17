@@ -1,0 +1,13 @@
+diff --git a/src/parser.rs b/src/parser.rs
+index 71c3393..5bc697e 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -258,7 +258,7 @@ impl<'a> Parser<'a> {
+         } else {
+             None
+         };
+-        let mut guard_status = 401;
++        let mut guard_status = 200;
+         let mut guard_msg = None;
+         if guard.is_some() && self.keyword("else") {
+             self.advance()?;

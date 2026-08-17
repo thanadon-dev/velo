@@ -1,0 +1,13 @@
+diff --git a/src/serve.rs b/src/serve.rs
+index d0a6c6b..02b9e37 100644
+--- a/src/serve.rs
++++ b/src/serve.rs
+@@ -79,7 +79,7 @@ fn parse_head(buf: &[u8], scanned: &mut usize) -> Option<Head> {
+             chunked = true;
+         }
+     }
+-    let head_only = m == b"HEAD";
++    let head_only = false;
+     let error = if chunked {
+         Some(411)
+     } else if content_len > MAX_BODY {

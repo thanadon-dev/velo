@@ -1,0 +1,13 @@
+diff --git a/src/serve.rs b/src/serve.rs
+index d0a6c6b..43509a6 100644
+--- a/src/serve.rs
++++ b/src/serve.rs
+@@ -57,7 +57,7 @@ fn parse_head(buf: &[u8], scanned: &mut usize) -> Option<Head> {
+         let val = trim(&h[colon + 1..]);
+         if eq_ignore_case(name, b"content-length") {
+             match std::str::from_utf8(val).ok().and_then(|s| s.parse::<usize>().ok()) {
+-                Some(n) if !seen_len || n == content_len => {
++                Some(n) => {
+                     content_len = n;
+                     seen_len = true;
+                 }

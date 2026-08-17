@@ -1,0 +1,13 @@
+diff --git a/src/serve.rs b/src/serve.rs
+index d0a6c6b..d8f0b79 100644
+--- a/src/serve.rs
++++ b/src/serve.rs
+@@ -539,7 +539,7 @@ pub(crate) fn worker(srv: &Server, listener: &Listener) -> std::io::Result<()> {
+             last_sweep = now;
+             conns.retain(|_, c| {
+                 let alive = if c.served {
+-                    now.duration_since(c.last) < idle
++                    true
+                 } else {
+                     now.duration_since(c.opened) < opening
+                 };

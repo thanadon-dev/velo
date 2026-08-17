@@ -1,0 +1,13 @@
+diff --git a/src/parser.rs b/src/parser.rs
+index 71c3393..873be06 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -278,7 +278,7 @@ impl<'a> Parser<'a> {
+                 guard_msg = Some(text.text);
+             }
+         }
+-        let (konst, const_ctype) = if self.pure {
++        let (konst, const_ctype) = if true {
+             match (&self.file_ctype, expr.eval(&Ctx::default())) {
+                 (Some(ct), Ok(Value::Str(s))) => (Some(s.as_bytes().to_vec()), *ct),
+                 (None, Ok(Value::Str(s))) => (Some(s.as_bytes().to_vec()), crate::http::TEXT),

@@ -1,0 +1,15 @@
+diff --git a/src/router.rs b/src/router.rs
+index 5726b23..a103529 100644
+--- a/src/router.rs
++++ b/src/router.rs
+@@ -67,9 +67,7 @@ impl Router {
+         let path = normalize(&rt.pattern).to_string();
+         let dup = || format!("duplicate route {} {}", rt.method.name(), rt.pattern);
+         if !path.contains(':') {
+-            if self.exact[mi].insert(path, idx).is_some() {
+-                return Err(dup());
+-            }
++            self.exact[mi].insert(path, idx);
+             return Ok(());
+         }
+         let mut cur = match self.roots[mi] {

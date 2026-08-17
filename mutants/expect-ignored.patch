@@ -1,0 +1,13 @@
+diff --git a/src/serve.rs b/src/serve.rs
+index d0a6c6b..80678fd 100644
+--- a/src/serve.rs
++++ b/src/serve.rs
+@@ -72,7 +72,7 @@ fn parse_head(buf: &[u8], scanned: &mut usize) -> Option<Head> {
+         } else if eq_ignore_case(name, b"if-none-match") {
+             none_match = parse_etag(val);
+         } else if eq_ignore_case(name, b"expect") {
+-            expects = contains_ignore_case(val, b"100-continue");
++            expects = false;
+         } else if eq_ignore_case(name, b"transfer-encoding")
+             && contains_ignore_case(val, b"chunked")
+         {

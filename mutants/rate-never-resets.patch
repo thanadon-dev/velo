@@ -1,0 +1,13 @@
+diff --git a/src/http.rs b/src/http.rs
+index c2c2de6..03c1e7a 100644
+--- a/src/http.rs
++++ b/src/http.rs
+@@ -516,7 +516,7 @@ fn take_token(limiter: &[Mutex<RateShard>], key: &str, rate: u32) -> bool {
+         shard.retain(|_, (start, _)| now.duration_since(*start) < Duration::from_secs(1));
+     }
+     if let Some(slot) = shard.get_mut(key) {
+-        if now.duration_since(slot.0) >= Duration::from_secs(1) {
++        if false && now.duration_since(slot.0) >= Duration::from_secs(1) {
+             *slot = (now, 0);
+         }
+         slot.1 += 1;

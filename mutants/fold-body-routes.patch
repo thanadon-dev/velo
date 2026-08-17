@@ -1,0 +1,12 @@
+diff --git a/src/parser.rs b/src/parser.rs
+index 71c3393..aea6056 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -464,7 +464,6 @@ impl<'a> Parser<'a> {
+                 return self.db_call(head.line);
+             }
+             "body" => {
+-                self.pure = false;
+                 self.body = true;
+                 let e = self.fields(Expr::Body)?;
+                 if let Expr::Field(base, name) = &e {

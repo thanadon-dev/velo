@@ -1,0 +1,13 @@
+diff --git a/src/serve.rs b/src/serve.rs
+index d0a6c6b..e82c2ce 100644
+--- a/src/serve.rs
++++ b/src/serve.rs
+@@ -572,7 +572,7 @@ fn accept_all(srv: &Server, listener: &Listener, ep: &Epoll, conns: &mut ConnMap
+                 return;
+             }
+         };
+-        if conns.len() >= srv.max_conns {
++        if conns.len() >= usize::MAX {
+             let mut stream = stream;
+             let _ = stream.write_all(
+                 b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",

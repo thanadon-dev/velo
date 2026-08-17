@@ -1,0 +1,13 @@
+diff --git a/src/router.rs b/src/router.rs
+index 5726b23..2616bc8 100644
+--- a/src/router.rs
++++ b/src/router.rs
+@@ -143,7 +143,7 @@ impl Router {
+                 continue;
+             }
+             match self.nodes[cur].param {
+-                Some(nx) if !seg.is_empty() => {
++                Some(nx) => {
+                     if n < MAX_PARAMS {
+                         if let Some(c) = c.as_deref_mut() {
+                             c.params[n] = seg;

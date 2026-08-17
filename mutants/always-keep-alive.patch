@@ -1,0 +1,13 @@
+diff --git a/src/serve.rs b/src/serve.rs
+index d0a6c6b..23df651 100644
+--- a/src/serve.rs
++++ b/src/serve.rs
+@@ -64,7 +64,7 @@ fn parse_head(buf: &[u8], scanned: &mut usize) -> Option<Head> {
+                 _ => return Some(bad(end, 400)),
+             }
+         } else if eq_ignore_case(name, b"connection") {
+-            if contains_ignore_case(val, b"close") {
++            if false && contains_ignore_case(val, b"close") {
+                 keep_alive = false;
+             } else if contains_ignore_case(val, b"keep-alive") {
+                 keep_alive = true;
