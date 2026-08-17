@@ -359,7 +359,7 @@ impl Expr {
                 Op::DeleteWhere(f, op, v) => {
                     let field = f.eval(c)?;
                     let want = v.eval(c)?;
-                    Ok(deleted(col.delete_where(&field.as_key_ref(), *op, &want.as_key_ref())))
+                    Ok(deleted(col.delete_where(&field.as_key_ref(), *op, &list_arg(want, *op))))
                 }
                 Op::Chain(stages, tail) => {
                     let mut plan = Vec::with_capacity(stages.len());
@@ -368,7 +368,7 @@ impl Expr {
                             Stage::Where(f, op, v) => crate::store::Stage::Where(
                                 f.eval(c)?.as_key_arc(),
                                 *op,
-                                v.eval(c)?.as_key_arc(),
+                                list_arg(v.eval(c)?, *op),
                             ),
                             Stage::Search(f, v) => crate::store::Stage::Search(
                                 f.eval(c)?.as_key_arc(),
@@ -411,6 +411,22 @@ impl Expr {
                 }
             },
         }
+    }
+}
+
+fn list_arg(v: Value, op: Cmp) -> Arc<str> {
+    match v {
+        Value::Arr(items) if op == Cmp::In => {
+            let mut out = String::new();
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&item.as_key_ref());
+            }
+            out.into()
+        }
+        other => other.as_key_arc(),
     }
 }
 

@@ -1,6 +1,6 @@
 # Velo
 
-**v1.31.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.32.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -17,7 +17,7 @@ That file is a complete, running API server.
 
 Linux only: the event loop is epoll, and the build stops with a clear message anywhere else.
 
-[Scope](#scope) · [Quick start](#quick-start) · [Language](#language) · [Guards](#guards) · [OpenAPI](#openapi) · [Embedding](#embedding) · [Persistence](#persistence) · [Rate limiting](#rate-limiting) · [Metrics](#metrics) · [Deployment](#deployment) · [Design](#design) · [Benchmarks](#benchmarks) · [Tests](#tests) · [CI](#ci) · [Layout](#layout) · [Build notes](#build-notes) · [Changelog](#changelog)
+[Scope](#scope) · [Quick start](#quick-start) · [Language](#language) · [Guards](#guards) · [OpenAPI](#openapi) · [Embedding](#embedding) · [Persistence](#persistence) · [Concurrency](#concurrency) · [Rate limiting](#rate-limiting) · [Metrics](#metrics) · [Deployment](#deployment) · [Design](#design) · [Benchmarks](#benchmarks) · [Tests](#tests) · [CI](#ci) · [Layout](#layout) · [Build notes](#build-notes) · [Changelog](#changelog)
 
 ## Scope
 
@@ -118,6 +118,7 @@ Built-in store (`db.<collection>.<op>`):
 | `first(field, value)` | first matching row, `first(field, op, value)` to compare | 404 |
 | `where(field, value)` | array of matching rows; linear scan, cached per field and value | `[]` |
 | `where(field, op, value)` | same, with `op` one of `== != < <= > >=` | `[]` |
+| `where(field, "in", list)` | rows whose `field` is any of a comma-separated list or a JSON array | `[]` |
 | chained steps | `where`, `search`, `order` and `page` compose; see below | |
 | `page(offset, limit)` | slice of rows, `limit` 0 means "to the end" | `[]` |
 | `search(field, text)` | rows whose `field` contains `text`, case-insensitive | `[]` |
@@ -131,7 +132,7 @@ Built-in store (`db.<collection>.<op>`):
 | `upsert(key, value, field, ...)` | same, refusing a value that would take a `field` another row holds | 409 on a duplicate |
 | `delete(key)` | `{"deleted":true}` | 404 |
 | `delete_where(field, value)` | `{"deleted":n}` | `{"deleted":0}` |
-| `delete_where(field, op, value)` | same, with `op` one of `== != < <= > >=` | `{"deleted":0}` |
+| `delete_where(field, op, value)` | same, with `op` one of `== != < <= > >=`, `"in"` included | `{"deleted":0}` |
 | `clear()` | `{"deleted":n}`, resets generated ids | `{"deleted":0}` |
 | `select(field, ...)` | the rows with only those fields kept, or one row after `find`/`first` | `[]` / 404 |
 
@@ -151,6 +152,15 @@ POST /signup => db.users.create({ id: uuid(), email: lower(body.email), pass: pa
 ```
 
 Eight threads racing two hundred rounds, all eight sending the same email each round, leave exactly two hundred rows. Any number of fields can be named and each is checked separately, so `create(body, "email", "phone")` refuses a row that collides on either. A field the new row does not carry is not compared, since otherwise only one row could ever be stored without it; require it with `check(body.email, "email is required")`. `update` and `upsert` take the same fields, so a route that lets a client change an email keeps the guarantee: `db.users.upsert(id, body, "email")` refuses a value another row already holds and answers 409, while writing a row's own email back to itself is not a collision. A collection large enough to be indexed uses that index for the check, so it costs a lookup rather than a scan.
+
+`in` is what a batch endpoint needs, so a client fetching twenty rows asks once rather than twenty times:
+
+```velo
+GET  /users/batch => db.users.where("id", "in", query.ids)
+POST /users/batch => db.users.where("id", "in", body.ids).select("id", "name")
+```
+
+`GET /users/batch?ids=7,19,204` reads the list from the query, spaces around a value are trimmed, and a JSON array works the same way, so a POST can send `{"ids":[7,19,204]}`. Each value is looked up in the equality index and the results are merged, which is what makes it worth having: on 4 500 rows, three ids cost 3.4 us against 2 141 us for the same query with the index turned off.
 
 Read operations chain, so one line can filter, sort and page:
 
@@ -405,6 +415,20 @@ velo run examples/api.velo :8080 --data data.json
 ```
 
 Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothing was written, so a read-only workload never touches the disk. A save takes only a read lock and skips tombstoned rows as it writes, so it neither compacts nor blocks writers: inserting at 41 000 req/s into a 200 000-row collection continues while snapshots of 16 MB are being written. The gap between snapshots adapts: velo measures how long the last save took and waits until that save has cost at most `VELO_SAVE_DUTY` percent of wall time, so a 5 MB dataset under sustained writes is not rewritten five times a second. `SIGINT` and `SIGTERM` stop the event loop and write a final snapshot before exiting, so an orderly shutdown loses nothing. Shutdown drains: velo stops accepting, answers whatever is already in flight with `Connection: close`, and exits once the last connection is gone or `VELO_DRAIN_MS` passes. A client benchmarking through a `SIGTERM` sees zero errors. a hard kill can lose at most the last save interval.
+
+## Concurrency
+
+Every store operation is one step. It takes the collection's write lock, does the whole thing, and releases it, so no request can see a row half written and no two requests can lose one another's work inside one operation. Readers take a snapshot and render outside the lock, so a long read never blocks a write.
+
+A route is not a transaction. A guard and the write after it are two operations, two store calls in one route are two operations, and nothing holds a lock between them. That is why anything which has to be indivisible is one operation rather than a pattern:
+
+| instead of | write |
+| --- | --- |
+| `update(id, { views: find(id).views + 1 })` | `incr(id, "views")` |
+| `create(body) when where("email", body.email).count() == 0` | `create(body, "email")` |
+| `upsert(id, body) when where("email", body.email).count() == 0` | `upsert(id, body, "email")` |
+
+Reads are snapshots too, so two reads in one route can disagree: `{ n: db.users.count(), rows: db.users.all() }` may report a count that does not match the length of the list if a write lands between them. Collections lock independently, so there is no atomicity across two of them, and there is no rollback: if the second of two writes in a route fails, the first still happened. Rows expire and snapshots are written on their own threads beside live traffic, each taking the same locks as anything else.
 
 ## Rate limiting
 
@@ -680,7 +704,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-178 tests (139 integration + 18 CLI + 8 fuzz + 13 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, intersected filters, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+180 tests (141 integration + 18 CLI + 8 fuzz + 13 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, intersected filters, list membership through the index, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
 
@@ -746,6 +770,8 @@ The write path is bounded by the allocator rather than by anything velo does. An
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.32.0** — `db.x.where(field, "in", list)` and a `Concurrency` section that says what velo does and does not promise. A batch endpoint had no way to be written: fetching twenty rows by id meant twenty requests, or a scan through `search`. `in` takes a comma-separated list from a query string or a JSON array from a body, looks each value up in the equality index and merges the results: on 4 500 rows, three ids cost 3.4 us against 2 141 us for the same query with the index turned off, and `velomicro` now measures it with a fresh list every iteration so the number is the index rather than the cache. The `Concurrency` section is the other half of the last three releases: every store operation is one step, a route is not a transaction, two reads in one route are two snapshots, and there is no rollback. It carries the table of what to write instead of a read followed by a write. A mutation found while testing this one: `in` and `==` shared a cache mark, so `where("id", "==", "a,c")` could be served the result of `where("id", "in", "a,c")`; a test now covers it.
 
 **v1.31.0** — the uniqueness 1.30.0 added held only until the next `PUT`. `update` and `upsert` now take the same field names and refuse a write that would take a value another row holds, while a row writing its own value back is not a collision. `upsert` was also two locked operations, an `update` that missed followed by a `create`, and the second could find the row already inserted and answer with the caller's own body without storing it; it is now one, and a test asserts every reply to a racing `PUT` describes the row that was stored, which fails on the old shape. That race is narrow enough that eight threads through a barrier never hit it in practice, so the test earns its keep as a statement about the reply rather than as a reproduction. One test defect was fixed along the way: an assertion inside a barrier loop hangs the whole suite instead of failing it, because the threads still waiting at the barrier never get their eighth party. Both barrier tests now collect what went wrong and assert after joining.
 

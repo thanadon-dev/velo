@@ -943,6 +943,7 @@ pub enum Cmp {
     Le,
     Gt,
     Ge,
+    In,
 }
 
 impl Cmp {
@@ -954,6 +955,7 @@ impl Cmp {
             "<=" => Cmp::Le,
             ">" => Cmp::Gt,
             ">=" => Cmp::Ge,
+            "in" => Cmp::In,
             _ => return None,
         })
     }
@@ -966,6 +968,7 @@ impl Cmp {
             Cmp::Le => '(',
             Cmp::Gt => '>',
             Cmp::Ge => ')',
+            Cmp::In => '@',
         }
     }
 
@@ -977,6 +980,7 @@ impl Cmp {
             Cmp::Le => ord != Ordering2::Greater,
             Cmp::Gt => ord == Ordering2::Greater,
             Cmp::Ge => ord != Ordering2::Less,
+            Cmp::In => false,
         }
     }
 }
@@ -991,6 +995,9 @@ fn field_cmp(
 ) -> bool {
     if op == Cmp::Eq || op == Cmp::Ne {
         return field_eq(row, field, want, at) == (op == Cmp::Eq);
+    }
+    if op == Cmp::In {
+        return want.split(',').any(|part| field_eq(row, field, part.trim(), at));
     }
     let Some(value) = row.get_at(field, at) else { return false };
     let ord = match (value, want_num) {
@@ -1089,6 +1096,31 @@ fn plan_hits(s: &Snapshot, stages: &[Stage]) -> Option<Vec<u32>> {
     for stage in stages {
         match stage {
             Stage::Page(_, _) => break,
+            Stage::Where(field, Cmp::In, want) => {
+                let mut found = Vec::new();
+                let mut indexed = true;
+                for part in want.split(',') {
+                    match s.candidates(field, part.trim()) {
+                        Some(list) => found.extend(list),
+                        None => {
+                            indexed = false;
+                            break;
+                        }
+                    }
+                }
+                if !indexed {
+                    continue;
+                }
+                found.sort_unstable();
+                found.dedup();
+                hits = Some(match hits {
+                    None => found,
+                    Some(prev) => intersect(&prev, &found),
+                });
+                if hits.as_ref().is_some_and(|h| h.is_empty()) {
+                    break;
+                }
+            }
             Stage::Where(field, Cmp::Eq, want) => {
                 let Some(found) = s.candidates(field, want) else { continue };
                 hits = Some(match hits {

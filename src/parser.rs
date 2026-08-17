@@ -827,7 +827,7 @@ fn cmp_arg(
         }
     }
     Err(format!(
-        "line {}:{}: db.{}.where(field, op, value) needs a literal \"==\", \"!=\", \"<\", \"<=\", \">\" or \">=\"",
+        "line {}:{}: db.{}.where(field, op, value) needs a literal \"==\", \"!=\", \"<\", \"<=\", \">\", \">=\" or \"in\"",
         line, at_col, coll
     ))
 }

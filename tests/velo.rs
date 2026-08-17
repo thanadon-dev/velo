@@ -31,6 +31,11 @@ GET  /echo/:a/x/:b    => { a: a, b: b }
 POST /name            => body.name
 GET  /list            => [1, 2, "three", true, null]
 GET  /search          => db.users.where("name", query.name)
+GET  /batch           => db.users.where("id", "in", query.ids).order("id")
+GET  /eqlist          => db.users.where("id", "==", query.ids).order("id")
+GET  /inteam          => db.users.where("team", "in", query.teams).where("name", query.name).count()
+POST /pick            => db.users.where("id", "in", body.ids).select("id")
+DELETE /drop          => db.users.delete_where("id", "in", query.ids)
 GET  /find            => db.users.search("name", query.q)
 GET  /math            => { sum: 2 + 3 * 4, grouped: (2 + 3) * 4, div: 10 / 4, neg: 0 - 7, join: "a" + "b" }
 GET  /calc/:n         => { n: n, doubled: n * 2, next: n + 1, big: n > 10 }
@@ -257,6 +262,60 @@ fn http_split_request() {
     let mut out = String::new();
     c.read_to_string(&mut out).unwrap();
     assert!(out.starts_with("HTTP/1.1 201 Created"), "{out}");
+}
+
+fn ids_of(body: &str) -> Vec<String> {
+    let v = parse_json(body.as_bytes()).unwrap();
+    let Value::Arr(rows) = v else { panic!("not a list: {body}") };
+    rows.iter().map(|r| r.get("id").as_key()).collect()
+}
+
+#[test]
+fn where_in_matches_any_of_a_list() {
+    let s = server();
+    for n in ["a", "b", "c", "d"] {
+        let body = format!(r#"{{"id":"{n}","name":"n{n}","team":"t{n}"}}"#);
+        call(&s, "POST", "/users", &body);
+    }
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=a,c", "").1), ["a", "c"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=c,a", "").1), ["a", "c"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=a,%20d", "").1), ["a", "d"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=b,b,b", "").1), ["b"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=b", "").1), ["b"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=zz", "").1), Vec::<String>::new());
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=a,zz", "").1), ["a"]);
+    assert_eq!(ids_of(&call(&s, "POST", "/pick", r#"{"ids":["b","d"]}"#).1), ["b", "d"]);
+    assert_eq!(ids_of(&call(&s, "POST", "/pick", r#"{"ids":[]}"#).1), Vec::<String>::new());
+    assert_eq!(call(&s, "GET", "/inteam?teams=ta,tb&name=nb", "").1, "1");
+    assert_eq!(call(&s, "GET", "/inteam?teams=ta,tb&name=nc", "").1, "0");
+    assert_eq!(call(&s, "DELETE", "/drop?ids=a,b", "").1, r#"{"deleted":2}"#);
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":2}"#);
+    assert_eq!(ids_of(&call(&s, "GET", "/eqlist?ids=c", "").1), ["c"]);
+    assert!(compile(r#"GET /a => db.x.where("f", "nope", "v")"#, None).is_err());
+}
+
+#[test]
+fn where_in_agrees_with_itself_once_the_index_is_on() {
+    let s = server();
+    for i in 0..700 {
+        let body = format!(r#"{{"id":"u{i}","name":"n{i}","team":"t{}"}}"#, i % 7);
+        call(&s, "POST", "/users", &body);
+    }
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=u3", "").1), ["u3"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=u3,u9,u600", "").1), ["u3", "u600", "u9"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=u3,gone,u9", "").1), ["u3", "u9"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=gone", "").1), Vec::<String>::new());
+    assert_eq!(call(&s, "GET", "/inteam?teams=t0,t1&name=n8", "").1, "1");
+    assert_eq!(call(&s, "GET", "/inteam?teams=t2,t3&name=n8", "").1, "0");
+    let two = call(&s, "GET", "/batch?ids=u3,u9", "").1;
+    assert_eq!(ids_of(&two), ["u3", "u9"], "a second read must not serve the wider list");
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=u9", "").1), ["u9"]);
+    assert_eq!(ids_of(&call(&s, "GET", "/batch?ids=u3,u9", "").1), ["u3", "u9"]);
+    assert_eq!(
+        ids_of(&call(&s, "GET", "/eqlist?ids=u3,u9", "").1),
+        Vec::<String>::new(),
+        "an == read must not be served the cached in read"
+    );
 }
 
 #[test]

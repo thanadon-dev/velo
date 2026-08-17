@@ -94,6 +94,7 @@ fn main() {
                GET /f => db.users.find(\"1\")\n\
                GET /c => db.users.where(\"team\", query.t).order(\"name\").page(0, 20)\n\
                GET /s => db.users.select(\"id\", \"name\")\n\
+               GET /b => db.users.where(\"id\", \"in\", query.ids)\n\
                POST /w => db.users.create(body)\n\
                DELETE /d/:id => db.users.delete(id)\n";
     let store = velo::Store::new();
@@ -166,6 +167,23 @@ fn main() {
         }
         let per = t0.elapsed().as_secs_f64() / n as f64;
         report.add(name, per, out.len());
+    }
+    {
+        let n = 20_000;
+        let live = col.count();
+        let paths: Vec<String> = (0..n)
+            .map(|i| {
+                format!("/b?ids={},{},{}", i % live + 1, (i * 7) % live + 1, (i * 13) % live + 1)
+            })
+            .collect();
+        let mut out = Vec::new();
+        let t0 = Instant::now();
+        for path in &paths {
+            out.clear();
+            s.dispatch("GET", path, b"", &mut out);
+        }
+        let per = t0.elapsed().as_secs_f64() / n as f64;
+        report.add("batch", per, out.len());
     }
     std::process::exit(report.finish());
 }

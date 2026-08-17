@@ -2,10 +2,11 @@
   "write": 2.032,
   "create_delete": 2.509,
   "write_then_list": 7.793,
-  "all": 5.560,
+  "all": 5.56,
   "where": 0.422,
   "order": 5.942,
   "find": 0.172,
   "chain": 1.007,
-  "select": 4.569
+  "select": 4.569,
+  "batch": 3.4
 }
