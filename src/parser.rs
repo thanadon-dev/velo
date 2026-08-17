@@ -755,8 +755,10 @@ fn single_op(
             Op::Where(f, Box::new(args.next().unwrap()))
         }
         "create" => {
-            want(1)?;
-            Op::Create(Box::new(args.next().unwrap()))
+            if n == 0 {
+                want(1)?;
+            }
+            Op::Create(Box::new(args.next().unwrap()), args.collect())
         }
         "update" => {
             want(2)?;

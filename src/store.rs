@@ -163,6 +163,14 @@ impl Snapshot {
         Some(hits)
     }
 
+    fn holds(&self, field: &str, want: &str) -> bool {
+        let same = |row: &Value| is_live(row) && row.get(field).as_key() == want;
+        match self.candidates(field, want) {
+            Some(hits) => hits.iter().any(|i| self.rows.get(*i as usize).is_some_and(same)),
+            None => self.live().any(same),
+        }
+    }
+
     fn extend_index(&mut self, at: usize, row: &Value) {
         for (field, by_value) in self.index.get_mut().unwrap().iter_mut() {
             let mut seen = 0;
@@ -519,7 +527,7 @@ impl Collection {
         }
     }
 
-    pub fn create(&self, v: Value) -> Option<Value> {
+    pub fn create(&self, v: Value, unique: &[&str]) -> Option<Value> {
         let given = match v.get("id") {
             Value::Null => None,
             id => Some(id.as_key()),
@@ -529,6 +537,15 @@ impl Collection {
             None => (String::new(), v),
         };
         let mut s = self.snap.write().unwrap();
+        for field in unique {
+            let want = match row.get(field) {
+                Value::Null => continue,
+                v => v.as_key(),
+            };
+            if s.holds(field, &want) {
+                return None;
+            }
+        }
         let (key, row) = if key.is_empty() {
             let mut id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
             while s.by_id.contains_key(&id.to_string()) {
@@ -620,7 +637,7 @@ impl Collection {
                 (crate::value::intern("value"), other.clone()),
             ]),
         };
-        self.create(keyed).unwrap_or(value)
+        self.create(keyed, &[]).unwrap_or(value)
     }
 
     pub fn update(&self, id: &str, patch: Value) -> Option<Value> {
@@ -1337,8 +1354,8 @@ mod tests {
                 as u64;
         for (id, until) in [("a", now - 1), ("b", now - 100_000), ("c", now + 100_000)] {
             let raw = format!(r#"{{"id":"{id}","until":{until}}}"#);
-            sessions.create(crate::value::parse_json(raw.as_bytes()).unwrap()).unwrap();
-            keep.create(crate::value::parse_json(raw.as_bytes()).unwrap()).unwrap();
+            sessions.create(crate::value::parse_json(raw.as_bytes()).unwrap(), &[]).unwrap();
+            keep.create(crate::value::parse_json(raw.as_bytes()).unwrap(), &[]).unwrap();
         }
         let rules = expire_rules(Some("sessions.until".into()));
         assert_eq!(store.expire_now(&rules), 2);
@@ -1353,7 +1370,7 @@ mod tests {
         let store = Store::new();
         let c = store.collection("sessions");
         for raw in [r#"{"id":"a"}"#, r#"{"id":"b","until":"soon"}"#, r#"{"id":"c","until":1}"#] {
-            c.create(crate::value::parse_json(raw.as_bytes()).unwrap()).unwrap();
+            c.create(crate::value::parse_json(raw.as_bytes()).unwrap(), &[]).unwrap();
         }
         let rules = expire_rules(Some("sessions.until".into()));
         assert_eq!(store.expire_now(&rules), 1, "only the numeric past goes");

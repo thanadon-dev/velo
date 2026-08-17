@@ -103,7 +103,7 @@ fn main() {
     for i in 0..rows {
         let v = velo::value::parse_json(format!("{{\"team\":\"x\",\"name\":\"u{i}\"}}").as_bytes())
             .unwrap();
-        col.create(v).unwrap();
+        col.create(v, &[]).unwrap();
     }
     if !quiet {
         println!("{rows} rows");

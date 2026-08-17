@@ -133,7 +133,7 @@ pub enum Op {
     First(Box<Expr>, Box<Expr>, Vec<Expr>),
     Order(Box<Expr>),
     Page(Box<Expr>, Box<Expr>),
-    Create(Box<Expr>),
+    Create(Box<Expr>, Vec<Expr>),
     Update(Box<Expr>, Box<Expr>),
     Incr(Box<Expr>, Box<Expr>, Box<Expr>),
     Upsert(Box<Expr>, Box<Expr>),
@@ -303,9 +303,17 @@ impl Expr {
                     let want = v.eval(c)?;
                     Ok(col.filter(&field.as_key_ref(), &want.as_key_ref()))
                 }
-                Op::Create(v) => match v.eval(c)? {
+                Op::Create(v, unique) => match v.eval(c)? {
                     Value::Null => Err(BAD_BODY),
-                    val => col.create(val).ok_or(CONFLICT),
+                    val if unique.is_empty() => col.create(val, &[]).ok_or(CONFLICT),
+                    val => {
+                        let mut names = Vec::with_capacity(unique.len());
+                        for f in unique {
+                            names.push(f.eval(c)?.as_key_arc());
+                        }
+                        let fields: Vec<&str> = names.iter().map(|n| &**n).collect();
+                        col.create(val, &fields).ok_or(CONFLICT)
+                    }
                 },
                 Op::Update(k, v) => {
                     let key = match fast_key(k, c) {

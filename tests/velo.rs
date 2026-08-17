@@ -14,6 +14,8 @@ GET  /users/:id       => db.users.find(id)
 POST /users           => db.users.create(body)
 PUT  /users/:id       => db.users.update(id, body)
 PUT  /put/:id         => db.users.upsert(id, body)
+POST /uniq            => db.users.create(body, "email")
+POST /uniq2           => db.users.create(body, "email", "phone")
 POST /bump/:id        => db.users.incr(id, "score") : 200
 POST /bumpby/:id      => db.users.incr(id, "score", query.by) : 200
 POST /bumpbad/:id     => db.users.incr(id, "name") : 200
@@ -253,6 +255,66 @@ fn http_split_request() {
     let mut out = String::new();
     c.read_to_string(&mut out).unwrap();
     assert!(out.starts_with("HTTP/1.1 201 Created"), "{out}");
+}
+
+#[test]
+fn create_keeps_a_named_field_unique() {
+    let s = server();
+    assert_eq!(call(&s, "POST", "/uniq", r#"{"email":"a@x","name":"a"}"#).0, 201);
+    assert_eq!(call(&s, "POST", "/uniq", r#"{"email":"a@x","name":"b"}"#).0, 409);
+    assert_eq!(call(&s, "POST", "/uniq", r#"{"email":"b@x","name":"b"}"#).0, 201);
+    assert_eq!(call(&s, "POST", "/uniq", r#"{"name":"no email"}"#).0, 201);
+    assert_eq!(call(&s, "POST", "/uniq", r#"{"name":"also none"}"#).0, 201);
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":4}"#);
+    assert_eq!(call(&s, "POST", "/uniq2", r#"{"email":"c@x","phone":"1"}"#).0, 201);
+    assert_eq!(call(&s, "POST", "/uniq2", r#"{"email":"d@x","phone":"1"}"#).0, 409);
+    assert_eq!(call(&s, "POST", "/uniq2", r#"{"email":"c@x","phone":"2"}"#).0, 409);
+    assert_eq!(call(&s, "POST", "/uniq2", r#"{"email":"d@x","phone":"2"}"#).0, 201);
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":6}"#);
+    assert_eq!(call(&s, "POST", "/users", r#"{"email":"a@x"}"#).0, 201);
+}
+
+#[test]
+fn unique_holds_once_the_index_is_carrying_the_field() {
+    let s = server();
+    for i in 0..700 {
+        let body = format!(r#"{{"email":"u{i}@x"}}"#);
+        assert_eq!(call(&s, "POST", "/uniq", &body).0, 201, "row {i}");
+    }
+    assert_eq!(call(&s, "POST", "/uniq", r#"{"email":"u0@x"}"#).0, 409);
+    assert_eq!(call(&s, "POST", "/uniq", r#"{"email":"u699@x"}"#).0, 409);
+    assert_eq!(call(&s, "POST", "/uniq", r#"{"email":"u700@x"}"#).0, 201);
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":701}"#);
+}
+
+#[test]
+fn concurrent_signups_with_one_email_leave_one_row() {
+    const THREADS: usize = 8;
+    const ROUNDS: usize = 200;
+    let s = server();
+    let gate = Arc::new(std::sync::Barrier::new(THREADS));
+    let handles: Vec<_> = (0..THREADS)
+        .map(|_| {
+            let s = s.clone();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                let mut won = 0;
+                for round in 0..ROUNDS {
+                    let body = format!(r#"{{"email":"e{round}@x"}}"#);
+                    gate.wait();
+                    let mut out = Vec::new();
+                    let (status, _) = s.dispatch("POST", "/uniq", body.as_bytes(), &mut out);
+                    if status == 201 {
+                        won += 1;
+                    }
+                }
+                won
+            })
+        })
+        .collect();
+    let won: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+    assert_eq!(won, ROUNDS, "every round must be won exactly once");
+    assert_eq!(call(&s, "GET", "/stats", "").1, format!(r#"{{"users":{ROUNDS}}}"#));
 }
 
 #[test]
@@ -1711,7 +1773,7 @@ fn chain_cache_keys_do_not_collide() {
         .unwrap();
     let col = s.store.collection("k");
     for v in [r#"{"a":"1:x","b":"y"}"#, r#"{"a":"1","b":":xy"}"#] {
-        col.create(parse_json(v.as_bytes()).unwrap()).unwrap();
+        col.create(parse_json(v.as_bytes()).unwrap(), &[]).unwrap();
     }
     assert_eq!(call(&s, "GET", "/w?f=a&v=1:x", "").1, "1");
     assert_eq!(call(&s, "GET", "/w?f=a&v=1", "").1, "1");
@@ -2727,7 +2789,7 @@ fn a_snapshot_is_never_half_written() {
         let raw = format!(
             r#"{{"id":{i},"name":"user number {i}","note":"padding to make the file large"}}"#
         );
-        users.create(parse_json(raw.as_bytes()).unwrap()).unwrap();
+        users.create(parse_json(raw.as_bytes()).unwrap(), &[]).unwrap();
     }
     store.save_to(&path).unwrap();
     let full = std::fs::metadata(&path).unwrap().len();
@@ -3080,7 +3142,7 @@ fn expiry_sweeping_beside_live_traffic_keeps_what_it_should() {
     for i in 0..600 {
         let until = if i % 2 == 0 { now() - 5_000 } else { now() + 600_000 };
         let raw = format!(r#"{{"id":"seed-{i}","until":{until},"team":"t{}"}}"#, i % 3);
-        sessions.create(parse_json(raw.as_bytes()).unwrap()).unwrap();
+        sessions.create(parse_json(raw.as_bytes()).unwrap(), &[]).unwrap();
     }
     let rules = vec![("sessions".to_string(), "until".to_string())];
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3106,7 +3168,7 @@ fn expiry_sweeping_beside_live_traffic_keeps_what_it_should() {
                     now() + 600_000,
                     made % 3
                 );
-                sessions.create(parse_json(raw.as_bytes()).unwrap()).unwrap();
+                sessions.create(parse_json(raw.as_bytes()).unwrap(), &[]).unwrap();
                 made += 1;
             }
             made

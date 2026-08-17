@@ -1,6 +1,6 @@
 # Velo
 
-**v1.29.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.30.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -123,6 +123,7 @@ Built-in store (`db.<collection>.<op>`):
 | `search(field, text)` | rows whose `field` contains `text`, case-insensitive | `[]` |
 | `order(field)` | rows sorted by `field`, `"-field"` for descending | `[]` |
 | `create(value)` | the stored row; `id` is generated unless the value carries one | 400 on an empty body, 409 on a duplicate `id` |
+| `create(value, field, ...)` | same, refusing a value whose `field` another row already holds | 409 on a duplicate |
 | `update(key, patch)` | merged row | 404 |
 | `incr(key, field)` | the row with `field` one higher, atomically; `incr(key, field, n)` to step by `n` | 404, 409 if the field holds something other than a number |
 | `upsert(key, value)` | merged row, or a new row keyed by `key` | never misses |
@@ -140,6 +141,14 @@ POST /posts/:id/vote => db.posts.incr(id, "score", body.by) : 200
 ```
 
 Eight threads calling the first route 250 times each leave `views` at exactly 2 000. A missing field starts at the step rather than failing, so a row never has to be created with its counters already in it; a negative step counts down; a field holding anything but a number answers `409 {"error":"not a number"}` and changes nothing, and `id` cannot be stepped because it is the key.
+
+A second row with the same email is the same shape of bug. `db.users.create(body) when db.users.where("email", body.email).count() == 0 else 409` reads one snapshot and writes into another, so two signups landing together both find nothing and both succeed. Naming the field on `create` moves the check inside the write lock:
+
+```velo
+POST /signup => db.users.create({ id: uuid(), email: lower(body.email), pass: password(body.pass) }, "email")
+```
+
+Eight threads racing two hundred rounds, all eight sending the same email each round, leave exactly two hundred rows. Any number of fields can be named and each is checked separately, so `create(body, "email", "phone")` refuses a row that collides on either. A field the new row does not carry is not compared, since otherwise only one row could ever be stored without it; require it with `check(body.email, "email is required")`. The guarantee is on insert: `update` and `upsert` write what they are given, so a route that lets a client change an email has to guard it. A collection large enough to be indexed uses that index for the check, so it costs a lookup rather than a scan.
 
 Read operations chain, so one line can filter, sort and page:
 
@@ -289,6 +298,8 @@ DELETE /logout => [db.sessions.delete(cookie.session), setcookie("session", "")]
 Every cookie is written `Path=/; HttpOnly; SameSite=Lax`, and `VELO_COOKIE_SECURE=1` adds `Secure` for a TLS proxy. There are no per-call options: a cookie velo writes cannot be read by JavaScript and cannot be sent cross-site. An empty value expires it, which is how logout clears one. A name or value velo cannot write verbatim, because it holds a space, a semicolon, a quote or a control character, sets no cookie at all rather than a mangled one, so a token can never carry a forged header or a smuggled `Domain` into the response. An array evaluates left to right, which is how logout deletes the row and clears the cookie in one route.
 
 `examples/auth.velo` accepts the token from either place with `default(cookie.session, header.x_token)`, so the same API serves a browser and a script.
+
+Keying a user on the lowercased email is what makes signup safe against a second attempt with the same address: an `id` collision is refused inside the write lock. When the key has to be a `uuid()` instead, name the field on `create` and it is checked the same way: `db.users.create({ id: uuid(), email: lower(body.email), pass: password(body.pass) }, "email")`.
 
 Sessions are rows, and rows do not remove themselves. `VELO_EXPIRE=sessions.until` sweeps a collection every minute and deletes every row whose named field holds a Unix time in milliseconds that has passed, which is exactly the `until` a login writes. A row without that field, or with something that is not a number in it, is never swept. `VELO_EXPIRE_MS` changes how often, and several collections can be listed at once:
 
@@ -667,7 +678,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-173 tests (134 integration + 18 CLI + 8 fuzz + 11 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, per-key rate limits, intersected filters, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+176 tests (137 integration + 18 CLI + 8 fuzz + 13 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, built-ins, CORS preflight, field projection, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold when eight threads race the same email through a barrier, per-key rate limits, intersected filters, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
 
@@ -733,6 +744,8 @@ The write path is bounded by the allocator rather than by anything velo does. An
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.30.0** — `db.x.create(value, "email")` refuses a duplicate the way a duplicate `id` is refused. Uniqueness on any other field had to be a guard, and `create(body) when db.users.where("email", body.email).count() == 0` is the same read-then-write hole 1.29.0 closed for counters: the guard reads one snapshot and the create writes into another. Eight threads sending one email through a barrier, two hundred rounds of it, stored 648 rows where 200 were wanted. The check now happens inside the write lock and the same test stores exactly 200. Any number of fields can be named and each is checked on its own. A field the new row does not carry is not compared, since otherwise only one row could ever be stored without it. Past the size where the equality index switches on the check uses it, so it is a lookup rather than a scan; both paths are covered by a test that fails when either is broken. The guarantee is on insert only, and the README says so: `update` and `upsert` write what they are given.
 
 **v1.29.0** — `db.x.incr(key, field)` counts without losing counts. Anything a route wanted to increment had to be read and then written back, and those are two snapshots: two requests landing together read the same number and one increment disappears. Eight threads stepping one row 250 times each proved it, ending at 1 452 instead of 2 000. `incr` does the read, the addition and the write inside the collection's write lock, so the same test now ends at 2 000 exactly. A third argument steps by any amount, negative to count down; a missing field starts from the step so a row need not be created with its counters in it; a field holding something other than a number answers 409 and changes nothing rather than overwriting what is there. The `Scope` section was rewritten at the same time: it described velo before it had auth, cookies, rate limits, validation and expiry, and it now says what the language covers and, as plainly, what it does not.
 

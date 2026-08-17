@@ -8,7 +8,10 @@ fn main() -> Result<(), String> {
 
     let todos = store.collection("todos");
     for text in ["read the readme", "run the benchmark", "ship something"] {
-        todos.create(Value::object(&[("text", Value::str(text)), ("done", Value::Bool(false))]));
+        todos.create(
+            Value::object(&[("text", Value::str(text)), ("done", Value::Bool(false))]),
+            &[],
+        );
     }
 
     let server = Server::new(program)?;
