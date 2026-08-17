@@ -774,11 +774,13 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
          POST /users     => db.users.create(body) when body.name else 400\n\
          PUT /users/:id  => db.users.upsert(id, body)\n\
          DELETE /users/:id => db.users.delete(id) : 204\n\
+         GET /byteam     => db.users.where(\"team\", query.team)\n\
+         POST /checked   => db.users.create(body) when check(body.email, \"email is required\")\n\
          GET /gated      => \"secret\" when header.x_key else 403\n",
     );
     std::fs::write(
         dir.join("data.json"),
-        r#"{"users":{"next_id":9,"rows":[{"id":7,"name":"a"},{"id":8,"name":"b"}]}}"#,
+        r#"{"users":{"next_id":9,"rows":[{"id":7,"name":"a","team":"red"},{"id":8,"name":"b","team":"red"}]}}"#,
     )
     .unwrap();
 
@@ -791,7 +793,7 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(text.contains("benching 7 route(s)"), "{text}");
+    assert!(text.contains("benching 9 route(s)"), "{text}");
     assert!(text.contains("2 row(s) loaded"), "the data file was not read: {text}");
     assert!(!text.contains("the store is empty"), "{text}");
     for path in ["GET /health", "GET /users", "GET /count"] {
@@ -805,6 +807,15 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
     let put = text.lines().find(|l| l.contains("PUT /users/7")).unwrap_or_default();
     assert!(put.contains("req/s"), "a write route takes a real id too: {put}");
     assert!(text.contains("write routes run last"), "{text}");
+    assert!(
+        text.contains("GET /byteam?team=red"),
+        "a query the route reads is filled from a real row: {text}"
+    );
+    let checked = text.lines().find(|l| l.contains("POST /checked")).unwrap_or_default();
+    assert!(
+        checked.contains("req/s") && !checked.contains("refused"),
+        "a body field the route checks is filled even when no row has it: {checked}"
+    );
     assert!(text.contains("DELETE /users/:id") && text.contains("would delete the rows"), "{text}");
     let gated = text.lines().find(|l| l.contains("GET /gated")).unwrap_or_default();
     assert!(gated.contains("refused"), "a guard that says no must be counted: {gated}");

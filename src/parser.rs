@@ -23,6 +23,7 @@ pub struct Route {
     pub uses_header: bool,
     pub header_obj: bool,
     pub query_fields: Vec<String>,
+    pub body_fields: Vec<String>,
     pub header_fields: Vec<String>,
     pub cookie_fields: Vec<String>,
     pub guard: Option<Expr>,
@@ -106,6 +107,7 @@ pub fn compile_in(
         header: false,
         header_obj: false,
         query_fields: Vec::new(),
+        body_fields: Vec::new(),
         header_fields: Vec::new(),
         cookie_fields: Vec::new(),
         base: base.to_path_buf(),
@@ -182,6 +184,7 @@ struct Parser<'a> {
     header: bool,
     header_obj: bool,
     query_fields: Vec<String>,
+    body_fields: Vec<String>,
     header_fields: Vec<String>,
     cookie_fields: Vec<String>,
     base: std::path::PathBuf,
@@ -233,6 +236,7 @@ impl<'a> Parser<'a> {
         self.header = false;
         self.header_obj = false;
         self.query_fields.clear();
+        self.body_fields.clear();
         self.header_fields.clear();
         self.cookie_fields.clear();
         self.file_ctype = None;
@@ -300,6 +304,7 @@ impl<'a> Parser<'a> {
             header_obj: self.header_obj,
             source: None,
             query_fields: std::mem::take(&mut self.query_fields),
+            body_fields: std::mem::take(&mut self.body_fields),
             header_fields: std::mem::take(&mut self.header_fields),
             cookie_fields: std::mem::take(&mut self.cookie_fields),
             guard,
@@ -461,7 +466,13 @@ impl<'a> Parser<'a> {
             "body" => {
                 self.pure = false;
                 self.body = true;
-                return self.fields(Expr::Body);
+                let e = self.fields(Expr::Body)?;
+                if let Expr::Field(base, name) = &e {
+                    if matches!(**base, Expr::Body) {
+                        remember(&mut self.body_fields, name);
+                    }
+                }
+                return Ok(e);
             }
             "query" => {
                 self.pure = false;

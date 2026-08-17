@@ -33,7 +33,7 @@ fn usage(code: i32) -> ! {
          \x20                               start the server (default :8080, env VELO_ADDR)\n\
          \x20 velo check <file.velo>        compile only, report errors\n\
          \x20 velo routes <file.velo>       list compiled routes\n\
-         \x20 velo bench <file.velo> [-c n] [-d secs] [-H header] [-b body] [--data file.json]\n\
+         \x20 velo bench <file.velo> [-c n] [-d secs] [-H header] [-b body] [-q query] [--data file.json]\n\
          \x20                               serve the file and load every plain GET route\n\
          \x20 velo openapi <file.velo>      print an OpenAPI 3 document\n\
          \x20 velo new <file.velo>          write a starter file\n\
@@ -263,7 +263,7 @@ fn sample_path(
     col: Option<&std::sync::Arc<velo::store::Collection>>,
 ) -> Option<String> {
     let id = col?.sample_id()?;
-    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b)) {
+    if !url_safe(&id) {
         return None;
     }
     let filled: Vec<String> = pattern
@@ -273,18 +273,49 @@ fn sample_path(
     Some(filled.join("/"))
 }
 
+fn url_safe(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b))
+}
+
+fn sample_query(
+    given: Option<&String>,
+    fields: &[String],
+    col: Option<&std::sync::Arc<velo::store::Collection>>,
+) -> String {
+    if let Some(q) = given {
+        return format!("?{}", q.trim_start_matches('?'));
+    }
+    if fields.is_empty() {
+        return String::new();
+    }
+    let Some(row) = col.and_then(|c| c.sample_row()) else { return String::new() };
+    let mut out = String::new();
+    for name in fields {
+        let value = row.get(name).as_key();
+        if !url_safe(&value) {
+            continue;
+        }
+        out.push(if out.is_empty() { '?' } else { '&' });
+        out.push_str(name);
+        out.push('=');
+        out.push_str(&value);
+    }
+    out
+}
+
 fn sample_body(
     given: Option<String>,
-    uses_body: bool,
+    r: &velo::parser::Route,
     col: Option<&std::sync::Arc<velo::store::Collection>>,
 ) -> Option<String> {
     if let Some(body) = given {
         return Some(body);
     }
-    if !uses_body {
+    if !r.uses_body {
         return Some(String::new());
     }
     let row = col?.sample_row()?;
+    let mut named: Vec<&str> = Vec::new();
     let mut out = Vec::with_capacity(128);
     out.push(b'{');
     if let velo::Value::Obj(fields) | velo::Value::Row(fields, _) = &row {
@@ -292,10 +323,18 @@ fn sample_body(
             if out.len() > 1 {
                 out.push(b',');
             }
+            named.push(k);
             velo::value::write_string(&mut out, k);
             out.push(b':');
             v.write_json(&mut out);
         }
+    }
+    for want in r.body_fields.iter().filter(|f| !named.contains(&f.as_str())) {
+        if out.len() > 1 {
+            out.push(b',');
+        }
+        velo::value::write_string(&mut out, want);
+        out.extend_from_slice(b":\"x\"");
     }
     out.push(b'}');
     (out.len() > 2).then(|| String::from_utf8_lossy(&out).into_owned())
@@ -315,6 +354,7 @@ fn bench(args: &[String]) {
     let loaded: usize = store.names().iter().map(|n| store.collection(n).count()).sum();
     let headers: Vec<String> = flags(args, "-H");
     let given = flag(args, "-b");
+    let query = flag(args, "-q");
     let mut reads = Vec::new();
     let mut writes = Vec::new();
     let mut skipped = Vec::new();
@@ -332,12 +372,14 @@ fn bench(args: &[String]) {
             (_, "DELETE") => "would delete the rows it is measuring",
             (_, "HEAD" | "OPTIONS") => "answers no body of its own",
             (Some(path), "GET") => {
-                reads.push((method, path, String::new()));
+                let q = sample_query(query.as_ref(), &r.query_fields, col);
+                reads.push((method, format!("{path}{q}"), String::new()));
                 continue;
             }
-            (Some(path), _) => match sample_body(given.clone(), r.uses_body, col) {
+            (Some(path), _) => match sample_body(given.clone(), r, col) {
                 Some(body) => {
-                    writes.push((method, path, body));
+                    let q = sample_query(query.as_ref(), &r.query_fields, col);
+                    writes.push((method, format!("{path}{q}"), body));
                     continue;
                 }
                 None => "no row to build a body from, pass -b",
