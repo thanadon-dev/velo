@@ -163,11 +163,13 @@ impl Snapshot {
         Some(hits)
     }
 
-    fn holds(&self, field: &str, want: &str) -> bool {
+    fn holds(&self, field: &str, want: &str, skip: usize) -> bool {
         let same = |row: &Value| is_live(row) && row.get(field).as_key() == want;
         match self.candidates(field, want) {
-            Some(hits) => hits.iter().any(|i| self.rows.get(*i as usize).is_some_and(same)),
-            None => self.live().any(same),
+            Some(hits) => hits
+                .iter()
+                .any(|i| *i as usize != skip && self.rows.get(*i as usize).is_some_and(same)),
+            None => self.rows.iter().enumerate().any(|(i, row)| i != skip && same(row)),
         }
     }
 
@@ -537,14 +539,8 @@ impl Collection {
             None => (String::new(), v),
         };
         let mut s = self.snap.write().unwrap();
-        for field in unique {
-            let want = match row.get(field) {
-                Value::Null => continue,
-                v => v.as_key(),
-            };
-            if s.holds(field, &want) {
-                return None;
-            }
+        if collides(&s, &row, unique, usize::MAX) {
+            return None;
         }
         let (key, row) = if key.is_empty() {
             let mut id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
@@ -558,6 +554,10 @@ impl Collection {
             }
             (key, row)
         };
+        Some(self.insert_locked(&mut s, key, row))
+    }
+
+    fn insert_locked(&self, s: &mut Snapshot, key: String, row: Value) -> Value {
         s.rows.push(row.clone());
         let idx = s.rows.len() - 1;
         s.by_id.insert(key, idx);
@@ -572,7 +572,7 @@ impl Collection {
         s.list_used.store(false, Ordering::Relaxed);
         self.bump();
         self.touch();
-        Some(row)
+        row
     }
 
     pub fn clear(&self) -> usize {
@@ -617,9 +617,10 @@ impl Collection {
         hits.len()
     }
 
-    pub fn upsert(&self, id: &str, value: Value) -> Value {
-        if let Some(row) = self.update(id, value.clone()) {
-            return row;
+    pub fn upsert(&self, id: &str, value: Value, unique: &[&str]) -> Option<Value> {
+        let mut s = self.snap.write().unwrap();
+        if let Some(&i) = s.by_id.get(id) {
+            return self.merge_locked(&mut s, i, &value, unique);
         }
         let keyed = match &value {
             Value::Obj(o) | Value::Row(o, _) => {
@@ -637,13 +638,33 @@ impl Collection {
                 (crate::value::intern("value"), other.clone()),
             ]),
         };
-        self.create(keyed, &[]).unwrap_or(value)
+        if collides(&s, &keyed, unique, usize::MAX) {
+            return None;
+        }
+        Some(self.insert_locked(&mut s, id.to_string(), keyed))
     }
 
-    pub fn update(&self, id: &str, patch: Value) -> Option<Value> {
+    pub fn has(&self, id: &str) -> bool {
+        self.snap.read().unwrap().by_id.contains_key(id)
+    }
+
+    pub fn update(&self, id: &str, patch: Value, unique: &[&str]) -> Option<Value> {
         let mut s = self.snap.write().unwrap();
         let i = *s.by_id.get(id)?;
-        let merged = as_row(merge(s.rows.get(i)?, &patch));
+        self.merge_locked(&mut s, i, &patch, unique)
+    }
+
+    fn merge_locked(
+        &self,
+        s: &mut Snapshot,
+        i: usize,
+        patch: &Value,
+        unique: &[&str],
+    ) -> Option<Value> {
+        let merged = as_row(merge(s.rows.get(i)?, patch));
+        if collides(s, &merged, unique, i) {
+            return None;
+        }
         s.rows.set(i, merged.clone());
         s.invalidate();
         self.bump();
@@ -1050,6 +1071,13 @@ fn chain_key(stages: &[Stage]) -> String {
     let mut key = String::with_capacity(48);
     push_chain(&mut key, stages);
     key
+}
+
+fn collides(s: &Snapshot, row: &Value, unique: &[&str], skip: usize) -> bool {
+    unique.iter().any(|field| match row.get(field) {
+        Value::Null => false,
+        want => s.holds(field, &want.as_key(), skip),
+    })
 }
 
 fn index_key(row: &Value, field: &str, at: &mut usize) -> String {

@@ -15,6 +15,8 @@ POST /users           => db.users.create(body)
 PUT  /users/:id       => db.users.update(id, body)
 PUT  /put/:id         => db.users.upsert(id, body)
 POST /uniq            => db.users.create(body, "email")
+PUT  /uniqput/:id     => db.users.upsert(id, body, "email")
+PATCH /uniqpatch/:id  => db.users.update(id, body, "email")
 POST /uniq2           => db.users.create(body, "email", "phone")
 POST /bump/:id        => db.users.incr(id, "score") : 200
 POST /bumpby/:id      => db.users.incr(id, "score", query.by) : 200
@@ -272,6 +274,61 @@ fn create_keeps_a_named_field_unique() {
     assert_eq!(call(&s, "POST", "/uniq2", r#"{"email":"d@x","phone":"2"}"#).0, 201);
     assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":6}"#);
     assert_eq!(call(&s, "POST", "/users", r#"{"email":"a@x"}"#).0, 201);
+}
+
+#[test]
+fn unique_survives_update_and_upsert() {
+    let s = server();
+    call(&s, "PUT", "/uniqput/a", r#"{"email":"a@x"}"#);
+    call(&s, "PUT", "/uniqput/b", r#"{"email":"b@x"}"#);
+    assert_eq!(call(&s, "PUT", "/uniqput/b", r#"{"email":"a@x"}"#).0, 409);
+    assert_eq!(call(&s, "PATCH", "/uniqpatch/b", r#"{"email":"a@x"}"#).0, 409);
+    assert_eq!(call(&s, "GET", "/users/b", "").1, r#"{"id":"b","email":"b@x"}"#);
+    assert_eq!(call(&s, "PUT", "/uniqput/b", r#"{"email":"b@x","n":1}"#).0, 200);
+    assert_eq!(call(&s, "PATCH", "/uniqpatch/b", r#"{"email":"b@x","n":2}"#).0, 200);
+    assert_eq!(call(&s, "PATCH", "/uniqpatch/b", r#"{"n":3}"#).0, 200);
+    assert_eq!(call(&s, "GET", "/users/b", "").1, r#"{"id":"b","email":"b@x","n":3}"#);
+    assert_eq!(call(&s, "PATCH", "/uniqpatch/nobody", r#"{"email":"z@x"}"#).0, 404);
+    assert_eq!(call(&s, "PATCH", "/uniqpatch/nobody", r#"{"email":"a@x"}"#).0, 404);
+    assert_eq!(call(&s, "PUT", "/uniqput/c", r#"{"email":"a@x"}"#).0, 409);
+    assert_eq!(call(&s, "GET", "/stats", "").1, r#"{"users":2}"#);
+}
+
+#[test]
+fn a_racing_upsert_always_answers_with_the_row_it_stored() {
+    const THREADS: usize = 8;
+    const ROUNDS: usize = 200;
+    let s = server();
+    let gate = Arc::new(std::sync::Barrier::new(THREADS));
+    let handles: Vec<_> = (0..THREADS)
+        .map(|who| {
+            let s = s.clone();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                let mut wrong = Vec::new();
+                for round in 0..ROUNDS {
+                    let body = format!(r#"{{"who":{who}}}"#);
+                    gate.wait();
+                    let mut out = Vec::new();
+                    let (status, _) =
+                        s.dispatch("PUT", &format!("/put/k{round}"), body.as_bytes(), &mut out);
+                    let text = String::from_utf8_lossy(&out).into_owned();
+                    if status != 200 || !text.contains(&format!(r#""id":"k{round}""#)) {
+                        wrong.push(format!("{status} {text}"));
+                    }
+                }
+                wrong
+            })
+        })
+        .collect();
+    let wrong: Vec<String> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+    assert!(
+        wrong.is_empty(),
+        "{} replies did not describe the stored row: {:?}",
+        wrong.len(),
+        &wrong[..wrong.len().min(3)]
+    );
+    assert_eq!(call(&s, "GET", "/stats", "").1, format!(r#"{{"users":{ROUNDS}}}"#));
 }
 
 #[test]

@@ -134,9 +134,9 @@ pub enum Op {
     Order(Box<Expr>),
     Page(Box<Expr>, Box<Expr>),
     Create(Box<Expr>, Vec<Expr>),
-    Update(Box<Expr>, Box<Expr>),
+    Update(Box<Expr>, Box<Expr>, Vec<Expr>),
     Incr(Box<Expr>, Box<Expr>, Box<Expr>),
-    Upsert(Box<Expr>, Box<Expr>),
+    Upsert(Box<Expr>, Box<Expr>, Vec<Expr>),
     Delete(Box<Expr>),
     Clear,
     DeleteWhere(Box<Expr>, Cmp, Box<Expr>),
@@ -305,23 +305,26 @@ impl Expr {
                 }
                 Op::Create(v, unique) => match v.eval(c)? {
                     Value::Null => Err(BAD_BODY),
-                    val if unique.is_empty() => col.create(val, &[]).ok_or(CONFLICT),
                     val => {
-                        let mut names = Vec::with_capacity(unique.len());
-                        for f in unique {
-                            names.push(f.eval(c)?.as_key_arc());
-                        }
+                        let names = field_names(unique, c)?;
                         let fields: Vec<&str> = names.iter().map(|n| &**n).collect();
                         col.create(val, &fields).ok_or(CONFLICT)
                     }
                 },
-                Op::Update(k, v) => {
+                Op::Update(k, v, unique) => {
                     let key = match fast_key(k, c) {
                         Some(raw) => raw.to_string(),
                         None => k.eval(c)?.as_key(),
                     };
                     let patch = v.eval(c)?;
-                    col.update(&key, patch).ok_or(NOT_FOUND)
+                    let names = field_names(unique, c)?;
+                    let fields: Vec<&str> = names.iter().map(|n| &**n).collect();
+                    match col.update(&key, patch, &fields) {
+                        Some(row) => Ok(row),
+                        None if fields.is_empty() => Err(NOT_FOUND),
+                        None if col.has(&key) => Err(CONFLICT),
+                        None => Err(NOT_FOUND),
+                    }
                 }
                 Op::Incr(k, f, by) => {
                     let key = match fast_key(k, c) {
@@ -338,14 +341,18 @@ impl Expr {
                         crate::store::Incr::NotNumber => Err(NOT_NUMBER),
                     }
                 }
-                Op::Upsert(k, v) => {
+                Op::Upsert(k, v, unique) => {
                     let key = match fast_key(k, c) {
                         Some(raw) => raw.to_string(),
                         None => k.eval(c)?.as_key(),
                     };
                     match v.eval(c)? {
                         Value::Null => Err(BAD_BODY),
-                        val => Ok(col.upsert(&key, val)),
+                        val => {
+                            let names = field_names(unique, c)?;
+                            let fields: Vec<&str> = names.iter().map(|n| &**n).collect();
+                            col.upsert(&key, val, &fields).ok_or(CONFLICT)
+                        }
                     }
                 }
                 Op::Clear => Ok(deleted(col.clear())),
@@ -405,6 +412,14 @@ impl Expr {
             },
         }
     }
+}
+
+fn field_names(unique: &[Expr], c: &Ctx) -> Result<Vec<Arc<str>>, Err_> {
+    let mut names = Vec::with_capacity(unique.len());
+    for f in unique {
+        names.push(f.eval(c)?.as_key_arc());
+    }
+    Ok(names)
 }
 
 fn as_num(v: &Value) -> Option<f64> {

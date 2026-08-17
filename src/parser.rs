@@ -761,9 +761,12 @@ fn single_op(
             Op::Create(Box::new(args.next().unwrap()), args.collect())
         }
         "update" => {
-            want(2)?;
+            if n < 2 {
+                want(2)?;
+            }
             let k = Box::new(args.next().unwrap());
-            Op::Update(k, Box::new(args.next().unwrap()))
+            let v = Box::new(args.next().unwrap());
+            Op::Update(k, v, args.collect())
         }
         "incr" if n == 3 => {
             let k = Box::new(args.next().unwrap());
@@ -791,9 +794,12 @@ fn single_op(
             Op::DeleteWhere(f, crate::store::Cmp::Eq, Box::new(args.next().unwrap()))
         }
         "upsert" => {
-            want(2)?;
+            if n < 2 {
+                want(2)?;
+            }
             let k = Box::new(args.next().unwrap());
-            Op::Upsert(k, Box::new(args.next().unwrap()))
+            let v = Box::new(args.next().unwrap());
+            Op::Upsert(k, v, args.collect())
         }
         "delete" => {
             want(1)?;
