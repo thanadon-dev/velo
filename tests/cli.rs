@@ -771,7 +771,9 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
          GET /users      => db.users.all()\n\
          GET /count      => db.users.count()\n\
          GET /users/:id  => db.users.find(id)\n\
-         POST /users     => db.users.create(body)\n\
+         POST /users     => db.users.create(body) when body.name else 400\n\
+         PUT /users/:id  => db.users.upsert(id, body)\n\
+         DELETE /users/:id => db.users.delete(id) : 204\n\
          GET /gated      => \"secret\" when header.x_key else 403\n",
     );
     std::fs::write(
@@ -789,7 +791,7 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(text.contains("benching 5 route(s)"), "{text}");
+    assert!(text.contains("benching 7 route(s)"), "{text}");
     assert!(text.contains("2 row(s) loaded"), "the data file was not read: {text}");
     assert!(!text.contains("the store is empty"), "{text}");
     for path in ["GET /health", "GET /users", "GET /count"] {
@@ -797,7 +799,13 @@ fn bench_loads_the_routes_it_can_and_says_why_it_skips_the_rest() {
     }
     assert!(text.contains("GET /users/7"), "a path parameter takes a real id: {text}");
     assert!(!text.contains("GET /users/:id"), "{text}");
-    assert!(text.contains("POST /users") && text.contains("not a GET"), "{text}");
+    let posted = text.lines().find(|l| l.contains("POST /users")).unwrap_or_default();
+    assert!(posted.contains("req/s"), "a write route is benched: {posted}");
+    assert!(!posted.contains("refused"), "a body built from a real row passes the guard: {posted}");
+    let put = text.lines().find(|l| l.contains("PUT /users/7")).unwrap_or_default();
+    assert!(put.contains("req/s"), "a write route takes a real id too: {put}");
+    assert!(text.contains("write routes run last"), "{text}");
+    assert!(text.contains("DELETE /users/:id") && text.contains("would delete the rows"), "{text}");
     let gated = text.lines().find(|l| l.contains("GET /gated")).unwrap_or_default();
     assert!(gated.contains("refused"), "a guard that says no must be counted: {gated}");
     assert!(text.contains("req/s") && text.contains("p99"), "{text}");

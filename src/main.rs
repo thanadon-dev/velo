@@ -33,7 +33,7 @@ fn usage(code: i32) -> ! {
          \x20                               start the server (default :8080, env VELO_ADDR)\n\
          \x20 velo check <file.velo>        compile only, report errors\n\
          \x20 velo routes <file.velo>       list compiled routes\n\
-         \x20 velo bench <file.velo> [-c n] [-d secs] [-H header] [--data file.json]\n\
+         \x20 velo bench <file.velo> [-c n] [-d secs] [-H header] [-b body] [--data file.json]\n\
          \x20                               serve the file and load every plain GET route\n\
          \x20 velo openapi <file.velo>      print an OpenAPI 3 document\n\
          \x20 velo new <file.velo>          write a starter file\n\
@@ -273,6 +273,34 @@ fn sample_path(
     Some(filled.join("/"))
 }
 
+fn sample_body(
+    given: Option<String>,
+    uses_body: bool,
+    col: Option<&std::sync::Arc<velo::store::Collection>>,
+) -> Option<String> {
+    if let Some(body) = given {
+        return Some(body);
+    }
+    if !uses_body {
+        return Some(String::new());
+    }
+    let row = col?.sample_row()?;
+    let mut out = Vec::with_capacity(128);
+    out.push(b'{');
+    if let velo::Value::Obj(fields) | velo::Value::Row(fields, _) = &row {
+        for (k, v) in fields.iter().filter(|(k, _)| &**k != "id") {
+            if out.len() > 1 {
+                out.push(b',');
+            }
+            velo::value::write_string(&mut out, k);
+            out.push(b':');
+            v.write_json(&mut out);
+        }
+    }
+    out.push(b'}');
+    (out.len() > 2).then(|| String::from_utf8_lossy(&out).into_owned())
+}
+
 fn bench(args: &[String]) {
     let conns: usize = flag(args, "-c").and_then(|v| v.parse().ok()).unwrap_or(8);
     let secs: u64 = flag(args, "-d").and_then(|v| v.parse().ok()).unwrap_or(2);
@@ -286,27 +314,40 @@ fn bench(args: &[String]) {
     }
     let loaded: usize = store.names().iter().map(|n| store.collection(n).count()).sum();
     let headers: Vec<String> = flags(args, "-H");
-    let mut targets = Vec::new();
+    let given = flag(args, "-b");
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
     let mut skipped = Vec::new();
     for r in &prog.routes {
-        let why = if r.method.name() != "GET" {
-            "not a GET"
-        } else if r.params.len() > 1 {
-            "needs more than one path parameter"
-        } else if r.params.is_empty() {
-            targets.push((r.method.name().to_string(), r.pattern.clone()));
-            continue;
-        } else {
-            match sample_path(&r.pattern, velo::ast::first_collection(&r.expr)) {
-                Some(path) => {
-                    targets.push((r.method.name().to_string(), path));
+        let method = r.method.name().to_string();
+        let col = velo::ast::first_collection(&r.expr);
+        let path = match r.params.len() {
+            0 => Some(r.pattern.clone()),
+            1 => sample_path(&r.pattern, col),
+            _ => None,
+        };
+        let why = match (path, method.as_str()) {
+            (None, _) if r.params.len() > 1 => "needs more than one path parameter",
+            (None, _) => "no row to take a path parameter from",
+            (_, "DELETE") => "would delete the rows it is measuring",
+            (_, "HEAD" | "OPTIONS") => "answers no body of its own",
+            (Some(path), "GET") => {
+                reads.push((method, path, String::new()));
+                continue;
+            }
+            (Some(path), _) => match sample_body(given.clone(), r.uses_body, col) {
+                Some(body) => {
+                    writes.push((method, path, body));
                     continue;
                 }
-                None => "no row to take a path parameter from",
-            }
+                None => "no row to build a body from, pass -b",
+            },
         };
-        skipped.push((r.method.name().to_string(), r.pattern.clone(), why));
+        skipped.push((method, r.pattern.clone(), why));
     }
+    let writing = !writes.is_empty();
+    let mut targets = reads;
+    targets.append(&mut writes);
     if targets.is_empty() {
         eprintln!("velo: nothing to bench, every route needs a parameter, a guard or a body");
         exit(1)
@@ -335,12 +376,16 @@ fn bench(args: &[String]) {
     if loaded == 0 {
         println!("note: the store is empty, pass --data to bench against real rows");
     }
+    if writing {
+        println!("note: write routes run last and change the store they write to");
+    }
     let mut rows = Vec::new();
-    for (method, path) in &targets {
+    for (method, path, body) in &targets {
         let r = velo::bench::run(velo::bench::Args {
             port,
             path: path.clone(),
             method: method.clone(),
+            body: body.clone(),
             conns,
             secs,
             headers: headers.clone(),

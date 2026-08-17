@@ -725,6 +725,12 @@ impl Collection {
         }
     }
 
+    pub fn sample_row(&self) -> Option<Value> {
+        let s = self.snap.read().unwrap();
+        let first = s.rows.live().next().cloned();
+        first
+    }
+
     pub fn sample_id(&self) -> Option<String> {
         let s = self.snap.read().unwrap();
         let first = s.rows.live().next().map(|row| row.get("id").as_key());

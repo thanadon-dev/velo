@@ -1,6 +1,6 @@
 # Velo
 
-**v1.42.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.43.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -47,7 +47,7 @@ CLI:
 | `velo run <file> [addr] [--data f.json] [--wal f.log] [--watch]` | start the server; `addr` is `:8080`, `127.0.0.1:8080`, or `unix:/run/velo.sock` |
 | `velo check <file>` | compile only, report errors with the offending line, column, and a caret |
 | `velo routes <file>` | list compiled routes with their kind, status, guard, and source file and line |
-| `velo bench <file> [-c n] [-d secs] [-H hdr] [--data f.json]` | serve the file and load every `GET` route in turn, slowest first; `-H` is repeatable and passes a header to every request |
+| `velo bench <file> [-c n] [-d secs] [-H hdr] [-b body] [--data f.json]` | serve the file and load every route it can drive, slowest first; `-H` is repeatable, `-b` sets the body for write routes |
 | `velo openapi <file>` | print an OpenAPI 3.0 document for the routes |
 | `velo new <file>` | write a starter file |
 | `velo version` | print version |
@@ -388,7 +388,9 @@ A failed `check` always answers `400` with its reason, whatever `else` says, the
 
 ## OpenAPI
 
-`velo bench app.velo --data data.json` compiles the file, serves it on a port of its own and drives every `GET` route in turn. A route with one path parameter is given a real id taken from the collection the route reads, so `GET /users/:id` is benched as `GET /users/7` rather than skipped. A route behind a guard is driven too, and every answer of 400 or above is counted and printed beside the rate, so a guard that refuses every request says so rather than looking like a fast endpoint; `-H "x-key: secret"` passes a header to every request and is repeatable, which is how a guarded route gets benched for real. What is left over is listed with the reason: a route that is not a `GET`, one that needs more than one path parameter, or one whose collection holds no row to take an id from.
+`velo bench app.velo --data data.json` compiles the file, serves it on a port of its own and drives every `GET` route in turn. A route with one path parameter is given a real id taken from the collection the route reads, so `GET /users/:id` is benched as `GET /users/7` rather than skipped. A route behind a guard is driven too, and every answer of 400 or above is counted and printed beside the rate, so a guard that refuses every request says so rather than looking like a fast endpoint; `-H "x-key: secret"` passes a header to every request and is repeatable, which is how a guarded route gets benched for real. A `POST`, `PUT` or `PATCH` is driven too, with a body taken from a real row of the collection it writes to, minus the `id`. A body that came out of the store has the shape the route expects, so a guard like `when body.name` passes rather than turning the measurement into a benchmark of the 400 path; `-b '{"name":"x"}'` sets one explicitly when that is not what you want. Write routes run after every read, because a route that inserts forty thousand rows a second changes what every later measurement means, and a line says so. Each write route still runs against the store the one before it left. `DELETE` is skipped, since a benchmark that deletes the rows it is measuring measures the empty case; so is `HEAD` and `OPTIONS`. Nothing is written back to `--data`, which is loaded and never saved.
+
+What is left over is listed with the reason: a route that needs more than one path parameter, one whose collection holds no row to take an id from, and one whose body cannot be built without `-b`.
 
 `velo openapi app.velo` prints an OpenAPI 3.0 document built from the compiled routes: paths with `{param}` placeholders, path/query/header parameters taken from what each route actually reads, request bodies for routes that use `body`, and the status codes each route can answer including guard failures.
 
@@ -823,6 +825,8 @@ The write path is bounded by the allocator rather than by anything velo does. An
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.43.0** — `velo bench` drives writes, which are the half of an API that is slower and was never measured. A `POST`, `PUT` or `PATCH` gets a body taken from a real row of the collection it writes to, minus the `id`, so a guard like `when body.name` passes and the number describes the write rather than the 400 path; `-b` sets one explicitly. On a 500-row store the file in the test reads `POST /users` at 37 061 and `PUT /users/1` at 36 064 against `GET /users/1` at 57 255, which is the shape worth knowing and was invisible before. Write routes run after every read, because a route inserting forty thousand rows a second changes what every later measurement means, and a line says so rather than leaving it to be discovered. `DELETE` is skipped with a reason, since a benchmark that deletes the rows it measures measures the empty case, and an earlier release of this project learned that the hard way when a `POST` benchmark left 170 000 rows behind and quietly invalidated everything measured after it.
 
 **v1.42.0** — `velo bench` covers the routes a real API is made of. It drove `GET` routes with no path parameter and no guard, which in any file worth benchmarking is the smallest part of it: the file in its own test had six routes and three of them were skipped. A route with one path parameter now takes a real id from the collection its expression reads, so `GET /users/:id` is benched as `GET /users/7`. A guarded route is driven rather than skipped, and answers of 400 and above are counted and printed beside the rate, so a guard refusing every request reads as `54642 refused` instead of a suspiciously fast endpoint. `-H` passes a header to every request, repeatable, on both `velo bench` and `velobench`, which is how a guarded route is benched for real: the same `/admin` route reads 54 575 req/s all refused without the header and 44 854 req/s with it, and the difference is the work the route actually does.
 
