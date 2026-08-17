@@ -494,3 +494,91 @@ impl<'a> P<'a> {
         s.parse::<f64>().map(Value::Num).map_err(|_| JsonError)
     }
 }
+
+pub struct Keep {
+    name: Arc<str>,
+    children: Option<Vec<Keep>>,
+}
+
+pub fn keep_plan(names: &[Arc<str>]) -> Vec<Keep> {
+    let mut plan = Vec::with_capacity(names.len());
+    for name in names {
+        if name.contains('.') {
+            add_path(&mut plan, name);
+            continue;
+        }
+        match plan.iter().position(|k: &Keep| k.name == *name) {
+            Some(at) => plan[at].children = None,
+            None => plan.push(Keep { name: name.clone(), children: None }),
+        }
+    }
+    plan
+}
+
+pub fn any_nested(names: &[Arc<str>]) -> bool {
+    names.iter().any(|n| n.contains('.'))
+}
+
+fn add_path(into: &mut Vec<Keep>, path: &str) {
+    match path.split_once('.') {
+        None => {
+            let at = slot(into, path, true);
+            into[at].children = None;
+        }
+        Some((head, rest)) => {
+            let at = slot(into, head, false);
+            if let Some(kids) = into[at].children.as_mut() {
+                add_path(kids, rest);
+            }
+        }
+    }
+}
+
+fn slot(into: &mut Vec<Keep>, name: &str, leaf: bool) -> usize {
+    if let Some(at) = into.iter().position(|k| &*k.name == name) {
+        return at;
+    }
+    let children = if leaf { None } else { Some(Vec::new()) };
+    into.push(Keep { name: intern(name), children });
+    into.len() - 1
+}
+
+pub fn keep_selected(v: &Value, plan: &[Keep]) -> Value {
+    match v {
+        Value::Arr(items) => {
+            Value::Arr(Arc::new(items.iter().map(|i| keep_object_planned(i, plan)).collect()))
+        }
+        other => keep_object_planned(other, plan),
+    }
+}
+
+pub fn keep_planned(v: &Value, plan: &[Keep]) -> Value {
+    match v {
+        Value::Arr(items) => {
+            Value::Arr(Arc::new(items.iter().map(|i| keep_planned(i, plan)).collect()))
+        }
+        other => keep_object_planned(other, plan),
+    }
+}
+
+pub fn keep_object_planned(v: &Value, plan: &[Keep]) -> Value {
+    match v {
+        Value::Obj(_) | Value::Row(_, _) => {
+            let mut kept: Obj = Vec::with_capacity(plan.len());
+            for keep in plan {
+                let Some(found) = v.get_ref(&keep.name) else { continue };
+                match &keep.children {
+                    None => kept.push((keep.name.clone(), found.clone())),
+                    Some(kids) => {
+                        let narrowed = keep_planned(found, kids);
+                        if !matches!(narrowed, Value::Null) {
+                            kept.push((keep.name.clone(), narrowed));
+                        }
+                    }
+                }
+            }
+            Value::obj(kept)
+        }
+        _ => Value::Null,
+    }
+}

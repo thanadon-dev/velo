@@ -31,6 +31,16 @@ GET  /echo/:a/x/:b    => { a: a, b: b }
 POST /name            => body.name
 GET  /list            => [1, 2, "three", true, null]
 GET  /search          => db.users.where("name", query.name)
+GET  /card/:id        => db.nested.find(id).select("id", "profile.name", "profile.city")
+GET  /whole/:id       => db.nested.find(id).select("id", "profile")
+GET  /both/:id        => db.nested.find(id).select("id", "profile", "profile.name")
+GET  /deep/:id        => db.nested.find(id).select("profile.address.city")
+GET  /cards           => db.nested.select("id", "profile.name")
+GET  /chaincards      => db.nested.where("team", query.team).select("id", "profile.name")
+GET  /gone/:id        => db.nested.find(id).select("id", "nope.deep")
+GET  /wrong/:id       => db.nested.find(id).select("id", "team.name")
+GET  /items/:id       => db.nested.find(id).select("orders.item")
+POST /nested          => db.nested.create(body)
 GET  /grp             => db.users.group("team").count()
 GET  /grpname         => db.users.group("name").count()
 GET  /grpsum          => db.users.group("team").sum("score")
@@ -292,6 +302,45 @@ fn ids_of(body: &str) -> Vec<String> {
     let v = parse_json(body.as_bytes()).unwrap();
     let Value::Arr(rows) = v else { panic!("not a list: {body}") };
     rows.iter().map(|r| r.get("id").as_key()).collect()
+}
+
+const NESTED: &str = r#"{"id":"a","team":"t","profile":{"name":"mark","city":"bkk","secret":"no",
+  "address":{"city":"bkk","street":"hidden"}},"orders":[{"item":"x","cost":9},{"item":"y","cost":3}]}"#;
+
+#[test]
+fn select_reaches_into_a_nested_object() {
+    let s = server();
+    call(&s, "POST", "/nested", NESTED);
+    assert_eq!(
+        call(&s, "GET", "/card/a", "").1,
+        r#"{"id":"a","profile":{"name":"mark","city":"bkk"}}"#
+    );
+    let whole = call(&s, "GET", "/whole/a", "").1;
+    assert!(whole.contains(r#""secret":"no""#), "naming the parent keeps all of it: {whole}");
+    assert_eq!(call(&s, "GET", "/both/a", "").1, whole, "the parent wins over one of its leaves");
+    assert_eq!(call(&s, "GET", "/deep/a", "").1, r#"{"profile":{"address":{"city":"bkk"}}}"#);
+    assert_eq!(call(&s, "GET", "/gone/a", "").1, r#"{"id":"a"}"#);
+    assert_eq!(
+        call(&s, "GET", "/wrong/a", "").1,
+        r#"{"id":"a"}"#,
+        "a leaf of something that is not an object is absent, not null"
+    );
+    assert_eq!(call(&s, "GET", "/items/a", "").1, r#"{"orders":[{"item":"x"},{"item":"y"}]}"#);
+}
+
+#[test]
+fn a_nested_select_reads_the_same_through_a_list_as_through_one_row() {
+    let s = server();
+    call(&s, "POST", "/nested", NESTED);
+    let one = call(&s, "GET", "/card/a", "").1;
+    assert!(one.contains(r#""name":"mark""#), "{one}");
+    let listed = call(&s, "GET", "/cards", "").1;
+    let chained = call(&s, "GET", "/chaincards?team=t", "").1;
+    assert_eq!(listed, r#"[{"id":"a","profile":{"name":"mark"}}]"#);
+    assert_eq!(chained, listed, "a chain must project the same way a bare list does");
+    assert!(!listed.contains("secret"), "a nested select must not carry the rest: {listed}");
+    assert!(!chained.contains("secret"), "{chained}");
+    assert!(!listed.contains("address"), "{listed}");
 }
 
 #[test]

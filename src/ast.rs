@@ -509,25 +509,7 @@ fn project(row: Value, fields: &[Expr], c: &Ctx) -> Result<Value, Err_> {
 }
 
 fn keep_fields(v: Value, names: &[Arc<str>]) -> Value {
-    match &v {
-        Value::Arr(items) => {
-            Value::Arr(Arc::new(items.iter().map(|i| keep_object(i, names)).collect()))
-        }
-        _ => keep_object(&v, names),
-    }
-}
-
-fn keep_object(v: &Value, names: &[Arc<str>]) -> Value {
-    if !matches!(v, Value::Obj(_) | Value::Row(_, _)) {
-        return Value::Null;
-    }
-    let mut kept: crate::value::Obj = Vec::with_capacity(names.len());
-    for name in names {
-        if let Some(found) = v.get_ref(name) {
-            kept.push((name.clone(), found.clone()));
-        }
-    }
-    Value::obj(kept)
+    crate::value::keep_selected(&v, &crate::value::keep_plan(names))
 }
 
 pub fn truthy(v: &Value) -> bool {

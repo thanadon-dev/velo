@@ -1343,6 +1343,19 @@ fn apply_stages(cur: &mut Vec<&Value>, stages: &[Stage]) {
 }
 
 fn selected_json(rows: &[&Value], fields: &[Arc<str>]) -> Arc<Vec<u8>> {
+    if crate::value::any_nested(fields) {
+        let plan = crate::value::keep_plan(fields);
+        let mut out = Vec::with_capacity(rows.len() * (fields.len() * 16 + 4) + 2);
+        out.push(b'[');
+        for (i, row) in rows.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            crate::value::keep_object_planned(row, &plan).write_json(&mut out);
+        }
+        out.push(b']');
+        return Arc::new(out);
+    }
     let mut out = Vec::with_capacity(rows.len() * (fields.len() * 16 + 4) + 2);
     out.push(b'[');
     for (i, row) in rows.iter().enumerate() {
