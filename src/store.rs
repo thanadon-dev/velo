@@ -685,7 +685,7 @@ impl Collection {
     pub fn upsert(&self, id: &str, value: Value, unique: &[&str]) -> Option<Value> {
         let mut s = self.snap.write().unwrap();
         if let Some(&i) = s.by_id.get(id) {
-            return self.merge_locked(&mut s, i, &value, unique);
+            return self.merge_locked(&mut s, id, i, &value, unique);
         }
         let keyed = match &value {
             Value::Obj(o) | Value::Row(o, _) => {
@@ -732,12 +732,13 @@ impl Collection {
     pub fn update(&self, id: &str, patch: Value, unique: &[&str]) -> Option<Value> {
         let mut s = self.snap.write().unwrap();
         let i = *s.by_id.get(id)?;
-        self.merge_locked(&mut s, i, &patch, unique)
+        self.merge_locked(&mut s, id, i, &patch, unique)
     }
 
     fn merge_locked(
         &self,
         s: &mut Snapshot,
+        id: &str,
         i: usize,
         patch: &Value,
         unique: &[&str],
@@ -749,7 +750,7 @@ impl Collection {
         s.rows.set(i, merged.clone());
         s.invalidate();
         if let Some(wal) = self.log() {
-            wal.put(&self.name, &merged);
+            wal.merge(&self.name, id, patch);
         }
         self.bump();
         self.touch();
@@ -777,7 +778,7 @@ impl Collection {
         s.rows.set(i, merged.clone());
         s.invalidate();
         if let Some(wal) = self.log() {
-            wal.put(&self.name, &merged);
+            wal.merge(&self.name, id, &patch);
         }
         self.bump();
         self.touch();
@@ -894,6 +895,9 @@ impl Store {
                     if !id.is_empty() {
                         self.collection(&coll).put(&id, row);
                     }
+                }
+                crate::wal::Entry::Merge(coll, id, patch) => {
+                    self.collection(&coll).upsert(&id, patch, &[]);
                 }
                 crate::wal::Entry::Delete(coll, id) => {
                     self.collection(&coll).delete(&id);

@@ -38,6 +38,18 @@ impl Wal {
         self.append(line);
     }
 
+    pub fn merge(&self, coll: &str, id: &str, patch: &Value) {
+        let mut line = Vec::with_capacity(96);
+        line.extend_from_slice(b"{\"c\":");
+        crate::value::write_string(&mut line, coll);
+        line.extend_from_slice(b",\"u\":");
+        crate::value::write_string(&mut line, id);
+        line.extend_from_slice(b",\"f\":");
+        patch.write_json(&mut line);
+        line.extend_from_slice(b"}\n");
+        self.append(line);
+    }
+
     pub fn delete(&self, coll: &str, id: &str) {
         let mut line = Vec::with_capacity(64);
         line.extend_from_slice(b"{\"c\":");
@@ -124,6 +136,7 @@ fn tail_from(path: &Path, from: u64, end: u64) -> std::io::Result<Vec<u8>> {
 
 pub enum Entry {
     Put(String, Value),
+    Merge(String, String, Value),
     Delete(String, String),
     DeleteWhere(String, String, Cmp, String),
     Clear(String),
@@ -145,19 +158,37 @@ pub fn read(path: &Path) -> Result<Vec<Entry>, String> {
         if coll.is_empty() {
             break;
         }
-        match (entry.get("p"), entry.get("d"), entry.get("x")) {
-            (Value::Null, Value::Null, Value::Bool(true)) => out.push(Entry::Clear(coll)),
-            (Value::Null, Value::Null, _) => {
-                let field = entry.get("w").as_key();
-                let Some(op) = Cmp::parse(&entry.get("o").as_key()) else { break };
-                if field.is_empty() {
-                    break;
-                }
-                out.push(Entry::DeleteWhere(coll, field, op, entry.get("v").as_key()));
+        match entry.get("p") {
+            Value::Null => {}
+            row => {
+                out.push(Entry::Put(coll, row));
+                continue;
             }
-            (Value::Null, id, _) => out.push(Entry::Delete(coll, id.as_key())),
-            (row, _, _) => out.push(Entry::Put(coll, row)),
         }
+        match entry.get("u") {
+            Value::Null => {}
+            id => {
+                out.push(Entry::Merge(coll, id.as_key(), entry.get("f")));
+                continue;
+            }
+        }
+        match entry.get("d") {
+            Value::Null => {}
+            id => {
+                out.push(Entry::Delete(coll, id.as_key()));
+                continue;
+            }
+        }
+        if matches!(entry.get("x"), Value::Bool(true)) {
+            out.push(Entry::Clear(coll));
+            continue;
+        }
+        let field = entry.get("w").as_key();
+        let Some(op) = Cmp::parse(&entry.get("o").as_key()) else { break };
+        if field.is_empty() {
+            break;
+        }
+        out.push(Entry::DeleteWhere(coll, field, op, entry.get("v").as_key()));
     }
     Ok(out)
 }
@@ -209,16 +240,19 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let wal = Wal::open(&path).unwrap();
         wal.put("users", &row("a"));
+        wal.merge("users", "a", &row("a"));
         wal.delete("users", "b");
         wal.delete_where("users", "team", Cmp::Ne, "blue");
         wal.clear("sessions");
         let entries = read(&path).unwrap();
-        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.len(), 5);
         assert!(matches!(&entries[0], Entry::Put(c, _) if c == "users"));
-        assert!(matches!(&entries[1], Entry::Delete(_, id) if id == "b"));
-        assert!(matches!(&entries[2], Entry::DeleteWhere(_, f, op, v)
+        assert!(matches!(&entries[1], Entry::Merge(c, id, patch)
+                if c == "users" && id == "a" && patch.get("id").as_key() == "a"));
+        assert!(matches!(&entries[2], Entry::Delete(_, id) if id == "b"));
+        assert!(matches!(&entries[3], Entry::DeleteWhere(_, f, op, v)
                 if f == "team" && *op == Cmp::Ne && v == "blue"));
-        assert!(matches!(&entries[3], Entry::Clear(c) if c == "sessions"));
+        assert!(matches!(&entries[4], Entry::Clear(c) if c == "sessions"));
         let _ = std::fs::remove_file(&path);
     }
 

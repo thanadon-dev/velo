@@ -1,6 +1,6 @@
 # Velo
 
-**v1.35.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.36.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -432,7 +432,7 @@ A snapshot on its own means a hard kill costs whatever was written since the las
 velo run app.velo :8080 --data data.json --wal data.log
 ```
 
-`kill -9` then loses nothing. A test does exactly that: writes rows, creates, updates, increments and deletes, kills the process with `SIGKILL` before any snapshot exists, starts it again and compares. Replay is ordered and idempotent, so a log that overlaps the snapshot it sits beside costs time and nothing else, and a half-written last line, which is what a crash mid-append leaves, is dropped while everything before it is kept. Each successful snapshot trims the log to the writes that arrived after the snapshot began, so it does not grow without end; the mark is taken before the save and the log is appended to after the row is in memory, which is what makes trimming safe.
+`kill -9` then loses nothing. A write of a whole row logs the row; `update`, `upsert` and `incr` log only the fields they changed, which is what keeps the log small when a route touches one field of a wide row: incrementing a counter in a 519-byte row costs 38 bytes in the log rather than 499. Replaying a change merges it, the same way the write did. A test does exactly that: writes rows, creates, updates, increments and deletes, kills the process with `SIGKILL` before any snapshot exists, starts it again and compares. Every entry holds the value a field ended up with rather than how it got there, so replay is ordered and idempotent, and a log that overlaps the snapshot it sits beside costs time and nothing else, and a half-written last line, which is what a crash mid-append leaves, is dropped while everything before it is kept. Each successful snapshot trims the log to the writes that arrived after the snapshot began, so it does not grow without end; the mark is taken before the save and the log is appended to after the row is in memory, which is what makes trimming safe.
 
 | | writes per second |
 | --- | --- |
@@ -800,6 +800,8 @@ The write path is bounded by the allocator rather than by anything velo does. An
 Requirements: Linux 4.5 or newer (the workers share the listener with `EPOLLEXCLUSIVE`), Rust 1.75 or newer, no crates.
 
 ## Changelog
+
+**v1.36.0** — the log records what changed rather than the whole row. 1.35.0 wrote the row after every write, so incrementing one counter in a 519-byte row cost 499 bytes of log; measured at 30 000 increments in two seconds, that is 15 MB of log for 2 seconds of traffic. `update`, `upsert` and `incr` now log only the fields they touched: 38 bytes for the same increment, thirteen times smaller, and a replay merges them the same way the write did. It matters most where it hurt most, since the gap between snapshots widens with the dataset and the log has to hold everything inside it. Throughput on that workload is now inside run-to-run noise against no log at all, which is worth saying plainly: three interleaved rounds gave 12.4, 14.7 and 14.9 thousand writes a second without the log against 13.2, 13.3 and 17.8 with it, so the honest claim is that the cost is no longer measurable there rather than that it is zero. Every entry still holds the value a field ended up with rather than how it got there, so replaying twice changes nothing; a test that replays a change as a replacement instead of a merge now fails.
 
 **v1.35.0** — `--wal file.log` makes a hard kill lose nothing. A snapshot alone leaves a window that widens as the dataset grows, since `VELO_SAVE_DUTY` spaces saves out as they get slower, and a `kill -9` costs everything written inside it. Every write now appends one line to a log before the response goes out, and a server started with the same log replays it over the snapshot before it accepts a connection. A test writes, updates, increments and deletes, kills the process with `SIGKILL` before any snapshot exists, starts it again and compares; removing the append fails it. The log costs 7 per cent of write throughput, 40 219 to 37 404 writes a second, because the write goes into the operating system's buffer rather than to the platter: that survives velo dying, not the machine. `VELO_WAL_SYNC=1` fsyncs each write and survives that too, at 1 851 a second, which is the disk speaking. Each snapshot trims the log to the writes that arrived after the save began, so it cannot grow without end, and the ordering that makes trimming safe, mark before the save and append after the row is in memory, is now tested on its own after an end-to-end test proved unable to force the race. A crash mid-append leaves a half-written last line, which replay drops while keeping everything before it.
 
