@@ -66,6 +66,16 @@ fn post(port: u16, path: &str, body: &str) -> String {
     )
 }
 
+fn patch(port: u16, path: &str, body: &str) -> String {
+    request(
+        port,
+        &format!(
+            "PATCH {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+}
+
 fn stop(child: &mut Child, signal: &str) {
     let _ = Command::new("kill").arg(signal).arg(child.id().to_string()).status();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -824,6 +834,7 @@ fn a_wal_survives_a_kill_that_the_snapshot_does_not() {
         &app,
         "POST /users => db.users.create(body)\n\
          GET /users => db.users.all()\n\
+         PATCH /users/:id => db.users.update(id, body) : 200\n\
          PUT /users/:id => db.users.upsert(id, body)\n\
          POST /bump/:id => db.users.incr(id, \"n\") : 200\n\
          DELETE /users/:id => db.users.delete(id) : 204\n\
@@ -851,15 +862,23 @@ fn a_wal_survives_a_kill_that_the_snapshot_does_not() {
     post(port, "/users", r#"{"id":"c","name":"c"}"#);
     request(
         port,
-        "PUT /users/a HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"name\":\"A\"}",
+        &format!(
+            "PUT /users/a HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            r#"{"name":"A"}"#.len(),
+            r#"{"name":"A"}"#
+        ),
     );
     post(port, "/bump/a", "");
     post(port, "/bump/a", "");
+    post(port, "/users", r#"{"id":"n","profile":{"city":"bkk","font":"sans"}}"#);
+    patch(port, "/users/n", r#"{"profile":{"city":"cnx"}}"#);
     request(port, "DELETE /users/c HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     request(port, "DELETE /old HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     let before = get(port, "/users");
     let before = before.split("\r\n\r\n").nth(1).unwrap().to_string();
     assert!(before.contains(r#""n":2"#), "{before}");
+    assert!(before.contains(r#""font":"sans""#), "a deep patch kept the sibling: {before}");
+    assert!(before.contains(r#""city":"cnx""#), "{before}");
 
     let _ = Command::new("kill").arg("-9").arg(child.id().to_string()).status();
     let _ = child.wait();

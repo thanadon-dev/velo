@@ -1604,11 +1604,23 @@ fn merge(base: &Value, patch: &Value) -> Value {
             continue;
         }
         match out.iter_mut().find(|(ek, _)| ek == k) {
-            Some(slot) => slot.1 = v.clone(),
+            Some(slot) => slot.1 = deep(&slot.1, v),
             None => out.push((k.clone(), v.clone())),
         }
     }
     Value::row(out)
+}
+
+fn deep(base: &Value, patch: &Value) -> Value {
+    let (Some(b), Some(p)) = (obj_of(base), obj_of(patch)) else { return patch.clone() };
+    let mut out: Obj = b.as_ref().clone();
+    for (k, v) in p.iter() {
+        match out.iter_mut().find(|(ek, _)| ek == k) {
+            Some(slot) => slot.1 = deep(&slot.1, v),
+            None => out.push((k.clone(), v.clone())),
+        }
+    }
+    Value::obj(out)
 }
 
 fn obj_of(v: &Value) -> Option<&Arc<Obj>> {

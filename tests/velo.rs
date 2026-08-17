@@ -41,6 +41,9 @@ GET  /gone/:id        => db.nested.find(id).select("id", "nope.deep")
 GET  /wrong/:id       => db.nested.find(id).select("id", "team.name")
 GET  /items/:id       => db.nested.find(id).select("orders.item")
 POST /nested          => db.nested.create(body)
+PATCH /nested/:id     => db.nested.update(id, body) : 200
+PUT  /nested/:id      => db.nested.upsert(id, body) : 200
+GET  /nested/:id      => db.nested.find(id)
 GET  /pby             => db.nested.where("profile.city", query.c).select("id")
 GET  /pdeep           => db.nested.where("profile.address.city", query.c).select("id")
 GET  /pcmp            => db.nested.where("profile.age", ">", query.min).select("id")
@@ -322,6 +325,46 @@ fn nested_row(id: &str, name: &str, city: &str, age: u32) -> String {
         r#"{{"id":"{id}","profile":{{"name":"{name}","city":"{city}","age":{age},
            "address":{{"city":"{city}"}}}}}}"#
     )
+}
+
+#[test]
+fn a_patch_reaches_into_a_nested_object_without_flattening_it() {
+    let s = server();
+    call(
+        &s,
+        "POST",
+        "/nested",
+        r#"{"id":"a","name":"mark","profile":{"name":"m","city":"bkk",
+           "prefs":{"theme":"light","font":"sans"}},"tags":["x","y"]}"#,
+    );
+    call(&s, "PATCH", "/nested/a", r#"{"profile":{"city":"cnx"}}"#);
+    let row = call(&s, "GET", "/nested/a", "").1;
+    assert!(row.contains(r#""city":"cnx""#), "{row}");
+    assert!(row.contains(r#""name":"m""#), "a sibling must survive the patch: {row}");
+    assert!(row.contains(r#""font":"sans""#), "so must a deeper one: {row}");
+
+    call(&s, "PATCH", "/nested/a", r#"{"profile":{"prefs":{"theme":"dark"}}}"#);
+    let row = call(&s, "GET", "/nested/a", "").1;
+    assert!(row.contains(r#""theme":"dark""#), "{row}");
+    assert!(row.contains(r#""font":"sans""#), "merging goes all the way down: {row}");
+
+    call(&s, "PATCH", "/nested/a", r#"{"tags":["z"]}"#);
+    let row = call(&s, "GET", "/nested/a", "").1;
+    assert!(row.contains(r#""tags":["z"]"#), "a list is replaced, not merged: {row}");
+
+    call(&s, "PUT", "/nested/a", r#"{"profile":{"city":"hkt"}}"#);
+    let row = call(&s, "GET", "/nested/a", "").1;
+    assert!(row.contains(r#""city":"hkt""#) && row.contains(r#""font":"sans""#), "{row}");
+
+    call(&s, "PATCH", "/nested/a", r#"{"profile":"flat"}"#);
+    let row = call(&s, "GET", "/nested/a", "").1;
+    assert_eq!(row, r#"{"id":"a","name":"mark","profile":"flat","tags":["z"]}"#);
+    call(&s, "PATCH", "/nested/a", r#"{"profile":{"city":"bkk"}}"#);
+    let row = call(&s, "GET", "/nested/a", "").1;
+    assert_eq!(
+        row, r#"{"id":"a","name":"mark","profile":{"city":"bkk"},"tags":["z"]}"#,
+        "writing a plain value over an object is how a nested object is replaced"
+    );
 }
 
 #[test]
