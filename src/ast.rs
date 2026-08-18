@@ -701,6 +701,10 @@ fn text_of(v: &Value, f: impl FnOnce(&str) -> String) -> Value {
     }
 }
 
+pub fn uuid() -> String {
+    uuid_v4()
+}
+
 fn uuid_v4() -> String {
     let mut b = [0u8; 16];
     fill_random(&mut b);

@@ -68,6 +68,7 @@ pub struct Server {
     pub etag: bool,
     pub rate: u32,
     pub real_ip_header: Option<String>,
+    pub uploads: Option<std::path::PathBuf>,
     limiter: Vec<Mutex<RateShard>>,
     per_route: Vec<RouteStat>,
     started: Instant,
@@ -112,6 +113,10 @@ impl Server {
             log: std::env::var("VELO_LOG").map(|v| v != "0").unwrap_or(false),
             log_json: std::env::var("VELO_LOG").map(|v| v == "json").unwrap_or(false),
             metrics_path: std::env::var("VELO_METRICS").ok().filter(|v| v.starts_with('/')),
+            uploads: std::env::var("VELO_UPLOAD_DIR")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(Into::into),
             etag: std::env::var("VELO_ETAG").map(|v| v != "0").unwrap_or(false),
             rate: env_usize("VELO_RATE", 0) as u32,
             real_ip_header: std::env::var("VELO_REAL_IP_HEADER")
@@ -219,11 +224,20 @@ impl Server {
             ctx.header = parse_headers(raw_headers);
         }
         if rt.uses_body && !raw_body.is_empty() {
-            match crate::value::parse_json(raw_body) {
-                Ok(v) => ctx.body = v,
-                Err(_) => match form_body(raw_body) {
-                    Some(v) => ctx.body = v,
-                    None => return self.fail(Some(idx), crate::parser::BAD_BODY, out),
+            let form = header_value(raw_headers, "content_type");
+            match crate::multipart::boundary_of(&form.as_key_ref()) {
+                Some(edge) => {
+                    match crate::multipart::parse(raw_body, &edge, self.uploads.as_deref()) {
+                        Ok(v) => ctx.body = v,
+                        Err(why) => return self.fail(Some(idx), refused_upload(why), out),
+                    }
+                }
+                None => match crate::value::parse_json(raw_body) {
+                    Ok(v) => ctx.body = v,
+                    Err(_) => match form_body(raw_body) {
+                        Some(v) => ctx.body = v,
+                        None => return self.fail(Some(idx), crate::parser::BAD_BODY, out),
+                    },
                 },
             }
         }
@@ -421,6 +435,16 @@ impl Server {
         }
         crate::hook::drain(std::time::Duration::from_millis(self.drain_ms));
         res
+    }
+}
+
+fn refused_upload(why: crate::multipart::Refused) -> Err_ {
+    match why {
+        crate::multipart::Refused::Malformed => Err_ { status: 400, msg: "invalid body" },
+        crate::multipart::Refused::NotText => {
+            Err_ { status: 400, msg: "a field that is not a file must be text" }
+        }
+        crate::multipart::Refused::NoStore => Err_ { status: 501, msg: "uploads are not enabled" },
     }
 }
 

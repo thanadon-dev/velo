@@ -9,6 +9,7 @@ pub(crate) mod epoll;
 pub(crate) mod hook;
 pub mod http;
 pub(crate) mod lexer;
+pub(crate) mod multipart;
 pub mod openapi;
 pub mod parser;
 pub mod router;

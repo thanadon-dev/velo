@@ -1452,3 +1452,172 @@ fn a_block_that_fails_writes_nothing_to_the_log_and_one_that_succeeds_survives_a
         let _ = std::fs::remove_file(f);
     }
 }
+
+#[test]
+fn a_form_upload_lands_on_disk_under_a_name_the_client_did_not_choose() {
+    let app = tmp("upload.velo");
+    let dir = tmp("uploads");
+    let _ = std::fs::remove_dir_all(&dir);
+    write(
+        &app,
+        "POST /profile => db.people.create({ id: body.email, file: body.photo.file, kind: body.photo.type, bytes: body.photo.size, gave: body.photo.name })\n\
+         POST /plain   => body\n\
+         GET  /people  => db.people.all()\n",
+    );
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .env("VELO_UPLOAD_DIR", &dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let form = |parts: &[(&str, Option<&str>, &str)]| -> String {
+        let mut body = Vec::new();
+        for (name, filename, content) in parts {
+            body.extend_from_slice(b"--EDGE\r\nContent-Disposition: form-data; name=\"");
+            body.extend_from_slice(name.as_bytes());
+            body.push(b'"');
+            if let Some(f) = filename {
+                body.extend_from_slice(
+                    format!("; filename=\"{f}\"\r\nContent-Type: image/png").as_bytes(),
+                );
+            }
+            body.extend_from_slice(b"\r\n\r\n");
+            body.extend_from_slice(content.as_bytes());
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(b"--EDGE--\r\n");
+        let body = String::from_utf8(body).unwrap();
+        request(
+            port,
+            &format!(
+                "POST /profile HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=EDGE\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    };
+
+    let saved = form(&[("email", None, "a@b.c"), ("photo", Some("kitten.PNG"), "PNGDATA")]);
+    assert!(saved.contains(r#""gave":"kitten.PNG""#), "{saved}");
+    assert!(saved.contains(r#""kind":"image/png""#), "{saved}");
+    assert!(saved.contains(r#""bytes":7"#), "{saved}");
+
+    let on_disk: Vec<_> =
+        std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(on_disk.len(), 1, "{on_disk:?}");
+    let leaf = on_disk[0].to_string_lossy().into_owned();
+    assert!(leaf.ends_with(".png") && leaf.len() == 40, "{leaf}");
+    assert!(saved.contains(&format!(r#""file":"{leaf}""#)), "{saved}");
+    assert_eq!(std::fs::read_to_string(dir.join(&leaf)).unwrap(), "PNGDATA");
+
+    let escaped = form(&[("email", None, "b@b.c"), ("photo", Some("../../owned.sh"), "x")]);
+    assert!(escaped.contains("201"), "{escaped}");
+    let after: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(after.len(), 2, "{after:?}");
+    assert!(after.iter().all(|n| !n.to_string_lossy().contains("owned")), "{after:?}");
+    assert!(!dir.parent().unwrap().join("owned.sh").exists());
+
+    assert!(post(port, "/plain", r#"{"j":1}"#).ends_with(r#"{"j":1}"#));
+    stop(&mut child, "-TERM");
+
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let refused = form(&[("photo", Some("a.png"), "x")]);
+    assert!(refused.contains("501") && refused.contains("uploads are not enabled"), "{refused}");
+    stop(&mut child, "-TERM");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&app);
+}
+
+#[test]
+fn migrate_changes_every_row_and_refuses_a_file_a_server_is_holding() {
+    let app = tmp("mig.velo");
+    let data = tmp("mig.json");
+    let _ = std::fs::remove_file(&data);
+    write(&app, "GET /users => db.users.all()\nPOST /users => db.users.create(body)\n");
+    std::fs::write(
+        &data,
+        r#"{"users":{"next_id":3,"rows":[{"id":"1","name":"mark","secret":"x"},{"id":"2","name":"lek","secret":"y","team":null},{"id":"3","name":"noi","team":"red"}]}}"#,
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| -> (i32, String) {
+        let out = Command::new(BIN).arg("migrate").arg(&data).args(args).output().unwrap();
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        (out.status.code().unwrap_or(-1), text)
+    };
+    let rows = || std::fs::read_to_string(&data).unwrap();
+
+    let (code, said) = run(&["users", "rename", "name", "full_name"]);
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("touches 3 of 3 rows"), "{said}");
+    assert!(
+        rows().contains(r#""full_name":"mark""#) && !rows().contains(r#""name":"#),
+        "{}",
+        rows()
+    );
+
+    let (_, said) = run(&["users", "default", "team", "blue"]);
+    assert!(said.contains("touches 2 of 3 rows"), "{said}");
+    assert!(
+        rows().contains(r#""team":"red""#) && rows().matches(r#""team":"blue""#).count() == 2,
+        "{}",
+        rows()
+    );
+
+    run(&["users", "drop", "secret"]);
+    assert!(!rows().contains("secret"), "{}", rows());
+    run(&["users", "set", "score", "0"]);
+    assert_eq!(rows().matches(r#""score":0"#).count(), 3, "{}", rows());
+
+    let before = rows();
+    let (code, said) = run(&["users", "set", "score", "99", "--dry"]);
+    assert_eq!((code, rows()), (0, before), "{said}");
+    assert!(said.contains("nothing written"), "{said}");
+
+    for (args, code, want) in [
+        (vec!["users", "rename", "id", "oops"], 2, "cannot be renamed"),
+        (vec!["ghosts", "set", "a", "b"], 1, "no collection named ghosts"),
+        (vec!["users", "drop", "a", "b"], 2, "takes no value"),
+        (vec!["users", "set", "a"], 2, "takes a value"),
+    ] {
+        let (got, said) = run(&args);
+        assert_eq!(got, code, "{args:?}: {said}");
+        assert!(said.contains(want), "{args:?}: {said}");
+    }
+
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--data")
+        .arg(&data)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(get(port, "/users").contains("full_name"));
+    let (code, said) = run(&["users", "set", "score", "5"]);
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("held by a running server"), "{said}");
+    stop(&mut child, "-TERM");
+
+    let (code, _) = run(&["users", "set", "score", "5"]);
+    assert_eq!(code, 0);
+    for f in [&app, &data] {
+        let _ = std::fs::remove_file(f);
+    }
+    let _ = std::fs::remove_file(data.with_file_name("mig.json.lock"));
+}

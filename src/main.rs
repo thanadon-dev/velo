@@ -15,6 +15,7 @@ fn main() {
         "bench" => bench(&args),
         "openapi" => openapi(&args),
         "new" => new(&args),
+        "migrate" => migrate(&args),
         "version" | "--version" | "-v" => println!("velo {VERSION}"),
         "help" | "--help" | "-h" | "" => usage(0),
         other => {
@@ -37,6 +38,8 @@ fn usage(code: i32) -> ! {
          \x20                               serve the file and load every plain GET route\n\
          \x20 velo openapi <file.velo>      print an OpenAPI 3 document\n\
          \x20 velo new <file.velo>          write a starter file\n\
+         \x20 velo migrate <file.json> <collection> <rename|set|default|drop> <field> [value] [--dry]\n\
+         \x20                               change every row of a saved collection\n\
          \x20 velo version                  print version"
     );
     exit(code)
@@ -484,5 +487,117 @@ fn routes(args: &[String]) {
             guard,
             origin
         );
+    }
+}
+
+fn migrate(args: &[String]) {
+    let dry = args.iter().any(|a| a == "--dry");
+    let rest: Vec<&String> = args[2..].iter().filter(|a| !a.starts_with("--")).collect();
+    let [path, name, action, field, tail @ ..] = rest.as_slice() else {
+        eprintln!("velo: usage: velo migrate <file.json> <collection> <rename|set|default|drop> <field> [value]");
+        exit(2);
+    };
+    let value = tail.first().map(|v| v.as_str());
+    let needs_value = matches!(action.as_str(), "rename" | "set" | "default");
+    if needs_value == value.is_none() {
+        eprintln!("velo: {action} takes {}", if needs_value { "a value" } else { "no value" });
+        exit(2);
+    }
+    if field.is_empty() || (*field == "id" && action.as_str() != "default") {
+        eprintln!("velo: id is the key of a row and cannot be {action}d");
+        exit(2);
+    }
+    let path = std::path::Path::new(path.as_str());
+    if !path.exists() {
+        eprintln!("velo: {}: no such file", path.display());
+        exit(1);
+    }
+    let mut owned = path.to_path_buf().into_os_string();
+    owned.push(".lock");
+    if velo::wal::Lock::take(std::path::Path::new(&owned)).is_err() {
+        eprintln!("velo: {} is held by a running server, stop it first", path.display());
+        exit(1);
+    }
+    let store = velo::Store::new();
+    if let Err(e) = store.load_file(path) {
+        eprintln!("velo: {}: {e}", path.display());
+        exit(1);
+    }
+    if !store.names().iter().any(|n| n == *name) {
+        eprintln!("velo: {} holds no collection named {name}", path.display());
+        exit(1);
+    }
+    let col = store.collection(name);
+    let rows = col.live_rows();
+    let mut changed = 0;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let (next, hit) = rewrite(row, action, field, value);
+        changed += hit as usize;
+        out.push(next);
+    }
+    println!(
+        "{}: {name}.{field} {action} touches {changed} of {} rows{}",
+        path.display(),
+        rows.len(),
+        if dry { ", nothing written" } else { "" }
+    );
+    if dry {
+        return;
+    }
+    if changed == 0 {
+        return;
+    }
+    col.load(out, col.next_id());
+    if let Err(e) = store.save_to(path) {
+        eprintln!("velo: {}: {e}", path.display());
+        exit(1);
+    }
+}
+
+fn rewrite(
+    row: &velo::Value,
+    action: &str,
+    field: &str,
+    value: Option<&str>,
+) -> (velo::Value, bool) {
+    let literal = || match value.map(str::as_bytes).map(velo::value::parse_json) {
+        Some(Ok(v)) => v,
+        _ => velo::Value::str(value.unwrap_or("")),
+    };
+    let (velo::Value::Obj(fields) | velo::Value::Row(fields, _)) = row else {
+        return (row.clone(), false);
+    };
+    let held = fields.iter().any(|(k, _)| &**k == field);
+    let mut next: Vec<(std::sync::Arc<str>, velo::Value)> = Vec::with_capacity(fields.len() + 1);
+    let mut hit = false;
+    for (k, v) in fields.iter() {
+        match (action, &**k == field) {
+            ("drop", true) => hit = true,
+            ("rename", true) => {
+                hit = true;
+                next.push((velo::value::intern(value.unwrap_or("")), v.clone()));
+            }
+            ("set", true) => {
+                hit = true;
+                next.push((k.clone(), literal()));
+            }
+            ("default", true) => match matches!(v, velo::Value::Null) {
+                true => {
+                    hit = true;
+                    next.push((k.clone(), literal()));
+                }
+                false => next.push((k.clone(), v.clone())),
+            },
+            _ => next.push((k.clone(), v.clone())),
+        }
+    }
+    if !held && matches!(action, "set" | "default") {
+        hit = true;
+        next.push((velo::value::intern(field), literal()));
+    }
+    match hit {
+        true => (velo::Value::row(next), true),
+        false => (row.clone(), false),
     }
 }

@@ -1,6 +1,6 @@
 # Velo
 
-**v1.54.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.55.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -17,7 +17,7 @@ That file is a complete, running API server.
 
 Linux only: the event loop is epoll, and the build stops with a clear message anywhere else.
 
-[Scope](#scope) · [Quick start](#quick-start) · [Language](#language) · [Guards](#guards) · [OpenAPI](#openapi) · [Embedding](#embedding) · [Persistence](#persistence) · [Concurrency](#concurrency) · [Transactions](#transactions) · [Rate limiting](#rate-limiting) · [Webhooks](#webhooks) · [Metrics](#metrics) · [Deployment](#deployment) · [Design](#design) · [Benchmarks](#benchmarks) · [Tests](#tests) · [CI](#ci) · [Layout](#layout) · [Build notes](#build-notes) · [Releases](#releases)
+[Scope](#scope) · [Quick start](#quick-start) · [Language](#language) · [Guards](#guards) · [OpenAPI](#openapi) · [Embedding](#embedding) · [Persistence](#persistence) · [Concurrency](#concurrency) · [Uploads](#uploads) · [Transactions](#transactions) · [Rate limiting](#rate-limiting) · [Webhooks](#webhooks) · [Metrics](#metrics) · [Migrations](#migrations) · [Deployment](#deployment) · [Design](#design) · [Benchmarks](#benchmarks) · [Tests](#tests) · [CI](#ci) · [Layout](#layout) · [Build notes](#build-notes) · [Releases](#releases)
 
 ## Scope
 
@@ -27,7 +27,7 @@ What a whole API needs is in the language rather than around it: CRUD, filters, 
 
 A route can also tell another service what happened, with `post(url, value)`, so a write does not have to end at the edge of this process.
 
-It is deliberately not: a database (the store is memory-bound, single-process, snapshot-persisted), a TLS terminator, an HTTP/2 or WebSocket server, a file-upload endpoint, or a cluster. It has no joins, no transactions across two collections, and no user-defined functions: a request either fits one collection and one expression or belongs somewhere else. Put a proxy in front for TLS, compression, and HTTP/2, and keep the dataset within RAM.
+It is deliberately not: a database (the store is memory-bound, single-process, snapshot-persisted), a TLS terminator, an HTTP/2 or WebSocket server, a file server, or a cluster. It accepts an upload and puts it in a directory; serving that directory back is the proxy's job, the same as TLS. It has no joins, no transactions across two collections, and no user-defined functions: a request either fits one collection and one expression or belongs somewhere else. Put a proxy in front for TLS, compression, and HTTP/2, and keep the dataset within RAM.
 
 Protocol notes: HTTP/1.1 with keep-alive and pipelining; HTTP/1.0 works and closes unless the client asks otherwise; request targets are origin-form (`/path?query`), so proxy-style absolute URLs answer 404; chunked request bodies are refused with 411; methods are case-sensitive, as the spec says.
 
@@ -524,6 +524,35 @@ A route is not a transaction unless it says so. A guard and the write after it a
 
 Reads are snapshots too, so two reads in one route can disagree: `{ n: db.users.count(), rows: db.users.all() }` may report a count that does not match the length of the list if a write lands between them. Collections lock independently outside a block, so there is no atomicity across two of them and no rollback: if the second of two bare writes in a route fails, the first still happened. Inside `do { ... }` every collection named is locked at once and a refused step undoes the ones before it. Rows expire and snapshots are written on their own threads beside live traffic, each taking the same locks as anything else.
 
+## Uploads
+
+A browser form posts `multipart/form-data`, which velo reads like any other body: text parts become fields, so `body.name` works whether the client sent JSON, a URL-encoded form, or a multipart one.
+
+A part with a filename is a file. Point `VELO_UPLOAD_DIR` at a directory and velo writes it there, then hands the route a small object describing it:
+
+```sh
+VELO_UPLOAD_DIR=/srv/uploads velo run app.velo :8080
+```
+
+```velo
+POST /profile => db.people.upsert(body.email, { name: body.name, avatar: body.photo.file, size: body.photo.size })
+```
+
+`body.photo` holds `{name, type, size, file}`: the name the client gave, the content type it declared, the number of bytes, and the name velo actually used. That last one is the only one you should store as a path. The file is named for a fresh `uuid()`, never for anything the client sent, and only a plain lowercase extension of at most eight characters is carried over from the client's filename; anything else, `../../owned.sh` included, is dropped and the file simply has no extension. A test posts exactly that and checks the directory afterwards.
+
+Without `VELO_UPLOAD_DIR`, a file part answers `501 {"error":"uploads are not enabled"}` rather than being quietly dropped, because a route that stores a name for a file that was never written is worse than a refusal. A non-file part that is not valid UTF-8 answers `400`, since a field velo cannot read as text has nowhere to go.
+
+Serving those files back is not velo's job, the same way TLS is not: point the proxy at the directory.
+
+```
+handle /uploads/* {
+    root * /srv
+    file_server
+}
+```
+
+The whole body still has to fit the request size limit, and the write happens on the worker that took the request, so keep the limit to what an upload should be rather than what a disk can hold.
+
 ## Transactions
 
 `do { ... }` makes several writes one step. Either all of them happen or none of them does, whatever collections they touch:
@@ -608,6 +637,21 @@ Set `VELO_METRICS=/_metrics` and that path answers:
 `paths` breaks the same counters down by route, labelled `METHOD /pattern` as written in the source, so a slow or failing endpoint is visible without a tracing stack. A route appears once it has been served, so the list stays as small as the traffic; a request that matched no route counts in the totals but has no route to belong to. `failures` here is any answer of 400 or above from that route, guard rejections included.
 
 `hooks_sent`, `hooks_failed` and `hooks_dropped` join them once a route has called `post()`. `failures` counts responses velo generated itself (404, 405, 400, 401, 409, 413, and store misses), `connections` is the live count across workers. `avg_micros` and `max_micros` measure the time from parsed request to rendered response. Timing costs a clock read per request, so enabling metrics trades about 9% of peak throughput (94.0k to 85.3k req/s on `/health`); everything else, the per-route counters included, is relaxed atomics and does not move the number out of run-to-run noise. Point a monitor at it, or at any route in your API.
+
+## Migrations
+
+The store has no schema, so most changes need nothing: a route that reads a field a row does not have gets `null`. What does need work is a field that changed shape, and `velo migrate` does it to a saved snapshot, offline:
+
+```sh
+velo migrate data.json users rename name full_name
+velo migrate data.json users default team blue
+velo migrate data.json users set score 0
+velo migrate data.json users drop secret
+```
+
+`rename` moves a value and only touches rows that have the field. `default` fills it in where it is missing or `null`, and leaves every other row alone. `set` writes it everywhere. `drop` removes it. A value is read as JSON when it parses as one, so `set score 0` stores a number and `set tag blue` stores text. Each prints how many of how many rows it touched, and `--dry` prints that without writing anything.
+
+It refuses what it should. `id` is the key of a row, so it cannot be renamed, set or dropped. A collection the file does not hold is an error rather than a silent success, because that is what a typo looks like. A file a running server is holding is refused too, through the same `flock` the server takes, so a migration cannot race the snapshot that would overwrite it: stop the server, migrate, start it again. The write is the same atomic `.tmp`-then-rename the server uses.
 
 ## Deployment
 
@@ -858,7 +902,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-226 tests (172 integration + 28 CLI + 8 fuzz + 18 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, a write-ahead log replayed after a SIGKILL, a second server refusing a data file that is taken, built-ins, CORS preflight, field projection and filters into nested objects, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, an outbound hook that the response does not wait for, a hook queue that drops rather than grows when the far end stops answering, hooks still in hand at a `SIGTERM` delivered before exit, intersected filters, list membership through the index, writes made atomic across two collections with a refused step undone and nothing left behind under eight threads, blocks naming the same collections in opposite orders that do not wedge, a block that touches one row twice undone in the order that puts it back, caches and an index warmed over 600 rows that keep nothing a block undid, a refused block that reaches neither the store nor the log, conditional values that fold when constant and run only the side they choose, names bound once and read twice including a generated id two collections must agree on, bindings that stack and that refuse to shadow a path parameter, grouped counts and aggregates, a foreign key followed into another collection on one row and on a filtered page, under an alias, through a path, and with a key that names nothing, writes to either side of a join visible on the next read, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+234 tests (171 integration + 30 CLI + 8 fuzz + 25 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, a write-ahead log replayed after a SIGKILL, a second server refusing a data file that is taken, built-ins, CORS preflight, field projection and filters into nested objects, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, an outbound hook that the response does not wait for, a hook queue that drops rather than grows when the far end stops answering, hooks still in hand at a `SIGTERM` delivered before exit, intersected filters, list membership through the index, writes made atomic across two collections with a refused step undone and nothing left behind under eight threads, blocks naming the same collections in opposite orders that do not wedge, a multipart upload written under a name the client did not choose with a path-traversing filename dropped, a file part refused when there is nowhere to put it, every migrate action counted and a snapshot a server is holding refused, a block that touches one row twice undone in the order that puts it back, caches and an index warmed over 600 rows that keep nothing a block undid, a refused block that reaches neither the store nor the log, conditional values that fold when constant and run only the side they choose, names bound once and read twice including a generated id two collections must agree on, bindings that stack and that refuse to shadow a path parameter, grouped counts and aggregates, a foreign key followed into another collection on one row and on a filtered page, under an alias, through a path, and with a key that names nothing, writes to either side of a join visible on the next read, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
 
