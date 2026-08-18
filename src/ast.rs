@@ -78,6 +78,7 @@ pub enum Expr {
     Bin(BinOp, Box<Expr>, Box<Expr>),
     If(Box<Expr>, Box<Expr>, Box<Expr>),
     Let(usize, Box<Expr>, Box<Expr>),
+    Do(Vec<Expr>),
     Local(usize),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
@@ -209,6 +210,21 @@ impl Expr {
             Expr::Field(base, key) => Ok(base.eval(c)?.get(key)),
             Expr::With(base, key, other, out) => {
                 Ok(crate::store::attach(&base.eval(c)?, key, other, out))
+            }
+            Expr::Do(steps) => {
+                let mut plan = Vec::with_capacity(steps.len());
+                for step in steps {
+                    let Expr::Db(col, op) = step else { return Err(BAD_BODY) };
+                    plan.push((col.clone(), tx_step(op, c)?));
+                }
+                match crate::store::commit(plan) {
+                    Ok(rows) => Ok(Value::Arr(Arc::new(rows))),
+                    Err((_, why)) => Err(match why {
+                        crate::store::Refused::Conflict => CONFLICT,
+                        crate::store::Refused::Missing => NOT_FOUND,
+                        crate::store::Refused::NotNumber => NOT_NUMBER,
+                    }),
+                }
             }
             Expr::Let(slot, value, body) => {
                 let bound = value.eval(c)?;
@@ -466,6 +482,37 @@ fn list_arg(v: Value, op: Cmp) -> Arc<str> {
         }
         other => other.as_key_arc(),
     }
+}
+
+fn tx_key(k: &Expr, c: &Ctx) -> Result<String, Err_> {
+    Ok(match fast_key(k, c) {
+        Some(raw) => raw.to_string(),
+        None => k.eval(c)?.as_key(),
+    })
+}
+
+fn tx_step(op: &Op, c: &Ctx) -> Result<crate::store::Step, Err_> {
+    Ok(match op {
+        Op::Create(v, unique) => match v.eval(c)? {
+            Value::Null => return Err(BAD_BODY),
+            val => crate::store::Step::Create(val, field_names(unique, c)?),
+        },
+        Op::Update(k, v, unique) => {
+            crate::store::Step::Update(tx_key(k, c)?, v.eval(c)?, field_names(unique, c)?)
+        }
+        Op::Upsert(k, v, unique) => match v.eval(c)? {
+            Value::Null => return Err(BAD_BODY),
+            val => crate::store::Step::Upsert(tx_key(k, c)?, val, field_names(unique, c)?),
+        },
+        Op::Incr(k, f, by) => {
+            let key = tx_key(k, c)?;
+            let field = f.eval(c)?.as_key_arc();
+            let Some(by) = as_num(&by.eval(c)?) else { return Err(BAD_BODY) };
+            crate::store::Step::Incr(key, field, by)
+        }
+        Op::Delete(k) => crate::store::Step::Delete(tx_key(k, c)?),
+        _ => return Err(BAD_BODY),
+    })
 }
 
 fn field_names(unique: &[Expr], c: &Ctx) -> Result<Vec<Arc<str>>, Err_> {

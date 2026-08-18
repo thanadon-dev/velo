@@ -656,6 +656,14 @@ impl Collection {
     }
 
     fn insert_locked(&self, s: &mut Snapshot, key: String, row: Value) -> Value {
+        let row = self.insert_raw(s, key, row);
+        if let Some(wal) = self.log() {
+            wal.put(&self.name, &row);
+        }
+        row
+    }
+
+    fn insert_raw(&self, s: &mut Snapshot, key: String, row: Value) -> Value {
         s.rows.push(row.clone());
         let idx = s.rows.len() - 1;
         s.by_id.insert(key, idx);
@@ -668,9 +676,6 @@ impl Collection {
         s.all_json = reuse;
         s.append_json(&row, self.limits.append_max);
         s.list_used.store(false, Ordering::Relaxed);
-        if let Some(wal) = self.log() {
-            wal.put(&self.name, &row);
-        }
         self.bump();
         self.touch();
         row
@@ -797,15 +802,26 @@ impl Collection {
         patch: &Value,
         unique: &[&str],
     ) -> Option<Value> {
+        let merged = self.merge_raw(s, i, patch, unique)?;
+        if let Some(wal) = self.log() {
+            wal.merge(&self.name, id, patch);
+        }
+        Some(merged)
+    }
+
+    fn merge_raw(
+        &self,
+        s: &mut Snapshot,
+        i: usize,
+        patch: &Value,
+        unique: &[&str],
+    ) -> Option<Value> {
         let merged = as_row(merge(s.rows.get(i)?, patch));
         if collides(s, &merged, unique, i) {
             return None;
         }
         s.rows.set(i, merged.clone());
         s.invalidate();
-        if let Some(wal) = self.log() {
-            wal.merge(&self.name, id, patch);
-        }
         self.bump();
         self.touch();
         Some(merged)
@@ -1713,6 +1729,220 @@ pub fn attach(v: &Value, key: &str, other: &Collection, out: &str) -> Value {
         }
         plain => plain.clone(),
     }
+}
+
+pub enum Step {
+    Create(Value, Vec<Arc<str>>),
+    Update(String, Value, Vec<Arc<str>>),
+    Upsert(String, Value, Vec<Arc<str>>),
+    Incr(String, Arc<str>, f64),
+    Delete(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Refused {
+    Conflict,
+    Missing,
+    NotNumber,
+}
+
+enum Undo {
+    Inserted(String, usize),
+    Replaced(usize, Value),
+    Removed(String, usize, Value),
+}
+
+enum Logged {
+    Put(Value),
+    Merge(String, Value),
+    Delete(String),
+}
+
+impl Collection {
+    fn apply_tx(
+        &self,
+        s: &mut Snapshot,
+        step: Step,
+        undo: &mut Vec<Undo>,
+        log: &mut Vec<Logged>,
+    ) -> Result<Value, Refused> {
+        match step {
+            Step::Create(v, unique) => {
+                let names: Vec<&str> = unique.iter().map(|n| &**n).collect();
+                let given = match v.get("id") {
+                    Value::Null => None,
+                    id => Some(id.as_key()),
+                };
+                let (key, row) = match given {
+                    Some(key) => (key, as_row(v)),
+                    None => (String::new(), v),
+                };
+                if collides(s, &row, &names, usize::MAX) {
+                    return Err(Refused::Conflict);
+                }
+                let (key, row) = if key.is_empty() {
+                    let mut id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+                    while s.by_id.contains_key(&id.to_string()) {
+                        id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+                    }
+                    (id.to_string(), with_id(row, id as f64))
+                } else {
+                    if s.by_id.contains_key(&key) {
+                        return Err(Refused::Conflict);
+                    }
+                    (key, row)
+                };
+                let row = self.insert_raw(s, key.clone(), row);
+                undo.push(Undo::Inserted(key, s.rows.len() - 1));
+                log.push(Logged::Put(row.clone()));
+                Ok(row)
+            }
+            Step::Update(id, patch, unique) => {
+                let names: Vec<&str> = unique.iter().map(|n| &**n).collect();
+                let Some(&i) = s.by_id.get(&id) else { return Err(Refused::Missing) };
+                let Some(prev) = s.rows.get(i).cloned() else { return Err(Refused::Missing) };
+                let merged = self.merge_raw(s, i, &patch, &names).ok_or(Refused::Conflict)?;
+                undo.push(Undo::Replaced(i, prev));
+                log.push(Logged::Merge(id, patch));
+                Ok(merged)
+            }
+            Step::Upsert(id, value, unique) => {
+                let names: Vec<&str> = unique.iter().map(|n| &**n).collect();
+                if let Some(&i) = s.by_id.get(&id) {
+                    let Some(prev) = s.rows.get(i).cloned() else { return Err(Refused::Missing) };
+                    let merged = self.merge_raw(s, i, &value, &names).ok_or(Refused::Conflict)?;
+                    undo.push(Undo::Replaced(i, prev));
+                    log.push(Logged::Merge(id, value));
+                    return Ok(merged);
+                }
+                let keyed = keyed_row(&id, &value);
+                if collides(s, &keyed, &names, usize::MAX) {
+                    return Err(Refused::Conflict);
+                }
+                let row = self.insert_raw(s, id.clone(), keyed);
+                undo.push(Undo::Inserted(id, s.rows.len() - 1));
+                log.push(Logged::Put(row.clone()));
+                Ok(row)
+            }
+            Step::Incr(id, field, by) => {
+                if &*field == "id" || field.is_empty() {
+                    return Err(Refused::NotNumber);
+                }
+                let Some(&i) = s.by_id.get(&id) else { return Err(Refused::Missing) };
+                let Some(prev) = s.rows.get(i).cloned() else { return Err(Refused::Missing) };
+                let next = match prev.get(&field) {
+                    Value::Null => by,
+                    Value::Num(n) => n + by,
+                    _ => return Err(Refused::NotNumber),
+                };
+                let patch = Value::row(vec![(crate::value::intern(&field), Value::Num(next))]);
+                let Some(merged) = self.merge_raw(s, i, &patch, &[]) else {
+                    return Err(Refused::Missing);
+                };
+                undo.push(Undo::Replaced(i, prev));
+                log.push(Logged::Merge(id, patch));
+                Ok(merged)
+            }
+            Step::Delete(id) => {
+                let Some(&i) = s.by_id.get(&id) else { return Err(Refused::Missing) };
+                let Some(prev) = s.rows.get(i).cloned() else { return Err(Refused::Missing) };
+                s.by_id.remove(&id);
+                s.rows.set(i, Value::Null);
+                s.holes += 1;
+                s.invalidate();
+                self.bump();
+                self.touch();
+                undo.push(Undo::Removed(id.clone(), i, prev));
+                log.push(Logged::Delete(id));
+                Ok(Value::obj(vec![(crate::value::intern("deleted"), Value::Bool(true))]))
+            }
+        }
+    }
+
+    fn undo_tx(&self, s: &mut Snapshot, step: Undo) {
+        match step {
+            Undo::Inserted(key, i) => {
+                s.by_id.remove(&key);
+                s.rows.set(i, Value::Null);
+                s.holes += 1;
+            }
+            Undo::Replaced(i, prev) => s.rows.set(i, prev),
+            Undo::Removed(key, i, prev) => {
+                s.rows.set(i, prev);
+                s.by_id.insert(key, i);
+                s.holes -= 1;
+            }
+        }
+        s.invalidate();
+        self.bump();
+    }
+
+    fn write_log(&self, entry: &Logged) {
+        let Some(wal) = self.log() else { return };
+        match entry {
+            Logged::Put(row) => wal.put(&self.name, row),
+            Logged::Merge(id, patch) => wal.merge(&self.name, id, patch),
+            Logged::Delete(id) => wal.delete(&self.name, id),
+        }
+    }
+}
+
+fn keyed_row(id: &str, value: &Value) -> Value {
+    match value {
+        Value::Obj(o) | Value::Row(o, _) => {
+            let mut fields: Obj = Vec::with_capacity(o.len() + 1);
+            fields.push((crate::value::intern("id"), id_value(id)));
+            for (k, v) in o.iter() {
+                if &**k != "id" {
+                    fields.push((k.clone(), v.clone()));
+                }
+            }
+            Value::row(fields)
+        }
+        other => Value::row(vec![
+            (crate::value::intern("id"), id_value(id)),
+            (crate::value::intern("value"), other.clone()),
+        ]),
+    }
+}
+
+pub fn commit(plan: Vec<(Arc<Collection>, Step)>) -> Result<Vec<Value>, (usize, Refused)> {
+    let mut cols: Vec<Arc<Collection>> = Vec::with_capacity(plan.len());
+    for (col, _) in &plan {
+        if !cols.iter().any(|held| Arc::ptr_eq(held, col)) {
+            cols.push(col.clone());
+        }
+    }
+    cols.sort_by(|a, b| a.tag.cmp(&b.tag));
+    let mut held: Vec<_> = cols.iter().map(|c| c.snap.write().unwrap()).collect();
+
+    let at = |col: &Arc<Collection>| cols.iter().position(|c| Arc::ptr_eq(c, col)).unwrap_or(0);
+    let mut undo: Vec<(usize, Undo)> = Vec::with_capacity(plan.len());
+    let mut log: Vec<(usize, Logged)> = Vec::with_capacity(plan.len());
+    let mut out = Vec::with_capacity(plan.len());
+
+    for (n, (col, step)) in plan.into_iter().enumerate() {
+        let slot = at(&col);
+        let mut mine = Vec::new();
+        let mut logged = Vec::new();
+        match col.apply_tx(&mut held[slot], step, &mut mine, &mut logged) {
+            Ok(value) => {
+                undo.extend(mine.into_iter().map(|u| (slot, u)));
+                log.extend(logged.into_iter().map(|e| (slot, e)));
+                out.push(value);
+            }
+            Err(why) => {
+                for (slot, step) in undo.into_iter().rev() {
+                    cols[slot].undo_tx(&mut held[slot], step);
+                }
+                return Err((n, why));
+            }
+        }
+    }
+    for (slot, entry) in &log {
+        cols[*slot].write_log(entry);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

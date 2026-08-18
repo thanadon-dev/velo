@@ -3909,3 +3909,175 @@ fn a_binding_that_cannot_be_read_is_refused_at_compile_time() {
         assert!(err.contains(want), "{src}: {err}");
     }
 }
+
+const TX: &str = r#"
+POST /stock/:id => db.stock.upsert(id, { count: body.count })
+GET  /stock     => db.stock.all()
+GET  /stock/:id => db.stock.find(id)
+GET  /orders    => db.orders.all()
+GET  /orders/n  => db.orders.count()
+GET  /orders/:id => db.orders.find(id)
+GET  /orders/of => db.orders.where("item", query.item)
+POST /buy       => do {
+                     db.stock.incr(body.item, "count", 0 - body.qty),
+                     db.orders.create({ id: body.ref, item: body.item, qty: body.qty })
+                   }
+POST /ab        => do { db.a.create({ id: body.k }), db.b.create({ id: body.k }) }
+POST /ba        => do { db.b.create({ id: body.k }), db.a.create({ id: body.k }) }
+POST /twice     => do { db.a.create({ id: body.k }), db.a.create({ id: body.k }) }
+GET  /a         => db.a.count()
+GET  /b         => db.b.count()
+GET  /a/:id     => db.a.find(id)
+POST /seed/:id  => db.b.create({ id: id })
+"#;
+
+fn transacted() -> Arc<Server> {
+    watchdog();
+    let s = Server::new(compile(TX, None).unwrap()).unwrap();
+    call(&s, "POST", "/stock/widget", r#"{"count":10}"#);
+    s
+}
+
+#[test]
+fn every_write_in_a_block_lands_or_none_of_them_does() {
+    let s = transacted();
+    let (status, body, _) = call(&s, "POST", "/buy", r#"{"item":"widget","qty":3,"ref":"o1"}"#);
+    assert_eq!(status, 201);
+    assert!(body.contains(r#""count":7"#) && body.contains(r#""id":"o1""#), "{body}");
+    assert_eq!(call(&s, "GET", "/stock/widget", "").1, r#"{"id":"widget","count":7}"#);
+
+    let (status, _, _) = call(&s, "POST", "/buy", r#"{"item":"widget","qty":2,"ref":"o1"}"#);
+    assert_eq!(status, 409, "a second order with the same id must be refused");
+    assert_eq!(
+        call(&s, "GET", "/stock/widget", "").1,
+        r#"{"id":"widget","count":7}"#,
+        "the count moved even though the order was refused"
+    );
+    assert_eq!(call(&s, "GET", "/orders/n", "").1, "1");
+
+    let (status, _, _) = call(&s, "POST", "/buy", r#"{"item":"ghost","qty":1,"ref":"o2"}"#);
+    assert_eq!(status, 404);
+    assert_eq!(call(&s, "GET", "/orders/n", "").1, "1");
+}
+
+#[test]
+fn a_write_that_is_rolled_back_cannot_be_found_by_any_route() {
+    let s = transacted();
+    assert_eq!(call(&s, "POST", "/ab", r#"{"k":"k1"}"#).0, 201);
+    assert_eq!(call(&s, "GET", "/a", "").1, "1");
+    assert_eq!(call(&s, "GET", "/b", "").1, "1");
+
+    assert_eq!(call(&s, "POST", "/ab", r#"{"k":"k1"}"#).0, 409);
+    assert_eq!(call(&s, "GET", "/a", "").1, "1", "a rolled back row is still counted");
+    assert_eq!(call(&s, "GET", "/b", "").1, "1");
+
+    assert_eq!(call(&s, "POST", "/buy", r#"{"item":"widget","qty":1,"ref":"gone"}"#).0, 201);
+    assert_eq!(call(&s, "POST", "/buy", r#"{"item":"widget","qty":1,"ref":"gone"}"#).0, 409);
+    assert_eq!(call(&s, "GET", "/orders/n", "").1, "1");
+    assert_eq!(call(&s, "GET", "/orders", "").1.matches(r#""id""#).count(), 1);
+    assert_eq!(call(&s, "GET", "/orders/of?item=widget", "").1.matches(r#""id""#).count(), 1);
+    assert_eq!(call(&s, "GET", "/stock/widget", "").1, r#"{"id":"widget","count":9}"#);
+}
+
+#[test]
+fn one_collection_named_twice_in_a_block_is_locked_once() {
+    let s = transacted();
+    assert_eq!(call(&s, "POST", "/twice", r#"{"k":"x"}"#).0, 409);
+    assert_eq!(call(&s, "GET", "/a", "").1, "0");
+}
+
+#[test]
+fn blocks_that_name_two_collections_in_opposite_orders_do_not_wedge() {
+    let s = transacted();
+    const THREADS: usize = 8;
+    const ROUNDS: usize = 200;
+    let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let start = Arc::new(std::sync::Barrier::new(THREADS));
+    for t in 0..THREADS {
+        let (s, done, start) = (s.clone(), done.clone(), start.clone());
+        std::thread::spawn(move || {
+            start.wait();
+            for r in 0..ROUNDS {
+                let path = if t % 2 == 0 { "/ab" } else { "/ba" };
+                let body = format!(r#"{{"k":"{t}-{r}"}}"#);
+                let mut out = Vec::new();
+                s.dispatch("POST", path, body.as_bytes(), &mut out);
+                done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    }
+    let want = THREADS * ROUNDS;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while done.load(std::sync::atomic::Ordering::Relaxed) < want {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "only {} of {want} blocks finished, two of them are holding each other's collection",
+            done.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(call(&s, "GET", "/a", "").1, want.to_string());
+    assert_eq!(call(&s, "GET", "/b", "").1, want.to_string());
+}
+
+#[test]
+fn a_block_that_fails_under_contention_still_leaves_nothing_behind() {
+    let s = transacted();
+    const THREADS: usize = 8;
+    const ROUNDS: usize = 200;
+    const TAKEN: usize = 50;
+    for i in 0..TAKEN {
+        assert_eq!(call(&s, "POST", &format!("/seed/taken{i}"), "").0, 201);
+    }
+    let start = Arc::new(std::sync::Barrier::new(THREADS));
+    let mut workers = Vec::new();
+    for t in 0..THREADS {
+        let (s, start) = (s.clone(), start.clone());
+        workers.push(std::thread::spawn(move || {
+            start.wait();
+            let mut kept = 0;
+            for r in 0..ROUNDS {
+                let (path, key) = match r % 2 {
+                    0 => ("/ab", format!("fresh{t}-{r}")),
+                    _ => ("/ba", format!("taken{}", r % TAKEN)),
+                };
+                let mut out = Vec::new();
+                let body = format!(r#"{{"k":"{key}"}}"#);
+                let (status, _) = s.dispatch("POST", path, body.as_bytes(), &mut out);
+                if status == 201 {
+                    kept += 1;
+                }
+            }
+            kept
+        }));
+    }
+    let kept: usize = workers.into_iter().map(|w| w.join().unwrap()).sum();
+    assert_eq!(kept, THREADS * ROUNDS / 2, "only the fresh half should have been kept");
+    assert_eq!(call(&s, "GET", "/a", "").1, kept.to_string());
+    assert_eq!(call(&s, "GET", "/b", "").1, (kept + TAKEN).to_string());
+    for i in 0..TAKEN {
+        assert_eq!(
+            call(&s, "GET", &format!("/a/taken{i}"), "").0,
+            404,
+            "a block that was refused by b still left its row in a"
+        );
+    }
+}
+
+#[test]
+fn a_block_that_cannot_be_atomic_is_refused_at_compile_time() {
+    let cases = [
+        (r#"POST /x => do { db.a.create(body) }"#, "two or more writes"),
+        (r#"POST /x => do { db.a.create(body), db.b.all() }"#, "must be one write"),
+        (r#"POST /x => do { db.a.create(body), db.b.clear() }"#, "must be one write"),
+        (r#"POST /x => do { db.a.create(body), "ok" }"#, "must be one write"),
+        (
+            r#"POST /x => do { db.a.create(body), db.b.delete_where("k", "1") }"#,
+            "must be one write",
+        ),
+    ];
+    for (src, want) in cases {
+        let Err(err) = compile(src, None) else { panic!("{src} compiled") };
+        assert!(err.contains(want), "{src}: {err}");
+    }
+}

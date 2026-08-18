@@ -1380,3 +1380,75 @@ fn a_hook_still_queued_when_the_server_is_told_to_stop_is_delivered_before_it_ex
     assert_eq!(heard.join().unwrap(), 3, "queued hooks died with the process");
     let _ = std::fs::remove_file(&app);
 }
+
+#[test]
+fn a_block_that_fails_writes_nothing_to_the_log_and_one_that_succeeds_survives_a_kill() {
+    let app = tmp("txwal.velo");
+    let data = tmp("txwal.json");
+    let log = tmp("txwal.log");
+    for f in [&data, &log] {
+        let _ = std::fs::remove_file(f);
+    }
+    write(
+        &app,
+        "POST /stock/:id => db.stock.upsert(id, { count: body.count })\n\
+         GET  /stock/:id => db.stock.find(id)\n\
+         GET  /orders    => db.orders.count()\n\
+         POST /buy       => do {\n\
+         \x20 db.stock.incr(body.item, \"count\", 0 - body.qty),\n\
+         \x20 db.orders.create({ id: body.ref, item: body.item })\n\
+         }\n",
+    );
+    let port = free_port();
+    let spawn = || {
+        Command::new(BIN)
+            .arg("run")
+            .arg(&app)
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("--data")
+            .arg(&data)
+            .arg("--wal")
+            .arg(&log)
+            .env("VELO_SAVE_MS", "600000")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+
+    let mut child = spawn();
+    assert_eq!(
+        post(port, "/stock/widget", r#"{"count":10}"#).lines().next().unwrap(),
+        "HTTP/1.1 201 Created"
+    );
+    assert!(post(port, "/buy", r#"{"item":"widget","qty":3,"ref":"o1"}"#).contains(r#""count":7"#));
+    let refused = post(port, "/buy", r#"{"item":"widget","qty":4,"ref":"o1"}"#);
+    assert!(refused.contains("409"), "{refused}");
+    assert!(get(port, "/stock/widget").ends_with(r#"{"id":"widget","count":7}"#));
+
+    let written = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        written.matches(r#""o1""#).count(),
+        1,
+        "a refused block still reached the log:\n{written}"
+    );
+    assert_eq!(
+        written.matches(r#""count":6"#).count(),
+        0,
+        "the undone step was logged:\n{written}"
+    );
+
+    let _ = Command::new("kill").arg("-9").arg(child.id().to_string()).status();
+    let _ = child.wait();
+
+    let mut child = spawn();
+    assert!(
+        get(port, "/stock/widget").ends_with(r#"{"id":"widget","count":7}"#),
+        "replay lost the block"
+    );
+    assert!(get(port, "/orders").ends_with("1"));
+    stop(&mut child, "-TERM");
+    for f in [&app, &data, &log] {
+        let _ = std::fs::remove_file(f);
+    }
+}

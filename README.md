@@ -1,6 +1,6 @@
 # Velo
 
-**v1.53.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.54.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -17,7 +17,7 @@ That file is a complete, running API server.
 
 Linux only: the event loop is epoll, and the build stops with a clear message anywhere else.
 
-[Scope](#scope) · [Quick start](#quick-start) · [Language](#language) · [Guards](#guards) · [OpenAPI](#openapi) · [Embedding](#embedding) · [Persistence](#persistence) · [Concurrency](#concurrency) · [Rate limiting](#rate-limiting) · [Webhooks](#webhooks) · [Metrics](#metrics) · [Deployment](#deployment) · [Design](#design) · [Benchmarks](#benchmarks) · [Tests](#tests) · [CI](#ci) · [Layout](#layout) · [Build notes](#build-notes) · [Releases](#releases)
+[Scope](#scope) · [Quick start](#quick-start) · [Language](#language) · [Guards](#guards) · [OpenAPI](#openapi) · [Embedding](#embedding) · [Persistence](#persistence) · [Concurrency](#concurrency) · [Transactions](#transactions) · [Rate limiting](#rate-limiting) · [Webhooks](#webhooks) · [Metrics](#metrics) · [Deployment](#deployment) · [Design](#design) · [Benchmarks](#benchmarks) · [Tests](#tests) · [CI](#ci) · [Layout](#layout) · [Build notes](#build-notes) · [Releases](#releases)
 
 ## Scope
 
@@ -108,6 +108,7 @@ Expressions:
 | comparison | `query.limit < 100`, `header.x_key == env("KEY")` | numeric when both sides parse as numbers, otherwise string-to-string, otherwise false |
 | conditional | `body.qty > 100 ? "bulk" : "std"` | only the side that is chosen runs |
 | binding | `let id = uuid() in [...]` | computes once, readable everywhere after `in` |
+| transaction | `do { db.a.create(x), db.b.incr(k, "n") }` | all of the writes or none of them; see [Transactions](#transactions) |
 
 Built-in store (`db.<collection>.<op>`):
 
@@ -512,15 +513,37 @@ Saves are atomic (write to `.tmp`, then rename) and skipped entirely when nothin
 
 Every store operation is one step. It takes the collection's write lock, does the whole thing, and releases it, so no request can see a row half written and no two requests can lose one another's work inside one operation. Readers take a snapshot and render outside the lock, so a long read never blocks a write.
 
-A route is not a transaction. A guard and the write after it are two operations, two store calls in one route are two operations, and nothing holds a lock between them. That is why anything which has to be indivisible is one operation rather than a pattern:
+A route is not a transaction unless it says so. A guard and the write after it are two operations, two store calls in one route are two operations, and nothing holds a lock between them; `do { ... }` is the exception and is described under [Transactions](#transactions). That is why anything which has to be indivisible is one operation rather than a pattern:
 
 | instead of | write |
 | --- | --- |
 | `update(id, { views: find(id).views + 1 })` | `incr(id, "views")` |
 | `create(body) when where("email", body.email).count() == 0` | `create(body, "email")` |
 | `upsert(id, body) when where("email", body.email).count() == 0` | `upsert(id, body, "email")` |
+| two writes that must both happen | `do { ..., ... }` |
 
-Reads are snapshots too, so two reads in one route can disagree: `{ n: db.users.count(), rows: db.users.all() }` may report a count that does not match the length of the list if a write lands between them. Collections lock independently, so there is no atomicity across two of them, and there is no rollback: if the second of two writes in a route fails, the first still happened. Rows expire and snapshots are written on their own threads beside live traffic, each taking the same locks as anything else.
+Reads are snapshots too, so two reads in one route can disagree: `{ n: db.users.count(), rows: db.users.all() }` may report a count that does not match the length of the list if a write lands between them. Collections lock independently outside a block, so there is no atomicity across two of them and no rollback: if the second of two bare writes in a route fails, the first still happened. Inside `do { ... }` every collection named is locked at once and a refused step undoes the ones before it. Rows expire and snapshots are written on their own threads beside live traffic, each taking the same locks as anything else.
+
+## Transactions
+
+`do { ... }` makes several writes one step. Either all of them happen or none of them does, whatever collections they touch:
+
+```velo
+POST /buy => let ref = uuid() in do {
+  db.stock.incr(body.item, "count", 0 - body.qty),
+  db.orders.create({ id: ref, item: body.item, qty: body.qty })
+}
+```
+
+Stock that is not there answers `404` and no order is written; an order id that is taken answers `409` and the count does not move. It evaluates to the list of what each step returned, so the response carries both rows.
+
+How it works is worth knowing, because it decides what the promise is. Every collection the block names is locked for writing before the first step runs, all of them at once and in a fixed order derived from the collection rather than from the route, so two blocks naming the same two collections in opposite orders cannot hold each other's; a collection named twice is locked once. Each step is then applied in turn, keeping what it would take to undo it, which for these writes is a row handle rather than a copy. If a step is refused the earlier ones are undone in reverse and the whole block answers with that step's status. Nothing else can write while this is happening, which is what makes the undo exact rather than a best effort. A test drives eight threads through two hundred blocks each, half of them designed to be refused by the second collection, and checks afterwards that the first collection holds exactly the successful half and not one row from a refused block; another drives the same two collections from opposite orders and fails on a deadline rather than waiting forever.
+
+A step must be one write: `create`, `update`, `upsert`, `incr` or `delete`. A read, a `clear`, a `delete_where` or a plain value is a compile error, as is a block with fewer than two writes, which has nothing to make atomic. Everything a step needs is evaluated before any lock is taken, so nothing inside the block can wait on the store while the store is held.
+
+The write-ahead log follows the same rule: a block's entries are appended after every step has succeeded, so a refused block leaves nothing in the log and a `kill -9` replays whole blocks or none of them. A test checks both halves of that.
+
+What it does not give is snapshot isolation for readers. Reads take their own snapshot, so a route reading two collections can still straddle a commit, exactly as the [Concurrency](#concurrency) section says of any two store calls in one route. The guarantee is that writes are all-or-nothing and that no other writer interleaves, not that a reader sees one instant.
 
 ## Rate limiting
 
@@ -835,7 +858,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-216 tests (163 integration + 27 CLI + 8 fuzz + 18 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, a write-ahead log replayed after a SIGKILL, a second server refusing a data file that is taken, built-ins, CORS preflight, field projection and filters into nested objects, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, an outbound hook that the response does not wait for, a hook queue that drops rather than grows when the far end stops answering, hooks still in hand at a `SIGTERM` delivered before exit, intersected filters, list membership through the index, conditional values that fold when constant and run only the side they choose, names bound once and read twice including a generated id two collections must agree on, bindings that stack and that refuse to shadow a path parameter, grouped counts and aggregates, a foreign key followed into another collection on one row and on a filtered page, under an alias, through a path, and with a key that names nothing, writes to either side of a join visible on the next read, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+223 tests (169 integration + 28 CLI + 8 fuzz + 18 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, a write-ahead log replayed after a SIGKILL, a second server refusing a data file that is taken, built-ins, CORS preflight, field projection and filters into nested objects, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, an outbound hook that the response does not wait for, a hook queue that drops rather than grows when the far end stops answering, hooks still in hand at a `SIGTERM` delivered before exit, intersected filters, list membership through the index, writes made atomic across two collections with a refused step undone and nothing left behind under eight threads, blocks naming the same collections in opposite orders that do not wedge, a refused block that reaches neither the store nor the log, conditional values that fold when constant and run only the side they choose, names bound once and read twice including a generated id two collections must agree on, bindings that stack and that refuse to shadow a path parameter, grouped counts and aggregates, a foreign key followed into another collection on one row and on a filtered page, under an alias, through a path, and with a key that names nothing, writes to either side of a join visible on the next read, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
 

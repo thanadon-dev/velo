@@ -437,7 +437,47 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn do_block(&mut self) -> Result<Expr, String> {
+        let head = self.tok.clone();
+        self.advance()?;
+        self.expect(Kind::LBrace)?;
+        let mut steps = Vec::new();
+        while self.tok.kind != Kind::RBrace {
+            let at = self.tok.clone();
+            let step = self.expr()?;
+            let ok = match &step {
+                Expr::Db(_, op) => matches!(
+                    op,
+                    Op::Create(..) | Op::Update(..) | Op::Upsert(..) | Op::Incr(..) | Op::Delete(_)
+                ),
+                _ => false,
+            };
+            if !ok {
+                return Err(format!(
+                    "line {}:{}: every step of do {{}} must be one write: create, update, upsert, incr or delete",
+                    at.line, at.col
+                ));
+            }
+            steps.push(step);
+            if self.tok.kind == Kind::Comma {
+                self.advance()?;
+            }
+        }
+        self.advance()?;
+        if steps.len() < 2 {
+            return Err(format!(
+                "line {}:{}: do {{}} holds two or more writes, or it has nothing to make atomic",
+                head.line, head.col
+            ));
+        }
+        self.pure = false;
+        Ok(Expr::Do(steps))
+    }
+
     fn primary(&mut self) -> Result<Expr, String> {
+        if self.keyword("do") {
+            return self.do_block();
+        }
         if self.tok.kind == Kind::LParen {
             self.advance()?;
             let inner = self.expr()?;
