@@ -3,8 +3,14 @@
 # Each mutants/*.patch is a fault a person could plausibly write. A patch that
 # survives is a hole in the suite, unless it changes no behaviour at all, in
 # which case it belongs in the equivalent list below.
+#
+#   ./mutants.sh                every patch, from the start
+#   ./mutants.sh <name>         one patch
+#   ./mutants.sh --resume       carry on from wherever the last run stopped
 set -u
 cd "$(dirname "$0")"
+
+STATE=.mutants-state
 
 # Faults that change no behaviour at all: a weaker hash the map still compares
 # keys behind, and a parameter count only ever read within range.
@@ -14,9 +20,41 @@ EQUIVALENT="fnv-broken nparams-not-set"
 # a fault listed here is a hole someone has decided to live with.
 UNCOVERED=""
 
+resume=0
+only=""
+for arg in "$@"; do
+  case "$arg" in
+    --resume) resume=1 ;;
+    -*)
+      echo "mutants: unknown option $arg" >&2
+      exit 2
+      ;;
+    *) only=$arg ;;
+  esac
+done
+
 if [ -n "$(git status --porcelain -- src/)" ]; then
   echo "mutants: src/ has uncommitted changes, commit or stash them first" >&2
   exit 1
+fi
+
+# What a saved answer is an answer about. Carrying results across an edit would
+# count what was learned from code that is no longer there, which is the whole
+# failure this script exists to avoid.
+stamp() {
+  { git rev-parse HEAD; git status --porcelain; git diff HEAD; } | cksum | cut -d' ' -f1
+}
+
+now=$(stamp)
+already=""
+if [ "$resume" -eq 1 ] && [ -f "$STATE" ] && [ "$(head -1 "$STATE")" = "stamp $now" ]; then
+  already=$(sed 1d "$STATE" | cut -d' ' -f2)
+  echo "resuming: $(sed 1d "$STATE" | wc -l | tr -d ' ') already answered"
+else
+  if [ "$resume" -eq 1 ]; then
+    echo "mutants: nothing to resume for this tree, starting over" >&2
+  fi
+  printf 'stamp %s\n' "$now" > "$STATE"
 fi
 
 # Putting the tree back is the one thing this script must never get wrong: a patch
@@ -36,6 +74,12 @@ restore() {
   return 0
 }
 
+# Written before the next patch is applied, so a run that is killed rather than
+# stopped still has every answer it had already paid for.
+record() {
+  printf '%s %s\n' "$1" "$2" >> "$STATE"
+}
+
 # A run means nothing unless the suite passes on the code as written. Without this
 # check a suite that is already failing reports every single patch as caught.
 if ! cargo test --profile mutants >/dev/null 2>&1; then
@@ -46,25 +90,39 @@ fi
 current=""
 trap 'restore >/dev/null 2>&1 || true' EXIT INT TERM
 
-only=${1:-}
 caught=0
 survived=0
 skipped=0
 broken=0
+for was in $(sed 1d "$STATE" | cut -d' ' -f1); do
+  case "$was" in
+    caught) caught=$((caught + 1)) ;;
+    survived) survived=$((survived + 1)) ;;
+    skipped) skipped=$((skipped + 1)) ;;
+    broken) broken=$((broken + 1)) ;;
+  esac
+done
 
 for patch in mutants/*.patch; do
   name=$(basename "$patch" .patch)
   case "$only" in "" ) ;; *) [ "$name" = "$only" ] || continue ;; esac
+  case "
+$already
+" in *"
+$name
+"*) continue ;; esac
   current="$patch"
   if ! git apply "$patch" 2>/dev/null; then
     current=""
     echo "SKIPPED  $name (the code it changes has moved, so this fault went unchecked)"
     skipped=$((skipped + 1))
+    record skipped "$name"
     continue
   fi
   if ! cargo build --profile mutants --tests >/dev/null 2>&1; then
     echo "BROKEN   $name (does not compile, proves nothing)"
     broken=$((broken + 1))
+    record broken "$name"
     if ! restore; then
       exit 2
     fi
@@ -73,22 +131,30 @@ for patch in mutants/*.patch; do
   if ! cargo test --profile mutants >/dev/null 2>&1; then
     echo "caught   $name"
     caught=$((caught + 1))
+    record caught "$name"
   else
     case " $EQUIVALENT " in
-      *" $name "*) echo "same     $name (changes no behaviour)" ;;
+      *" $name "*)
+        echo "same     $name (changes no behaviour)"
+        record same "$name"
+        ;;
       *)
         case " $UNCOVERED " in
-          *" $name "*) echo "open     $name (a real fault with no test yet)" ;;
+          *" $name "*)
+            echo "open     $name (a real fault with no test yet)"
+            record open "$name"
+            ;;
           *)
             echo "SURVIVED $name"
             survived=$((survived + 1))
+            record survived "$name"
             ;;
         esac
         ;;
     esac
   fi
   if ! restore; then
-    echo "mutants: stopped after $name" >&2
+    echo "mutants: stopped after $name, run again with --resume to carry on" >&2
     exit 2
   fi
 done
@@ -97,4 +163,8 @@ echo "$caught caught, $survived survived, $broken broken, $skipped skipped"
 # A skipped patch is an unchecked fault, the same as one that survives. It reads
 # milder because the cause is a refactor rather than a hole, but the fault is not
 # being looked for either way, so it fails the run and someone rewrites the patch.
-[ "$survived" -eq 0 ] && [ "$skipped" -eq 0 ] && [ "$broken" -eq 0 ] || exit 1
+if [ "$survived" -eq 0 ] && [ "$skipped" -eq 0 ] && [ "$broken" -eq 0 ]; then
+  rm -f "$STATE"
+  exit 0
+fi
+exit 1
