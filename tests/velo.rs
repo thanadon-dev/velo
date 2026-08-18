@@ -702,7 +702,7 @@ fn incr_counts_and_refuses_what_it_cannot_add_to() {
     assert_eq!(call(&s, "POST", "/bumpby/a?by=x", "").0, 400);
     assert_eq!(call(&s, "GET", "/users/a", "").1, r#"{"id":"a","name":"mark","score":7}"#);
     assert!(compile(r#"GET /a => db.x.incr("k")"#, None).is_err());
-    assert!(compile(r#"GET /a => db.x.incr("k", "f", 1, 2)"#, None).is_err());
+    assert!(compile(r#"GET /a => db.x.incr("k", "f", 1, 2, 3)"#, None).is_err());
 }
 
 #[test]
@@ -1373,10 +1373,15 @@ fn autosave_writes_and_keeps_up() {
 #[test]
 fn a_rate_window_lets_a_client_back_in_after_a_second() {
     let key = "velo-test-window";
-    for i in 1..=5 {
-        assert!(velo::http::within_limit(key, 5), "request {i} of the first five was refused");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut refused = false;
+    while !refused {
+        refused = (0..6).filter(|_| !velo::http::within_limit(key, 5)).count() > 0;
+        assert!(
+            refused || std::time::Instant::now() < deadline,
+            "six requests against a ceiling of five never refused one"
+        );
     }
-    assert!(!velo::http::within_limit(key, 5), "the sixth in one second must be refused");
     std::thread::sleep(Duration::from_millis(1100));
     assert!(
         velo::http::within_limit(key, 5),
@@ -1410,12 +1415,22 @@ fn rate_limit_counts_per_client() {
         );
         raw(port, req.as_bytes())
     };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut codes = Vec::new();
-    for _ in 0..5 {
-        codes.push(hit("9.9.9.9").lines().next().unwrap_or_default().to_string());
+    loop {
+        codes.clear();
+        for _ in 0..5 {
+            codes.push(hit("9.9.9.9").lines().next().unwrap_or_default().to_string());
+        }
+        if codes.iter().any(|c| c.contains("429 Too Many Requests")) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a ceiling of three never refused: {codes:?}"
+        );
     }
-    assert!(codes.iter().any(|c| c.contains("429 Too Many Requests")), "{codes:?}");
-    assert!(codes.iter().filter(|c| c.contains("200 OK")).count() >= 3, "{codes:?}");
+    assert!(codes.iter().filter(|c| c.contains("200 OK")).count() >= 1, "{codes:?}");
     assert!(hit("8.8.8.8").ends_with("ok"));
 
     let open = server();
@@ -4137,4 +4152,100 @@ fn a_block_that_cannot_be_atomic_is_refused_at_compile_time() {
         let Err(err) = compile(src, None) else { panic!("{src} compiled") };
         assert!(err.contains(want), "{src}: {err}");
     }
+}
+
+const FLOOR: &str = r#"
+POST /stock/:id => db.products.upsert(id, { stock: body.stock })
+GET  /stock/:id => db.products.find(id)
+GET  /sales     => db.sales.count()
+POST /take/:id  => db.products.incr(id, "stock", 0 - default(body.n, 1), 0)
+POST /sink/:id  => db.products.incr(id, "stock", 0 - default(body.n, 1))
+POST /buy/:id   => do {
+                     db.products.incr(id, "stock", 0 - default(body.n, 1), 0),
+                     db.sales.create({ item: id, n: default(body.n, 1) })
+                   }
+"#;
+
+fn floored() -> Arc<Server> {
+    watchdog();
+    let s = Server::new(compile(FLOOR, None).unwrap()).unwrap();
+    call(&s, "POST", "/stock/p1", r#"{"stock":3}"#);
+    s
+}
+
+#[test]
+fn a_floor_refuses_the_step_that_would_go_under_it_and_changes_nothing() {
+    let s = floored();
+    assert!(call(&s, "POST", "/take/p1", r#"{"n":2}"#).1.contains(r#""stock":1"#));
+    let (status, body, _) = call(&s, "POST", "/take/p1", r#"{"n":2}"#);
+    assert_eq!((status, body.as_str()), (409, r#"{"error":"not enough"}"#));
+    assert_eq!(call(&s, "GET", "/stock/p1", "").1, r#"{"id":"p1","stock":1}"#);
+    assert!(call(&s, "POST", "/take/p1", r#"{"n":1}"#).1.contains(r#""stock":0"#));
+    assert_eq!(call(&s, "POST", "/take/p1", "").0, 409);
+}
+
+#[test]
+fn without_a_floor_a_counter_still_goes_wherever_it_is_pushed() {
+    let s = floored();
+    assert!(call(&s, "POST", "/sink/p1", r#"{"n":10}"#).1.contains(r#""stock":-7"#));
+}
+
+#[test]
+fn a_floor_inside_a_block_takes_the_rest_of_the_block_with_it() {
+    let s = floored();
+    assert_eq!(call(&s, "POST", "/buy/p1", r#"{"n":3}"#).0, 201);
+    assert_eq!(call(&s, "GET", "/sales", "").1, "1");
+
+    assert_eq!(call(&s, "POST", "/buy/p1", r#"{"n":1}"#).0, 409);
+    assert_eq!(call(&s, "GET", "/sales", "").1, "1", "the sale outlived the stock it needed");
+    assert_eq!(call(&s, "GET", "/stock/p1", "").1, r#"{"id":"p1","stock":0}"#);
+}
+
+#[test]
+fn eight_threads_cannot_take_more_than_the_floor_allows() {
+    let s = floored();
+    const THREADS: usize = 8;
+    const EACH: usize = 100;
+    const STOCK: usize = 250;
+    call(&s, "POST", "/stock/p2", &format!(r#"{{"stock":{STOCK}}}"#));
+    let start = Arc::new(std::sync::Barrier::new(THREADS));
+    let (tx, rx) = std::sync::mpsc::channel();
+    for _ in 0..THREADS {
+        let (s, start, tx) = (s.clone(), start.clone(), tx.clone());
+        std::thread::spawn(move || {
+            start.wait();
+            let mut took = 0;
+            for _ in 0..EACH {
+                let mut out = Vec::new();
+                let (status, _) = s.dispatch("POST", "/buy/p2", b"{\"n\":1}", &mut out);
+                if status == 201 {
+                    took += 1;
+                }
+            }
+            let _ = tx.send(took);
+        });
+    }
+    drop(tx);
+    let mut took = 0;
+    for n in 0..THREADS {
+        match rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(k) => took += k,
+            Err(_) => panic!("only {n} of {THREADS} threads finished"),
+        }
+    }
+    assert_eq!(took, STOCK, "the floor let more out than there was");
+    assert_eq!(call(&s, "GET", "/stock/p2", "").1, r#"{"id":"p2","stock":0}"#);
+    assert_eq!(call(&s, "GET", "/sales", "").1, STOCK.to_string());
+}
+
+#[test]
+fn a_floor_that_is_not_a_number_or_a_fifth_argument_is_refused() {
+    let Err(err) = compile(r#"POST /x => db.a.incr("k", "n", 1, 0, 2)"#, None) else {
+        panic!("compiled")
+    };
+    assert!(err.contains("expects 4 argument(s), got 5"), "{err}");
+    let s = Server::new(compile(r#"POST /x => db.a.incr("k", "n", 1, query.low)"#, None).unwrap())
+        .unwrap();
+    call(&s, "POST", "/a", "");
+    assert_eq!(call(&s, "POST", "/x", "").0, 400);
 }

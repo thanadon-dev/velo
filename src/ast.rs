@@ -17,6 +17,7 @@ pub const BAD_BODY: Err_ = Err_ { status: 400, msg: "invalid body" };
 pub const CONFLICT: Err_ = Err_ { status: 409, msg: "already exists" };
 pub const TOO_MANY: Err_ = Err_ { status: 429, msg: "too many requests" };
 pub const NOT_NUMBER: Err_ = Err_ { status: 409, msg: "not a number" };
+pub const TOO_LOW: Err_ = Err_ { status: 409, msg: "not enough" };
 
 pub struct Ctx<'a> {
     pub params: [&'a str; MAX_PARAMS],
@@ -146,7 +147,7 @@ pub enum Op {
     Page(Box<Expr>, Box<Expr>),
     Create(Box<Expr>, Vec<Expr>),
     Update(Box<Expr>, Box<Expr>, Vec<Expr>),
-    Incr(Box<Expr>, Box<Expr>, Box<Expr>),
+    Incr(Box<Expr>, Box<Expr>, Box<Expr>, Option<Box<Expr>>),
     Upsert(Box<Expr>, Box<Expr>, Vec<Expr>),
     Delete(Box<Expr>),
     Clear,
@@ -223,6 +224,7 @@ impl Expr {
                         crate::store::Refused::Conflict => CONFLICT,
                         crate::store::Refused::Missing => NOT_FOUND,
                         crate::store::Refused::NotNumber => NOT_NUMBER,
+                        crate::store::Refused::TooLow => TOO_LOW,
                     }),
                 }
             }
@@ -371,7 +373,7 @@ impl Expr {
                         None => Err(NOT_FOUND),
                     }
                 }
-                Op::Incr(k, f, by) => {
+                Op::Incr(k, f, by, floor) => {
                     let key = match fast_key(k, c) {
                         Some(raw) => raw.to_string(),
                         None => k.eval(c)?.as_key(),
@@ -380,10 +382,11 @@ impl Expr {
                     let Some(by) = as_num(&by.eval(c)?) else {
                         return Err(BAD_BODY);
                     };
-                    match col.incr(&key, &field.as_key_ref(), by) {
+                    match col.incr(&key, &field.as_key_ref(), by, floor_of(floor, c)?) {
                         crate::store::Incr::Done(row) => Ok(row),
                         crate::store::Incr::Missing => Err(NOT_FOUND),
                         crate::store::Incr::NotNumber => Err(NOT_NUMBER),
+                        crate::store::Incr::TooLow => Err(TOO_LOW),
                     }
                 }
                 Op::Upsert(k, v, unique) => {
@@ -484,6 +487,16 @@ fn list_arg(v: Value, op: Cmp) -> Arc<str> {
     }
 }
 
+fn floor_of(floor: &Option<Box<Expr>>, c: &Ctx) -> Result<Option<f64>, Err_> {
+    match floor {
+        None => Ok(None),
+        Some(e) => match as_num(&e.eval(c)?) {
+            Some(low) => Ok(Some(low)),
+            None => Err(BAD_BODY),
+        },
+    }
+}
+
 fn tx_key(k: &Expr, c: &Ctx) -> Result<String, Err_> {
     Ok(match fast_key(k, c) {
         Some(raw) => raw.to_string(),
@@ -504,11 +517,11 @@ fn tx_step(op: &Op, c: &Ctx) -> Result<crate::store::Step, Err_> {
             Value::Null => return Err(BAD_BODY),
             val => crate::store::Step::Upsert(tx_key(k, c)?, val, field_names(unique, c)?),
         },
-        Op::Incr(k, f, by) => {
+        Op::Incr(k, f, by, floor) => {
             let key = tx_key(k, c)?;
             let field = f.eval(c)?.as_key_arc();
             let Some(by) = as_num(&by.eval(c)?) else { return Err(BAD_BODY) };
-            crate::store::Step::Incr(key, field, by)
+            crate::store::Step::Incr(key, field, by, floor_of(floor, c)?)
         }
         Op::Delete(k) => crate::store::Step::Delete(tx_key(k, c)?),
         _ => return Err(BAD_BODY),

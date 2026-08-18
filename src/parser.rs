@@ -934,16 +934,20 @@ fn single_op(
             let v = Box::new(args.next().unwrap());
             Op::Update(k, v, args.collect())
         }
-        "incr" if n == 3 => {
+        "incr" if n >= 3 => {
+            if n > 4 {
+                want(4)?;
+            }
             let k = Box::new(args.next().unwrap());
             let f = Box::new(args.next().unwrap());
-            Op::Incr(k, f, Box::new(args.next().unwrap()))
+            let by = Box::new(args.next().unwrap());
+            Op::Incr(k, f, by, args.next().map(Box::new))
         }
         "incr" => {
             want(2)?;
             let k = Box::new(args.next().unwrap());
             let f = Box::new(args.next().unwrap());
-            Op::Incr(k, f, Box::new(Expr::Const(crate::value::Value::Num(1.0))))
+            Op::Incr(k, f, Box::new(Expr::Const(crate::value::Value::Num(1.0))), None)
         }
         "clear" => {
             want(0)?;

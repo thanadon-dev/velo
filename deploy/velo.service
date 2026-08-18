@@ -9,6 +9,7 @@ ExecStart=/usr/local/bin/velo run /srv/api/app.velo unix:/run/user/1000/velo.soc
 WorkingDirectory=/srv/api
 Environment=VELO_WORKERS=4
 Environment=VELO_METRICS=/_metrics
+Environment=VELO_UPLOAD_DIR=/srv/api/uploads
 Environment=VELO_REAL_IP_HEADER=CF-Connecting-IP
 Environment=VELO_RATE=100
 Environment="VELO_HEADERS=X-Content-Type-Options: nosniff"

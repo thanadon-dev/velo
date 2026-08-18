@@ -1,6 +1,10 @@
-GET  /orders                => db.orders.page(query.offset, query.limit)
-GET  /orders/:id            => db.orders.find(id)
-POST /orders                => db.orders.create({ id: uuid(), at: now(), item: body.item, amount: body.amount, customer: header.x_customer }) when body.item else 400
+GET  /orders                => db.orders.order("-at").page(default(query.offset, 0), default(query.limit, 20)).with("item", db.products)
+GET  /orders/:id            => db.orders.find(id).with("item", db.products)
+GET  /orders/mine           => db.orders.where("customer", header.x_customer).order("-at").with("item", db.products) when check(header.x_customer, "x-customer is required")
+GET  /orders/by/tier        => db.orders.group("tier").count()
+POST /orders                => let ref = uuid() in let qty = default(body.qty, 1) in do {
+                                 db.products.incr(body.item, "stock", 0 - qty, 0),
+                                 db.orders.create({ id: ref, at: now(), item: body.item, qty: qty, customer: header.x_customer, tier: qty > 10 ? "bulk" : "single" })
+                               } when check(body.item, "item is required") and check(header.x_customer, "x-customer is required")
 DELETE /orders/:id          => db.orders.delete(id) : 204
 DELETE /orders/of/:customer => db.orders.delete_where("customer", customer)
-GET  /orders/mine           => db.orders.where("customer", header.x_customer) when header.x_customer else 400

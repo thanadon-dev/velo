@@ -19,8 +19,25 @@ if [ -n "$(git status --porcelain -- src/)" ]; then
   exit 1
 fi
 
+# Putting the tree back is the one thing this script must never get wrong: a patch
+# left applied silently poisons every result after it, and the run still reads as a
+# pass. So every revert is checked, and anything left behind stops the run.
+restore() {
+  if [ -n "$current" ]; then
+    git apply -R "$current" 2>/dev/null
+    current=""
+  fi
+  left=$(git status --porcelain -- src/)
+  if [ -n "$left" ]; then
+    echo "mutants: src/ is not back the way it was found, every result after this is worthless" >&2
+    echo "$left" >&2
+    return 1
+  fi
+  return 0
+}
+
 current=""
-trap 'if [ -n "$current" ]; then git apply -R "$current" 2>/dev/null; fi' EXIT INT TERM
+trap 'restore >/dev/null 2>&1 || true' EXIT INT TERM
 
 only=${1:-}
 caught=0
@@ -41,8 +58,9 @@ for patch in mutants/*.patch; do
   if ! cargo build --profile mutants --tests >/dev/null 2>&1; then
     echo "BROKEN   $name (does not compile, proves nothing)"
     broken=$((broken + 1))
-    git apply -R "$patch"
-    current=""
+    if ! restore; then
+      exit 2
+    fi
     continue
   fi
   if ! cargo test --profile mutants >/dev/null 2>&1; then
@@ -62,8 +80,10 @@ for patch in mutants/*.patch; do
         ;;
     esac
   fi
-  git apply -R "$patch"
-  current=""
+  if ! restore; then
+    echo "mutants: stopped after $name" >&2
+    exit 2
+  fi
 done
 
 echo "$caught caught, $survived survived, $broken broken, $skipped skipped"

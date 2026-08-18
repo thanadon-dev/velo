@@ -827,7 +827,7 @@ impl Collection {
         Some(merged)
     }
 
-    pub fn incr(&self, id: &str, field: &str, by: f64) -> Incr {
+    pub fn incr(&self, id: &str, field: &str, by: f64, floor: Option<f64>) -> Incr {
         if field == "id" || field.is_empty() {
             return Incr::NotNumber;
         }
@@ -843,6 +843,9 @@ impl Collection {
             Value::Num(n) => n + by,
             _ => return Incr::NotNumber,
         };
+        if floor.is_some_and(|low| next < low) {
+            return Incr::TooLow;
+        }
         let patch = Value::row(vec![(crate::value::intern(field), Value::Num(next))]);
         let merged = as_row(merge(row, &patch));
         s.rows.set(i, merged.clone());
@@ -1137,6 +1140,7 @@ pub enum Incr {
     Done(Value),
     Missing,
     NotNumber,
+    TooLow,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1735,7 +1739,7 @@ pub enum Step {
     Create(Value, Vec<Arc<str>>),
     Update(String, Value, Vec<Arc<str>>),
     Upsert(String, Value, Vec<Arc<str>>),
-    Incr(String, Arc<str>, f64),
+    Incr(String, Arc<str>, f64, Option<f64>),
     Delete(String),
 }
 
@@ -1744,6 +1748,7 @@ pub enum Refused {
     Conflict,
     Missing,
     NotNumber,
+    TooLow,
 }
 
 enum Undo {
@@ -1824,7 +1829,7 @@ impl Collection {
                 log.push(Logged::Put(row.clone()));
                 Ok(row)
             }
-            Step::Incr(id, field, by) => {
+            Step::Incr(id, field, by, floor) => {
                 if &*field == "id" || field.is_empty() {
                     return Err(Refused::NotNumber);
                 }
@@ -1835,6 +1840,9 @@ impl Collection {
                     Value::Num(n) => n + by,
                     _ => return Err(Refused::NotNumber),
                 };
+                if floor.is_some_and(|low| next < low) {
+                    return Err(Refused::TooLow);
+                }
                 let patch = Value::row(vec![(crate::value::intern(&field), Value::Num(next))]);
                 let Some(merged) = self.merge_raw(s, i, &patch, &[]) else {
                     return Err(Refused::Missing);

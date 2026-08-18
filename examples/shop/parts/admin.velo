@@ -1,2 +1,4 @@
-GET /admin/revenue          => { orders: db.orders.count(), total: db.orders.sum("amount"), avg: db.orders.avg("amount"), largest: db.orders.max("amount") } when header.authorization == env("ADMIN_TOKEN")
-GET /admin/products         => db.products.all() when header.authorization == env("ADMIN_TOKEN")
+GET /admin/revenue          => { orders: db.orders.count(), sold: db.orders.sum("qty"), avg: db.orders.avg("qty"), largest: db.orders.max("qty") } when header.authorization == env("ADMIN_TOKEN") else 403 "admin token required"
+GET /admin/products         => db.products.order("name") when header.authorization == env("ADMIN_TOKEN") else 403 "admin token required"
+GET /admin/low              => db.products.where("stock", "<", 5).order("stock").select("id", "name", "stock") when header.authorization == env("ADMIN_TOKEN") else 403 "admin token required"
+GET /admin/orders/by/tier   => db.orders.group("tier").count() when header.authorization == env("ADMIN_TOKEN") else 403 "admin token required"
