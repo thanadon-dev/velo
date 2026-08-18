@@ -1,0 +1,17 @@
+diff --git a/src/parser.rs b/src/parser.rs
+index c47dff7..d97561e 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -340,12 +340,6 @@ impl<'a> Parser<'a> {
+                     crate::ast::MAX_LOCALS
+                 ));
+             }
+-            if self.params.contains(&name.text) {
+-                return Err(format!(
+-                    "line {}:{}: {} is already a path parameter",
+-                    at.line, at.col, name.text
+-                ));
+-            }
+             let slot = self.locals.len();
+             self.locals.push(name.text.clone());
+             let body = self.expr();

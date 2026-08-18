@@ -1,0 +1,17 @@
+diff --git a/src/ast.rs b/src/ast.rs
+index 1ce8f12..d9b7b29 100644
+--- a/src/ast.rs
++++ b/src/ast.rs
+@@ -211,9 +211,9 @@ impl Expr {
+                 Ok(crate::store::attach(&base.eval(c)?, key, other, out))
+             }
+             Expr::Let(slot, value, body) => {
+-                let bound = value.eval(c)?;
+-                c.locals.borrow_mut()[*slot] = bound;
+-                body.eval(c)
++                let out = body.eval(c);
++                c.locals.borrow_mut()[*slot] = value.eval(c)?;
++                out
+             }
+             Expr::Local(slot) => Ok(c.locals.borrow()[*slot].clone()),
+             Expr::If(cond, yes, no) => match truthy(&cond.eval(c)?) {

@@ -1,0 +1,22 @@
+diff --git a/src/ast.rs b/src/ast.rs
+index 1ce8f12..6cf4e1a 100644
+--- a/src/ast.rs
++++ b/src/ast.rs
+@@ -216,10 +216,13 @@ impl Expr {
+                 body.eval(c)
+             }
+             Expr::Local(slot) => Ok(c.locals.borrow()[*slot].clone()),
+-            Expr::If(cond, yes, no) => match truthy(&cond.eval(c)?) {
+-                true => yes.eval(c),
+-                false => no.eval(c),
+-            },
++            Expr::If(cond, yes, no) => {
++                let (a, b) = (yes.eval(c)?, no.eval(c)?);
++                match truthy(&cond.eval(c)?) {
++                    true => Ok(a),
++                    false => Ok(b),
++                }
++            }
+             Expr::Select(base, fields) => {
+                 let mut names = Vec::with_capacity(fields.len());
+                 for f in fields {

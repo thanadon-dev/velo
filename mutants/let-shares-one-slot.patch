@@ -1,0 +1,13 @@
+diff --git a/src/parser.rs b/src/parser.rs
+index c47dff7..7d29bcb 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -346,7 +346,7 @@ impl<'a> Parser<'a> {
+                     at.line, at.col, name.text
+                 ));
+             }
+-            let slot = self.locals.len();
++            let slot = 0;
+             self.locals.push(name.text.clone());
+             let body = self.expr();
+             self.locals.pop();
