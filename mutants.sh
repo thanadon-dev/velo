@@ -5,7 +5,7 @@
 # which case it belongs in the equivalent list below.
 #
 #   ./mutants.sh                every patch, from the start
-#   ./mutants.sh <name>         one patch
+#   ./mutants.sh <name>         one patch, counted and reported on its own
 #   ./mutants.sh --resume       carry on from wherever the last run stopped
 set -u
 cd "$(dirname "$0")"
@@ -50,7 +50,7 @@ already=""
 if [ "$resume" -eq 1 ] && [ -f "$STATE" ] && [ "$(head -1 "$STATE")" = "stamp $now" ]; then
   already=$(sed 1d "$STATE" | cut -d' ' -f2)
   echo "resuming: $(sed 1d "$STATE" | wc -l | tr -d ' ') already answered"
-else
+elif [ -z "$only" ]; then
   if [ "$resume" -eq 1 ]; then
     echo "mutants: nothing to resume for this tree, starting over" >&2
   fi
@@ -75,9 +75,11 @@ restore() {
 }
 
 # Written before the next patch is applied, so a run that is killed rather than
-# stopped still has every answer it had already paid for.
+# stopped still has every answer it had already paid for. One patch on its own
+# leaves the file alone: reaching for a single fault to debug it should not throw
+# away the seventy minutes of a full run that was interrupted to do so.
 record() {
-  printf '%s %s\n' "$1" "$2" >> "$STATE"
+  [ -n "$only" ] || printf '%s %s\n' "$1" "$2" >> "$STATE"
 }
 
 # A run means nothing unless the suite passes on the code as written. Without this
@@ -94,7 +96,7 @@ caught=0
 survived=0
 skipped=0
 broken=0
-for was in $(sed 1d "$STATE" | cut -d' ' -f1); do
+for was in $([ -z "$only" ] && sed 1d "$STATE" 2>/dev/null | cut -d' ' -f1); do
   case "$was" in
     caught) caught=$((caught + 1)) ;;
     survived) survived=$((survived + 1)) ;;
@@ -164,7 +166,7 @@ echo "$caught caught, $survived survived, $broken broken, $skipped skipped"
 # milder because the cause is a refactor rather than a hole, but the fault is not
 # being looked for either way, so it fails the run and someone rewrites the patch.
 if [ "$survived" -eq 0 ] && [ "$skipped" -eq 0 ] && [ "$broken" -eq 0 ]; then
-  rm -f "$STATE"
+  [ -n "$only" ] || rm -f "$STATE"
   exit 0
 fi
 exit 1
