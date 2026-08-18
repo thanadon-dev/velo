@@ -3935,6 +3935,12 @@ POST /grow      => do {
                      db.b.create({ id: body.k })
                    }
 POST /seed/:id  => db.b.create({ id: id })
+POST /aseed/:id => db.a.create({ id: id, tag: "old" })
+GET  /atag      => db.a.where("tag", query.t).count()
+POST /growtag   => do {
+                     db.a.create({ id: body.k, tag: "new" }),
+                     db.b.create({ id: body.k })
+                   }
 "#;
 
 fn transacted() -> Arc<Server> {
@@ -3998,6 +4004,29 @@ fn undoing_two_steps_on_one_row_puts_it_back_the_way_it_was_found() {
     let rows = call(&s, "GET", "/a/rows", "").1;
     assert_eq!(rows.matches(r#""id""#).count(), 1, "a row survived the undo: {rows}");
     assert!(!rows.contains("taken"), "{rows}");
+}
+
+#[test]
+fn a_list_and_an_index_warmed_before_a_block_do_not_keep_what_it_undid() {
+    let s = transacted();
+    const ROWS: usize = 600;
+    for i in 0..ROWS {
+        assert_eq!(call(&s, "POST", &format!("/aseed/row{i}"), "").0, 201);
+    }
+    assert_eq!(call(&s, "GET", "/a", "").1, ROWS.to_string());
+    assert_eq!(call(&s, "GET", "/a/rows", "").1.matches(r#""tag""#).count(), ROWS);
+    assert_eq!(call(&s, "GET", "/atag?t=new", "").1, "0");
+    assert_eq!(call(&s, "GET", "/atag?t=old", "").1, ROWS.to_string());
+
+    assert_eq!(call(&s, "POST", "/seed/held", "").0, 201);
+    assert_eq!(call(&s, "POST", "/growtag", r#"{"k":"held"}"#).0, 409);
+
+    assert_eq!(call(&s, "GET", "/a", "").1, ROWS.to_string(), "count kept the undone row");
+    assert_eq!(call(&s, "GET", "/atag?t=new", "").1, "0", "the index kept the undone row");
+    let rows = call(&s, "GET", "/a/rows", "").1;
+    assert_eq!(rows.matches(r#""tag""#).count(), ROWS, "the cached list kept the undone row");
+    assert!(!rows.contains("held"), "the cached list kept the undone row");
+    assert_eq!(call(&s, "GET", "/a/held", "").0, 404);
 }
 
 #[test]
