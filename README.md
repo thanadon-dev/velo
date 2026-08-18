@@ -1,6 +1,6 @@
 # Velo
 
-**v1.52.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.53.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -106,6 +106,8 @@ Expressions:
 | function call | `now()`, `uuid()`, `len(x)`, `env("PORT")` | see below |
 | arithmetic | `query.page + 1`, `body.price * body.qty`, `(a + b) * 2` | `+` on two strings concatenates |
 | comparison | `query.limit < 100`, `header.x_key == env("KEY")` | numeric when both sides parse as numbers, otherwise string-to-string, otherwise false |
+| conditional | `body.qty > 100 ? "bulk" : "std"` | only the side that is chosen runs |
+| binding | `let id = uuid() in [...]` | computes once, readable everywhere after `in` |
 
 Built-in store (`db.<collection>.<op>`):
 
@@ -298,6 +300,25 @@ POST /todos      => db.todos.create({ id: uuid(), at: date(now()), text: body.te
 POST /events     => db.events.create({ id: uuid(), at: now(), data: body })
 GET  /users/mine => db.users.where("team", header.x_team)
 ```
+
+A value can depend on a condition. `cond ? a : b` answers `a` while `cond` holds and `b` once it does not, and only the side that is chosen runs:
+
+```velo
+POST /orders  => db.orders.create({ item: body.item, tier: body.qty > 100 ? "bulk" : "std" })
+GET  /price   => { each: 10, total: query.n * (query.n > 50 ? 8 : 10) }
+GET  /level   => query.n > 100 ? "huge" : query.n > 10 ? "big" : "small"
+```
+
+Until this, a value that depended on anything had to be a second route, and two routes cannot share a method and a path, so it could not be written at all. They nest to the right, so a ladder of conditions reads in the order it is checked. A conditional whose parts are all constant is folded at compile time like any other constant, so it costs nothing at runtime; one whose sides write only writes on the side taken, which a test proves by counting rows after the branch that does not.
+
+`let name = value in body` computes something once and reads it as many times as the route needs:
+
+```velo
+POST /orders => let id = uuid() in [db.orders.create({ id: id, item: body.item }), db.audit.create({ id: uuid(), order: id })]
+GET  /report => let n = default(query.n, 20) in { asked: n, rows: db.users.page(0, n) }
+```
+
+The first of those is the case that could not be written before: two collections have to agree on one generated id, and calling `uuid()` twice gives two. A name is bound to a slot at compile time rather than a map at runtime, so reading it costs an index; up to eight can be bound at once, and one that shadows a path parameter is a compile error rather than a quiet surprise. Bindings stack, and each may read the ones above it. A binding is only in scope after its `in`, so `let x = x in ...` is the same unknown identifier it would be anywhere else.
 
 `POST` routes answer `201`, everything else `200`. Append `: <code>` to set it yourself:
 
@@ -814,7 +835,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-210 tests (157 integration + 27 CLI + 8 fuzz + 18 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, a write-ahead log replayed after a SIGKILL, a second server refusing a data file that is taken, built-ins, CORS preflight, field projection and filters into nested objects, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, an outbound hook that the response does not wait for, a hook queue that drops rather than grows when the far end stops answering, hooks still in hand at a `SIGTERM` delivered before exit, intersected filters, list membership through the index, grouped counts and aggregates, a foreign key followed into another collection on one row and on a filtered page, under an alias, through a path, and with a key that names nothing, writes to either side of a join visible on the next read, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+216 tests (163 integration + 27 CLI + 8 fuzz + 18 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, a write-ahead log replayed after a SIGKILL, a second server refusing a data file that is taken, built-ins, CORS preflight, field projection and filters into nested objects, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, an outbound hook that the response does not wait for, a hook queue that drops rather than grows when the far end stops answering, hooks still in hand at a `SIGTERM` delivered before exit, intersected filters, list membership through the index, conditional values that fold when constant and run only the side they choose, names bound once and read twice including a generated id two collections must agree on, bindings that stack and that refuse to shadow a path parameter, grouped counts and aggregates, a foreign key followed into another collection on one row and on a filtered page, under an alias, through a path, and with a key that names nothing, writes to either side of a join visible on the next read, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
 

@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 pub const MAX_PARAMS: usize = 8;
+pub const MAX_LOCALS: usize = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Err_ {
@@ -26,6 +27,7 @@ pub struct Ctx<'a> {
     pub header: Value,
     pub header_raw: &'a [u8],
     pub cookies: RefCell<Vec<u8>>,
+    pub locals: RefCell<[Value; MAX_LOCALS]>,
     pub reason: RefCell<Option<Arc<str>>>,
 }
 
@@ -40,6 +42,7 @@ impl<'a> Default for Ctx<'a> {
             header: Value::Null,
             header_raw: &[],
             cookies: RefCell::new(Vec::new()),
+            locals: RefCell::new(std::array::from_fn(|_| Value::Null)),
             reason: RefCell::new(None),
         }
     }
@@ -73,6 +76,9 @@ pub enum Expr {
     Call(Builtin, Vec<Expr>),
     Cmp(Box<Expr>, bool, Box<Expr>),
     Bin(BinOp, Box<Expr>, Box<Expr>),
+    If(Box<Expr>, Box<Expr>, Box<Expr>),
+    Let(usize, Box<Expr>, Box<Expr>),
+    Local(usize),
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
 }
@@ -204,6 +210,16 @@ impl Expr {
             Expr::With(base, key, other, out) => {
                 Ok(crate::store::attach(&base.eval(c)?, key, other, out))
             }
+            Expr::Let(slot, value, body) => {
+                let bound = value.eval(c)?;
+                c.locals.borrow_mut()[*slot] = bound;
+                body.eval(c)
+            }
+            Expr::Local(slot) => Ok(c.locals.borrow()[*slot].clone()),
+            Expr::If(cond, yes, no) => match truthy(&cond.eval(c)?) {
+                true => yes.eval(c),
+                false => no.eval(c),
+            },
             Expr::Select(base, fields) => {
                 let mut names = Vec::with_capacity(fields.len());
                 for f in fields {
@@ -533,6 +549,10 @@ pub fn first_collection(e: &Expr) -> Option<&Arc<Collection>> {
             first_collection(base).or_else(|| fields.iter().find_map(first_collection))
         }
         Expr::With(base, ..) => first_collection(base),
+        Expr::Let(_, value, body) => first_collection(value).or_else(|| first_collection(body)),
+        Expr::If(cond, yes, no) => first_collection(cond)
+            .or_else(|| first_collection(yes))
+            .or_else(|| first_collection(no)),
         Expr::Object(fields) => fields.iter().find_map(|(_, e)| first_collection(e)),
         Expr::Array(items) | Expr::Call(_, items) => items.iter().find_map(first_collection),
         Expr::Cmp(l, _, r) | Expr::And(l, r) | Expr::Or(l, r) | Expr::Bin(_, l, r) => {

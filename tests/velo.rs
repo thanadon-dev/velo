@@ -3805,3 +3805,107 @@ fn with_is_refused_where_there_are_no_rows_to_attach_to() {
     let Err(err) = compile(src, None) else { panic!("{src} compiled") };
     assert!(err.contains("with() takes a collection"), "{err}");
 }
+
+const BIND: &str = r#"
+GET  /tier      => query.n > 10 ? "bulk" : "std"
+GET  /ladder    => query.n > 100 ? "huge" : query.n > 10 ? "big" : "small"
+GET  /folded    => 2 > 1 ? "yes" : "no"
+GET  /shaped    => { n: query.n, tier: query.n > 10 ? "bulk" : "std" }
+GET  /coded     => query.n > 5 ? "over" : "under" : 202
+GET  /branch    => query.n > 0 ? db.marks.create({ id: "hit" }) : "skipped"
+GET  /marks     => db.marks.count()
+POST /paired    => let oid = uuid() in [db.orders.create({ id: oid, item: body.item }), db.audit.create({ id: uuid(), order: oid })]
+GET  /twice     => let n = default(query.n, 1) in { a: n, b: n }
+GET  /stacked   => let a = 2 in let b = a + 3 in { a: a, b: b, sum: a + b }
+GET  /inner     => let x = 5 in let y = (let z = 1 in z) in { x: x, y: y }
+GET  /mixed/:id => let tag = default(query.t, "none") in { id: id, tag: tag, big: query.n > 10 ? tag : "small" }
+GET  /pure      => let x = 2 in x * 21
+"#;
+
+fn bound() -> Arc<Server> {
+    watchdog();
+    Server::new(compile(BIND, None).unwrap()).unwrap()
+}
+
+#[test]
+fn a_conditional_expression_picks_one_side_and_nests() {
+    let s = bound();
+    assert_eq!(call(&s, "GET", "/tier?n=50", "").1, "bulk");
+    assert_eq!(call(&s, "GET", "/tier?n=2", "").1, "std");
+    assert_eq!(call(&s, "GET", "/ladder?n=500", "").1, "huge");
+    assert_eq!(call(&s, "GET", "/ladder?n=50", "").1, "big");
+    assert_eq!(call(&s, "GET", "/ladder?n=1", "").1, "small");
+    assert_eq!(call(&s, "GET", "/shaped?n=50", "").1, r#"{"n":"50","tier":"bulk"}"#);
+    assert_eq!(call(&s, "GET", "/coded?n=9", ""), (202, "over".to_string(), TEXT));
+}
+
+#[test]
+fn only_the_side_a_condition_chooses_is_evaluated() {
+    let s = bound();
+    assert_eq!(call(&s, "GET", "/branch?n=0", "").1, "skipped");
+    assert_eq!(call(&s, "GET", "/marks", "").1, "0");
+    call(&s, "GET", "/branch?n=1", "");
+    assert_eq!(call(&s, "GET", "/marks", "").1, "1");
+}
+
+#[test]
+fn a_constant_conditional_folds_into_the_route() {
+    let prog = compile(BIND, None).unwrap();
+    let folded = prog.routes.iter().find(|r| r.pattern == "/folded").unwrap();
+    assert!(folded.konst.is_some(), "a constant conditional should not be evaluated per request");
+    let live = prog.routes.iter().find(|r| r.pattern == "/tier").unwrap();
+    assert!(live.konst.is_none());
+    let pure = prog.routes.iter().find(|r| r.pattern == "/pure").unwrap();
+    assert_eq!(
+        pure.konst.as_ref().map(|k| String::from_utf8_lossy(k).into_owned()).as_deref(),
+        Some("42")
+    );
+}
+
+#[test]
+fn a_bound_name_is_computed_once_and_seen_everywhere_it_is_used() {
+    let s = bound();
+    let (status, body, _) = call(&s, "POST", "/paired", r#"{"item":"kettle"}"#);
+    assert_eq!(status, 201);
+    let Value::Arr(pair) = parse_json(body.as_bytes()).unwrap() else { panic!("{body}") };
+    let order = pair[0].get("id").as_key();
+    assert_eq!(pair[1].get("order").as_key(), order, "{body}");
+    assert_ne!(pair[1].get("id").as_key(), order, "{body}");
+    assert_eq!(order.len(), 36, "{body}");
+}
+
+#[test]
+fn bindings_stack_and_read_the_ones_above_them() {
+    let s = bound();
+    assert_eq!(call(&s, "GET", "/twice?n=7", "").1, r#"{"a":"7","b":"7"}"#);
+    assert_eq!(call(&s, "GET", "/twice", "").1, r#"{"a":1,"b":1}"#);
+    assert_eq!(call(&s, "GET", "/stacked", "").1, r#"{"a":2,"b":5,"sum":7}"#);
+    assert_eq!(call(&s, "GET", "/inner", "").1, r#"{"x":5,"y":1}"#);
+    assert_eq!(
+        call(&s, "GET", "/mixed/abc?t=vip&n=50", "").1,
+        r#"{"id":"abc","tag":"vip","big":"vip"}"#
+    );
+    assert_eq!(
+        call(&s, "GET", "/mixed/abc?t=vip&n=1", "").1,
+        r#"{"id":"abc","tag":"vip","big":"small"}"#
+    );
+}
+
+#[test]
+fn a_binding_that_cannot_be_read_is_refused_at_compile_time() {
+    let cases = [
+        (r#"GET /x => let a = 1 a"#, "needs `in`"),
+        (r#"GET /x => let a 1 in a"#, "expected ="),
+        (r#"GET /x/:a => let a = 1 in a"#, "already a path parameter"),
+        (r#"GET /x => a"#, "unknown identifier"),
+        (r#"GET /x => let a = 1 in b"#, "unknown identifier"),
+        (
+            r#"GET /x => let a = 1 in let b = 1 in let c = 1 in let d = 1 in let e = 1 in let f = 1 in let g = 1 in let h = 1 in let i = 1 in i"#,
+            "no more than 8 names",
+        ),
+    ];
+    for (src, want) in cases {
+        let Err(err) = compile(src, None) else { panic!("{src} compiled") };
+        assert!(err.contains(want), "{src}: {err}");
+    }
+}

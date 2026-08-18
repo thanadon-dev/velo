@@ -102,6 +102,7 @@ pub fn compile_in(
         tok: Token { kind: Kind::Eof, text: String::new(), num: 0.0, line: 0, col: 1 },
         store: store.clone(),
         params: Vec::new(),
+        locals: Vec::new(),
         pure: true,
         body: false,
         query: false,
@@ -179,6 +180,7 @@ struct Parser<'a> {
     tok: Token,
     store: Arc<Store>,
     params: Vec<String>,
+    locals: Vec<String>,
     pure: bool,
     body: bool,
     query: bool,
@@ -317,6 +319,51 @@ impl<'a> Parser<'a> {
     }
 
     fn expr(&mut self) -> Result<Expr, String> {
+        if self.keyword("let") {
+            let at = self.tok.clone();
+            self.advance()?;
+            let name = self.expect(Kind::Ident)?;
+            self.expect(Kind::Assign)?;
+            let value = self.expr()?;
+            if !self.keyword("in") {
+                return Err(format!(
+                    "line {}:{}: let {} = ... needs `in` before what uses it",
+                    at.line, at.col, name.text
+                ));
+            }
+            self.advance()?;
+            if self.locals.len() >= crate::ast::MAX_LOCALS {
+                return Err(format!(
+                    "line {}:{}: no more than {} names can be bound at once",
+                    at.line,
+                    at.col,
+                    crate::ast::MAX_LOCALS
+                ));
+            }
+            if self.params.contains(&name.text) {
+                return Err(format!(
+                    "line {}:{}: {} is already a path parameter",
+                    at.line, at.col, name.text
+                ));
+            }
+            let slot = self.locals.len();
+            self.locals.push(name.text.clone());
+            let body = self.expr();
+            self.locals.pop();
+            return Ok(Expr::Let(slot, Box::new(value), Box::new(body?)));
+        }
+        let cond = self.or_level()?;
+        if self.tok.kind != Kind::Question {
+            return Ok(cond);
+        }
+        self.advance()?;
+        let yes = self.expr()?;
+        self.expect(Kind::Colon)?;
+        let no = self.expr()?;
+        Ok(Expr::If(Box::new(cond), Box::new(yes), Box::new(no)))
+    }
+
+    fn or_level(&mut self) -> Result<Expr, String> {
         let mut left = self.and_level()?;
         while self.keyword("or") {
             self.advance()?;
@@ -621,6 +668,9 @@ impl<'a> Parser<'a> {
                 }
             }
             return self.fields(Expr::Call(f, args));
+        }
+        if let Some(i) = self.locals.iter().rposition(|p| *p == head.text) {
+            return self.fields(Expr::Local(i));
         }
         if let Some(i) = self.params.iter().position(|p| *p == head.text) {
             self.pure = false;

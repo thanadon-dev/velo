@@ -25,6 +25,8 @@ pub enum Kind {
     Minus,
     Star,
     Slash,
+    Question,
+    Assign,
 }
 
 impl Kind {
@@ -55,6 +57,8 @@ impl Kind {
             Kind::Minus => "-",
             Kind::Star => "*",
             Kind::Slash => "/",
+            Kind::Question => "?",
+            Kind::Assign => "=",
         }
     }
 }
@@ -177,6 +181,8 @@ impl<'a> Lexer<'a> {
             b'-' => Kind::Minus,
             b'*' => Kind::Star,
             b'/' => Kind::Slash,
+            b'?' => Kind::Question,
+            b'=' => Kind::Assign,
             b'(' => Kind::LParen,
             b')' => Kind::RParen,
             b'{' => Kind::LBrace,
