@@ -1,0 +1,13 @@
+diff --git a/src/store.rs b/src/store.rs
+index 318ca95..6e00716 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1706,7 +1706,7 @@ pub fn attach(v: &Value, key: &str, other: &Collection, out: &str) -> Value {
+                     false => fields.push((k.clone(), val.clone())),
+                 }
+             }
+-            if !placed {
++            if !placed && !matches!(found, Value::Null) {
+                 fields.push((crate::value::intern(out), found));
+             }
+             Value::obj(fields)

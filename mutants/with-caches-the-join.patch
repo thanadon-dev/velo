@@ -1,0 +1,32 @@
+diff --git a/src/store.rs b/src/store.rs
+index 318ca95..3d3ec36 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1685,6 +1685,27 @@ fn obj_of(v: &Value) -> Option<&Arc<Obj>> {
+ }
+ 
+ pub fn attach(v: &Value, key: &str, other: &Collection, out: &str) -> Value {
++    thread_local! {
++        static DONE: std::cell::RefCell<Keyed<Value>> = std::cell::RefCell::new(HashMap::default());
++    }
++    if let Value::Arr(items) = v {
++        let mut ck = String::new();
++        ck.push_str(key);
++        ck.push('|');
++        ck.push_str(out);
++        ck.push('|');
++        ck.push_str(&other.tag);
++        ck.push('|');
++        ck.push_str(&items.len().to_string());
++        if let Some(hit) = DONE.with(|d| d.borrow().get(&ck).cloned()) {
++            return hit;
++        }
++        let built = Value::Arr(Arc::new(items.iter().map(|i| attach(i, key, other, out)).collect()));
++        DONE.with(|d| {
++            d.borrow_mut().insert(ck, built.clone());
++        });
++        return built;
++    }
+     match v {
+         Value::Arr(items) => {
+             Value::Arr(Arc::new(items.iter().map(|i| attach(i, key, other, out)).collect()))

@@ -1,0 +1,14 @@
+diff --git a/src/store.rs b/src/store.rs
+index 318ca95..ea0017d 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1690,8 +1690,7 @@ pub fn attach(v: &Value, key: &str, other: &Collection, out: &str) -> Value {
+             Value::Arr(Arc::new(items.iter().map(|i| attach(i, key, other, out)).collect()))
+         }
+         Value::Obj(o) | Value::Row(o, _) => {
+-            let mut at = 0;
+-            let found = match v.get_at(key, &mut at) {
++            let found = match v.get_ref(key) {
+                 None | Some(Value::Null) => Value::Null,
+                 Some(want) => other.find(&want.as_key_ref()).unwrap_or(Value::Null),
+             };

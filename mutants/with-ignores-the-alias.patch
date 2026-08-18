@@ -1,0 +1,16 @@
+diff --git a/src/parser.rs b/src/parser.rs
+index b146b61..766e71c 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -642,7 +642,10 @@ impl<'a> Parser<'a> {
+         let out: Arc<str> = match self.tok.kind {
+             Kind::Comma => {
+                 self.advance()?;
+-                Arc::from(self.expect(Kind::Str)?.text.as_str())
++                {
++                    self.expect(Kind::Str)?;
++                    Arc::from(key.text.as_str())
++                }
+             }
+             _ => Arc::from(key.text.as_str()),
+         };

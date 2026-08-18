@@ -1,0 +1,12 @@
+diff --git a/src/store.rs b/src/store.rs
+index 318ca95..56ec075 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -242,7 +242,6 @@ impl Snapshot {
+         self.all_json = None;
+         self.list_used.store(false, Ordering::Relaxed);
+         self.cache.get_mut().unwrap().clear();
+-        self.rows_cache.get_mut().unwrap().clear();
+     }
+ 
+     fn cached_rows(&self, key: &str) -> Option<Arc<Vec<Value>>> {
