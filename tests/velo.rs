@@ -3928,6 +3928,12 @@ POST /twice     => do { db.a.create({ id: body.k }), db.a.create({ id: body.k })
 GET  /a         => db.a.count()
 GET  /b         => db.b.count()
 GET  /a/:id     => db.a.find(id)
+GET  /a/rows    => db.a.all()
+POST /grow      => do {
+                     db.a.create({ id: body.k }),
+                     db.a.update(body.k, { n: 1 }),
+                     db.b.create({ id: body.k })
+                   }
 POST /seed/:id  => db.b.create({ id: id })
 "#;
 
@@ -3977,6 +3983,21 @@ fn a_write_that_is_rolled_back_cannot_be_found_by_any_route() {
     assert_eq!(call(&s, "GET", "/orders", "").1.matches(r#""id""#).count(), 1);
     assert_eq!(call(&s, "GET", "/orders/of?item=widget", "").1.matches(r#""id""#).count(), 1);
     assert_eq!(call(&s, "GET", "/stock/widget", "").1, r#"{"id":"widget","count":9}"#);
+}
+
+#[test]
+fn undoing_two_steps_on_one_row_puts_it_back_the_way_it_was_found() {
+    let s = transacted();
+    assert_eq!(call(&s, "POST", "/grow", r#"{"k":"new"}"#).0, 201);
+    assert_eq!(call(&s, "GET", "/a/new", "").1, r#"{"id":"new","n":1}"#);
+
+    assert_eq!(call(&s, "POST", "/seed/taken", "").0, 201);
+    assert_eq!(call(&s, "POST", "/grow", r#"{"k":"taken"}"#).0, 409);
+    assert_eq!(call(&s, "GET", "/a", "").1, "1", "the undone row is still counted");
+    assert_eq!(call(&s, "GET", "/a/taken", "").0, 404);
+    let rows = call(&s, "GET", "/a/rows", "").1;
+    assert_eq!(rows.matches(r#""id""#).count(), 1, "a row survived the undo: {rows}");
+    assert!(!rows.contains("taken"), "{rows}");
 }
 
 #[test]
