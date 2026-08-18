@@ -51,7 +51,7 @@ for patch in mutants/*.patch; do
   current="$patch"
   if ! git apply "$patch" 2>/dev/null; then
     current=""
-    echo "SKIPPED  $name (the code it changes has moved)"
+    echo "SKIPPED  $name (the code it changes has moved, so this fault went unchecked)"
     skipped=$((skipped + 1))
     continue
   fi
@@ -87,4 +87,7 @@ for patch in mutants/*.patch; do
 done
 
 echo "$caught caught, $survived survived, $broken broken, $skipped skipped"
-[ "$survived" -eq 0 ] || exit 1
+# A skipped patch is an unchecked fault, the same as one that survives. It reads
+# milder because the cause is a refactor rather than a hole, but the fault is not
+# being looked for either way, so it fails the run and someone rewrites the patch.
+[ "$survived" -eq 0 ] && [ "$skipped" -eq 0 ] && [ "$broken" -eq 0 ] || exit 1

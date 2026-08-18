@@ -1,9 +1,9 @@
 diff --git a/src/ast.rs b/src/ast.rs
-index 1ce8f12..d9b7b29 100644
+index 73dc1a8..b48d3e5 100644
 --- a/src/ast.rs
 +++ b/src/ast.rs
-@@ -211,9 +211,9 @@ impl Expr {
-                 Ok(crate::store::attach(&base.eval(c)?, key, other, out))
+@@ -229,9 +229,9 @@ impl Expr {
+                 }
              }
              Expr::Let(slot, value, body) => {
 -                let bound = value.eval(c)?;

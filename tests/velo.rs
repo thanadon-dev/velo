@@ -609,7 +609,7 @@ fn unique_survives_update_and_upsert() {
 #[test]
 fn a_racing_upsert_always_answers_with_the_row_it_stored() {
     const THREADS: usize = 8;
-    const ROUNDS: usize = 200;
+    const ROUNDS: usize = 1500;
     let s = server();
     let gate = Arc::new(std::sync::Barrier::new(THREADS));
     let handles: Vec<_> = (0..THREADS)
