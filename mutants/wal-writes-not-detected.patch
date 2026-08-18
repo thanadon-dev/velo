@@ -1,0 +1,13 @@
+diff --git a/src/ast.rs b/src/ast.rs
+index 923c3ff..8044640 100644
+--- a/src/ast.rs
++++ b/src/ast.rs
+@@ -613,7 +613,7 @@ pub fn writes_to_store(e: &Expr) -> bool {
+                 | Op::DeleteWhere(..)
+                 | Op::Clear
+         ),
+-        Expr::Do(_) => true,
++        Expr::Do(_) => false,
+         Expr::Field(base, _) | Expr::With(base, ..) => writes_to_store(base),
+         Expr::Select(base, rest) => writes_to_store(base) || rest.iter().any(writes_to_store),
+         Expr::Let(_, value, body) => writes_to_store(value) || writes_to_store(body),

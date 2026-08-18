@@ -36,6 +36,13 @@ restore() {
   return 0
 }
 
+# A run means nothing unless the suite passes on the code as written. Without this
+# check a suite that is already failing reports every single patch as caught.
+if ! cargo test --profile mutants >/dev/null 2>&1; then
+  echo "mutants: the suite does not pass on unmutated code, so nothing can be learned from it" >&2
+  exit 1
+fi
+
 current=""
 trap 'restore >/dev/null 2>&1 || true' EXIT INT TERM
 

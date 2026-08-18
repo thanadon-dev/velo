@@ -1,0 +1,13 @@
+diff --git a/src/http.rs b/src/http.rs
+index 2379180..005d823 100644
+--- a/src/http.rs
++++ b/src/http.rs
+@@ -241,7 +241,7 @@ impl Server {
+                 },
+             }
+         }
+-        if rt.writes && self.store.wal_broken() {
++        if false && rt.writes && self.store.wal_broken() {
+             return self.fail(
+                 Some(idx),
+                 Err_ { status: 503, msg: "the log is not being written" },

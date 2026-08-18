@@ -1640,7 +1640,8 @@ fn a_server_whose_log_stops_being_written_refuses_writes_rather_than_losing_them
         "GET  /health => \"ok\"\n\
          GET  /users  => db.users.all()\n\
          POST /users  => db.users.create(body)\n\
-         PUT  /users/:id => db.users.upsert(id, body)\n",
+         PUT  /users/:id => db.users.upsert(id, body)\n\
+         POST /pair   => do { db.users.create(body), db.audit.create(body) }\n",
     );
     let port = free_port();
     let mut child = Command::new(BIN)
@@ -1668,6 +1669,8 @@ fn a_server_whose_log_stops_being_written_refuses_writes_rather_than_losing_them
         "PUT /users/1 HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\nConnection: close\r\n\r\n{\"n\":99}",
     );
     assert!(put.contains("503"), "every route that writes is refused, not just one: {put}");
+    let block = post(port, "/pair", r#"{"n":5}"#);
+    assert!(block.contains("503"), "a block of writes is refused too: {block}");
 
     assert!(get(port, "/health").ends_with("ok"), "reads carry on");
     assert!(get(port, "/users").ends_with(r#"[{"id":1,"n":1}]"#));

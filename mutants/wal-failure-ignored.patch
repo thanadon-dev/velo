@@ -1,0 +1,13 @@
+diff --git a/src/wal.rs b/src/wal.rs
+index 545ad0a..43214b0 100644
+--- a/src/wal.rs
++++ b/src/wal.rs
+@@ -72,7 +72,7 @@ impl Wal {
+     fn append(&self, line: Vec<u8>) {
+         let mut file = self.file.lock().unwrap();
+         if let Err(e) = file.write_all(&line) {
+-            self.failed(e);
++            eprintln!("velo: wal {}: {e}", self.path.display());
+             return;
+         }
+         if self.sync {
