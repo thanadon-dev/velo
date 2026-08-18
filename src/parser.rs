@@ -1,5 +1,7 @@
 use crate::lexer::{Kind, Lexer, Token};
-use crate::store::Store;
+use crate::store::{Collection, Store};
+
+type Join = (Arc<str>, Arc<Collection>, Arc<str>);
 use crate::value::Value;
 use std::sync::Arc;
 
@@ -627,6 +629,31 @@ impl<'a> Parser<'a> {
         Err(format!("line {}:{}: unknown identifier {:?}", head.line, head.col, head.text))
     }
 
+    fn with_args(&mut self, line: usize, col: usize) -> Result<Join, String> {
+        self.expect(Kind::LParen)?;
+        let key = self.expect(Kind::Str)?;
+        self.expect(Kind::Comma)?;
+        let db = self.expect(Kind::Ident)?;
+        if db.text != "db" {
+            return Err(format!("line {line}:{col}: with() takes a collection, as db.<name>"));
+        }
+        self.expect(Kind::Dot)?;
+        let name = self.expect(Kind::Ident)?;
+        let out: Arc<str> = match self.tok.kind {
+            Kind::Comma => {
+                self.advance()?;
+                Arc::from(self.expect(Kind::Str)?.text.as_str())
+            }
+            _ => Arc::from(key.text.as_str()),
+        };
+        self.expect(Kind::RParen)?;
+        if key.text.is_empty() || out.is_empty() {
+            return Err(format!("line {line}:{col}: with() needs a field name"));
+        }
+        self.pure = false;
+        Ok((Arc::from(key.text.as_str()), self.store.collection(&name.text), out))
+    }
+
     fn fields(&mut self, base: Expr) -> Result<Expr, String> {
         let mut cur = base;
         while self.tok.kind == Kind::Dot {
@@ -641,6 +668,11 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 cur = Expr::Select(Box::new(cur), args);
+                continue;
+            }
+            if name.text == "with" && self.tok.kind == Kind::LParen {
+                let (key, other, out) = self.with_args(name.line, name.col)?;
+                cur = Expr::With(Box::new(cur), key, other, out);
                 continue;
             }
             cur = Expr::Field(Box::new(cur), Arc::from(name.text.as_str()));
@@ -670,6 +702,7 @@ impl<'a> Parser<'a> {
         let mut op = self.expect(Kind::Ident)?;
         let mut calls: Vec<(String, Vec<Expr>)> = Vec::new();
         let mut field = None;
+        let mut join = None;
         loop {
             let args = self.call_args()?;
             calls.push((op.text.clone(), args));
@@ -682,22 +715,41 @@ impl<'a> Parser<'a> {
                 field = Some(next.text);
                 break;
             }
+            if next.text == "with" {
+                join = Some(self.with_args(next.line, next.col)?);
+                break;
+            }
             op = next;
         }
         let proj = take_projection(&name.text, &mut calls, line, at_col)?;
-        let op = if calls.len() == 1 {
+        let one_row = calls.iter().any(|(op, _)| op == "find" || op == "first");
+        let op = if join.is_some() && !one_row {
+            match chain_op(&name.text, calls, proj, line, at_col)? {
+                Op::Chain(stages, Tail::List) => Op::Chain(stages, Tail::Rows),
+                _ => {
+                    return Err(format!(
+                        "line {line}:{at_col}: db.{}: with() needs rows, so it goes before select() and cannot follow a step that ends the chain",
+                        name.text
+                    ))
+                }
+            }
+        } else if calls.len() == 1 {
             let (op, args) = calls.pop().unwrap();
             single_op(&name.text, &op, args, proj, line, at_col)?
         } else {
             chain_op(&name.text, calls, proj, line, at_col)?
         };
         let expr = Expr::Db(col, op);
+        let expr = match join {
+            Some((key, other, out)) => Expr::With(Box::new(expr), key, other, out),
+            None => expr,
+        };
         match field {
             Some(f) => {
                 let base = Expr::Field(Box::new(expr), Arc::from(f.as_str()));
                 self.fields(base)
             }
-            None => Ok(expr),
+            None => self.fields(expr),
         }
     }
 }

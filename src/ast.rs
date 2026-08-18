@@ -66,6 +66,7 @@ pub enum Expr {
     CookieField(Arc<str>),
     Field(Box<Expr>, Arc<str>),
     Select(Box<Expr>, Vec<Expr>),
+    With(Box<Expr>, Arc<str>, Arc<Collection>, Arc<str>),
     Object(Vec<(Arc<str>, Expr)>),
     Array(Vec<Expr>),
     Db(Arc<Collection>, Op),
@@ -118,6 +119,7 @@ pub enum Stage {
 
 pub enum Tail {
     List,
+    Rows,
     Count,
     Agg(Agg, Box<Expr>),
     First(Vec<Expr>),
@@ -199,6 +201,9 @@ impl Expr {
             Expr::HeaderField(name) => Ok(crate::http::header_value(c.header_raw, name)),
             Expr::CookieField(name) => Ok(crate::http::cookie_value(c.header_raw, name)),
             Expr::Field(base, key) => Ok(base.eval(c)?.get(key)),
+            Expr::With(base, key, other, out) => {
+                Ok(crate::store::attach(&base.eval(c)?, key, other, out))
+            }
             Expr::Select(base, fields) => {
                 let mut names = Vec::with_capacity(fields.len());
                 for f in fields {
@@ -399,6 +404,7 @@ impl Expr {
                             Ok(col.query_group(&plan, &by, op))
                         }
                         Tail::List => Ok(col.query(&plan)),
+                        Tail::Rows => Ok(col.query_rows(&plan)),
                         Tail::Count => Ok(col.query_count(&plan)),
                         Tail::Agg(agg, f) => Ok(col.query_agg(&plan, *agg, &f.eval(c)?.as_key())),
                         Tail::First(fields) => {
@@ -526,6 +532,7 @@ pub fn first_collection(e: &Expr) -> Option<&Arc<Collection>> {
         Expr::Select(base, fields) => {
             first_collection(base).or_else(|| fields.iter().find_map(first_collection))
         }
+        Expr::With(base, ..) => first_collection(base),
         Expr::Object(fields) => fields.iter().find_map(|(_, e)| first_collection(e)),
         Expr::Array(items) | Expr::Call(_, items) => items.iter().find_map(first_collection),
         Expr::Cmp(l, _, r) | Expr::And(l, r) | Expr::Or(l, r) | Expr::Bin(_, l, r) => {

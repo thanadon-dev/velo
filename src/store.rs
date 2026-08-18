@@ -111,6 +111,7 @@ struct Snapshot {
     all_json: Option<Arc<Vec<u8>>>,
     list_used: AtomicBool,
     cache: RwLock<Keyed<Arc<Vec<u8>>>>,
+    rows_cache: RwLock<Keyed<Arc<Vec<Value>>>>,
     index: RwLock<HashMap<String, HashMap<String, Vec<u32>>>>,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -241,6 +242,27 @@ impl Snapshot {
         self.all_json = None;
         self.list_used.store(false, Ordering::Relaxed);
         self.cache.get_mut().unwrap().clear();
+        self.rows_cache.get_mut().unwrap().clear();
+    }
+
+    fn cached_rows(&self, key: &str) -> Option<Arc<Vec<Value>>> {
+        let hit = self.rows_cache.read().unwrap().get(key).cloned();
+        let counter = if hit.is_some() { &self.hits } else { &self.misses };
+        counter.fetch_add(1, Ordering::Relaxed);
+        hit
+    }
+
+    fn store_rows(&self, key: &str, rows: Arc<Vec<Value>>, budget: usize) {
+        let size = rows.len() * std::mem::size_of::<Value>();
+        if size > budget {
+            return;
+        }
+        let mut cache = self.rows_cache.write().unwrap();
+        let used: usize = cache.values().map(|v| v.len() * std::mem::size_of::<Value>()).sum();
+        if cache.len() >= CACHE_MAX || used + size > budget {
+            cache.clear();
+        }
+        cache.insert(key.to_string(), rows);
     }
 
     fn cached(&self, key: &str) -> Option<Arc<Vec<u8>>> {
@@ -304,6 +326,7 @@ impl Collection {
                 all_json: None,
                 list_used: AtomicBool::new(false),
                 cache: RwLock::new(HashMap::default()),
+                rows_cache: RwLock::new(HashMap::default()),
                 index: RwLock::new(HashMap::new()),
                 hits: AtomicU64::new(0),
                 misses: AtomicU64::new(0),
@@ -497,6 +520,25 @@ impl Collection {
             |s| plan_hits(s, stages),
             |rows, hits| rows_json(&run_stages_hit(rows, stages, hits)),
         )
+    }
+
+    pub fn query_rows(&self, stages: &[Stage]) -> Value {
+        let key = chain_key(stages);
+        let version = self.version.load(Ordering::Acquire);
+        if let Some(rows) = self.snap.read().unwrap().cached_rows(&key) {
+            return Value::Arr(rows);
+        }
+        let (rows, hits) = {
+            let s = self.snap.read().unwrap();
+            (s.rows.clone(), plan_hits(&s, stages))
+        };
+        let picked: Arc<Vec<Value>> =
+            Arc::new(run_stages_hit(&rows, stages, hits).into_iter().cloned().collect());
+        let s = self.snap.read().unwrap();
+        if self.version.load(Ordering::Acquire) == version {
+            s.store_rows(&key, picked.clone(), self.limits.cache_bytes);
+        }
+        Value::Arr(picked)
     }
 
     pub fn query_count(&self, stages: &[Stage]) -> Value {
@@ -1639,6 +1681,37 @@ fn obj_of(v: &Value) -> Option<&Arc<Obj>> {
     match v {
         Value::Obj(o) | Value::Row(o, _) => Some(o),
         _ => None,
+    }
+}
+
+pub fn attach(v: &Value, key: &str, other: &Collection, out: &str) -> Value {
+    match v {
+        Value::Arr(items) => {
+            Value::Arr(Arc::new(items.iter().map(|i| attach(i, key, other, out)).collect()))
+        }
+        Value::Obj(o) | Value::Row(o, _) => {
+            let mut at = 0;
+            let found = match v.get_at(key, &mut at) {
+                None | Some(Value::Null) => Value::Null,
+                Some(want) => other.find(&want.as_key_ref()).unwrap_or(Value::Null),
+            };
+            let mut fields: crate::value::Obj = Vec::with_capacity(o.len() + 1);
+            let mut placed = false;
+            for (k, val) in o.iter() {
+                match &**k == out {
+                    true => {
+                        fields.push((k.clone(), found.clone()));
+                        placed = true;
+                    }
+                    false => fields.push((k.clone(), val.clone())),
+                }
+            }
+            if !placed {
+                fields.push((crate::value::intern(out), found));
+            }
+            Value::obj(fields)
+        }
+        plain => plain.clone(),
     }
 }
 

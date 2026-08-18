@@ -3647,3 +3647,161 @@ fn expiry_sweeping_beside_live_traffic_keeps_what_it_should() {
         assert!(sessions.find(&format!("seed-{i}")).is_none(), "seed-{i} should have expired");
     }
 }
+
+const JOIN: &str = r#"
+POST /users    => db.users.create(body)
+PUT  /users/:id => db.users.upsert(id, body)
+POST /orders   => db.orders.create(body)
+GET  /one/:id  => db.orders.find(id).with("customer", db.users)
+GET  /list     => db.orders.all().with("customer", db.users)
+GET  /open     => db.orders.where("status", "open").order("id").with("customer", db.users)
+GET  /aliased  => db.orders.all().with("customer", db.users, "who")
+GET  /shaped   => db.orders.all().with("customer", db.users).select("id", "customer.name")
+GET  /top      => db.orders.order("-total").page(0, 1).with("customer", db.users)
+GET  /nested   => db.orders.all().with("meta.owner", db.users, "owner")
+GET  /name/:id => db.orders.find(id).with("customer", db.users).customer.name
+"#;
+
+fn joined() -> Arc<Server> {
+    watchdog();
+    let s = Server::new(compile(JOIN, None).unwrap()).unwrap();
+    call(&s, "POST", "/users", r#"{"id":"u1","name":"mark","team":"blue"}"#);
+    call(&s, "POST", "/users", r#"{"id":"u2","name":"lek","team":"red"}"#);
+    call(&s, "POST", "/orders", r#"{"id":"o1","customer":"u1","total":100,"status":"open"}"#);
+    call(&s, "POST", "/orders", r#"{"id":"o2","customer":"u2","total":50,"status":"done"}"#);
+    call(
+        &s,
+        "POST",
+        "/orders",
+        r#"{"id":"o3","customer":"gone","total":5,"status":"open","meta":{"owner":"u2"}}"#,
+    );
+    s
+}
+
+#[test]
+fn with_puts_the_row_a_field_points_at_where_the_field_was() {
+    let s = joined();
+    let (status, body, _) = call(&s, "GET", "/one/o1", "");
+    assert_eq!(status, 200);
+    assert_eq!(
+        body,
+        r#"{"id":"o1","customer":{"id":"u1","name":"mark","team":"blue"},"total":100,"status":"open"}"#
+    );
+}
+
+#[test]
+fn with_leaves_a_key_that_points_at_nothing_as_null_rather_than_dropping_the_row() {
+    let s = joined();
+    let (_, body, _) = call(&s, "GET", "/list", "");
+    let rows = parse_json(body.as_bytes()).unwrap();
+    let Value::Arr(rows) = rows else { panic!("{body}") };
+    assert_eq!(rows.len(), 3, "{body}");
+    assert_eq!(rows[0].get("customer").get("name").as_key(), "mark");
+    assert!(matches!(rows[2].get("customer"), Value::Null), "{body}");
+}
+
+#[test]
+fn a_third_argument_names_the_field_the_row_lands_in_and_keeps_the_key() {
+    let s = joined();
+    let (_, body, _) = call(&s, "GET", "/aliased", "");
+    assert!(
+        body.contains(r#""customer":"u1","total":100,"status":"open","who":{"id":"u1""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            r#""customer":"gone","total":5,"status":"open","meta":{"owner":"u2"},"who":null"#
+        ),
+        "{body}"
+    );
+}
+
+#[test]
+fn with_composes_with_filters_sorting_paging_and_a_path_projection() {
+    let s = joined();
+    let (_, open, _) = call(&s, "GET", "/open", "");
+    assert_eq!(
+        open,
+        r#"[{"id":"o1","customer":{"id":"u1","name":"mark","team":"blue"},"total":100,"status":"open"},{"id":"o3","customer":null,"total":5,"status":"open","meta":{"owner":"u2"}}]"#
+    );
+
+    let (_, top, _) = call(&s, "GET", "/top", "");
+    assert_eq!(
+        top,
+        r#"[{"id":"o1","customer":{"id":"u1","name":"mark","team":"blue"},"total":100,"status":"open"}]"#
+    );
+
+    let (_, shaped, _) = call(&s, "GET", "/shaped", "");
+    assert_eq!(
+        shaped,
+        r#"[{"id":"o1","customer":{"name":"mark"}},{"id":"o2","customer":{"name":"lek"}},{"id":"o3"}]"#
+    );
+}
+
+#[test]
+fn the_key_may_be_a_path_and_the_joined_row_may_be_read_through() {
+    let s = joined();
+    let (_, body, _) = call(&s, "GET", "/nested", "");
+    assert!(
+        body.contains(r#""meta":{"owner":"u2"},"owner":{"id":"u2","name":"lek","team":"red"}"#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#""id":"o1","customer":"u1","total":100,"status":"open","owner":null"#),
+        "{body}"
+    );
+
+    let (status, name, ct) = call(&s, "GET", "/name/o1", "");
+    assert_eq!((status, name.as_str(), ct), (200, "mark", TEXT));
+}
+
+#[test]
+fn a_write_to_the_joined_collection_shows_up_on_the_very_next_read() {
+    let s = joined();
+    assert!(call(&s, "GET", "/list", "").1.contains(r#""name":"mark""#));
+    assert!(call(&s, "GET", "/one/o1", "").1.contains(r#""name":"mark""#));
+
+    call(&s, "PUT", "/users/u1", r#"{"name":"renamed"}"#);
+
+    let (_, list, _) = call(&s, "GET", "/list", "");
+    assert!(list.contains(r#""name":"renamed""#) && !list.contains(r#""name":"mark""#), "{list}");
+    let (_, one, _) = call(&s, "GET", "/one/o1", "");
+    assert!(one.contains(r#""name":"renamed""#), "{one}");
+
+    call(&s, "POST", "/users", r#"{"id":"gone","name":"arrived"}"#);
+    let (_, after, _) = call(&s, "GET", "/list", "");
+    assert!(after.contains(r#""name":"arrived""#), "{after}");
+}
+
+#[test]
+fn a_write_to_the_collection_being_read_shows_up_through_a_join_as_well() {
+    let s = joined();
+    let (_, before, _) = call(&s, "GET", "/open", "");
+    assert_eq!(before.matches(r#""status":"open""#).count(), 2, "{before}");
+
+    call(&s, "POST", "/orders", r#"{"id":"o4","customer":"u2","total":7,"status":"open"}"#);
+    let (_, after, _) = call(&s, "GET", "/open", "");
+    assert_eq!(after.matches(r#""status":"open""#).count(), 3, "{after}");
+    assert!(after.contains(r#"{"id":"o4","customer":{"id":"u2","name":"lek""#), "{after}");
+
+    call(&s, "PUT", "/users/u2", r#"{"name":"changed"}"#);
+    let (_, joined_again, _) = call(&s, "GET", "/open", "");
+    assert!(joined_again.contains(r#""name":"changed""#), "{joined_again}");
+    assert!(joined_again.contains(r#""id":"o4""#), "{joined_again}");
+}
+
+#[test]
+fn with_is_refused_where_there_are_no_rows_to_attach_to() {
+    for src in [
+        r#"GET /x => db.orders.count().with("customer", db.users)"#,
+        r#"GET /x => db.orders.all().select("id").with("customer", db.users)"#,
+        r#"GET /x => db.orders.group("status").count().with("c", db.users)"#,
+        r#"GET /x => db.orders.sum("total").with("c", db.users)"#,
+    ] {
+        let Err(err) = compile(src, None) else { panic!("{src} compiled") };
+        assert!(err.contains("with() needs rows"), "{src}: {err}");
+    }
+    let src = r#"GET /x => db.orders.all().with("customer", users)"#;
+    let Err(err) = compile(src, None) else { panic!("{src} compiled") };
+    assert!(err.contains("with() takes a collection"), "{err}");
+}

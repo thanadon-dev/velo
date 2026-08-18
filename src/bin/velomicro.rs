@@ -98,7 +98,8 @@ fn main() {
                GET /g => db.users.group(\"team\").count()\n\
                GET /gw => db.users.where(\"name\", \"!=\", \"zz\").group(\"team\").count()\n\
                POST /w => db.users.create(body)\n\
-               DELETE /d/:id => db.users.delete(id)\n";
+               DELETE /d/:id => db.users.delete(id)\n\
+               GET /j => db.orders.where(\"team\", query.t).page(0, 20).with(\"customer\", db.users)\n";
     let store = velo::Store::new();
     let prog = compile(src, Some(store.clone())).unwrap();
     let s = Server::new(prog).unwrap();
@@ -169,6 +170,25 @@ fn main() {
         }
         let per = t0.elapsed().as_secs_f64() / n as f64;
         report.add(name, per, out.len());
+    }
+    {
+        let orders = store.collection("orders");
+        for i in 0..rows {
+            let v = velo::value::parse_json(
+                format!("{{\"team\":\"x\",\"customer\":\"{}\"}}", i % rows + 1).as_bytes(),
+            )
+            .unwrap();
+            orders.create(v, &[]).unwrap();
+        }
+        let t0 = Instant::now();
+        let n = 20_000;
+        let mut out = Vec::new();
+        for _ in 0..n {
+            out.clear();
+            s.dispatch("GET", "/j?t=x", b"", &mut out);
+        }
+        let per = t0.elapsed().as_secs_f64() / n as f64;
+        report.add("join_page", per, out.len());
     }
     {
         let n = 20_000;
