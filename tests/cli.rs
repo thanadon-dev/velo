@@ -1621,3 +1621,63 @@ fn migrate_changes_every_row_and_refuses_a_file_a_server_is_holding() {
     }
     let _ = std::fs::remove_file(data.with_file_name("mig.json.lock"));
 }
+
+#[test]
+fn a_server_whose_log_stops_being_written_refuses_writes_rather_than_losing_them() {
+    if !std::path::Path::new("/dev/full").exists() {
+        return;
+    }
+    let app = tmp("nolog.velo");
+    let log = tmp("nolog.log");
+    let said = tmp("nolog.err");
+    let lock = tmp("nolog.log.lock");
+    for f in [&log, &lock, &said] {
+        let _ = std::fs::remove_file(f);
+    }
+    std::os::unix::fs::symlink("/dev/full", &log).unwrap();
+    write(
+        &app,
+        "GET  /health => \"ok\"\n\
+         GET  /users  => db.users.all()\n\
+         POST /users  => db.users.create(body)\n\
+         PUT  /users/:id => db.users.upsert(id, body)\n",
+    );
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--wal")
+        .arg(&log)
+        .env("VELO_METRICS", "/_metrics")
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(std::fs::File::create(&said).unwrap()))
+        .spawn()
+        .unwrap();
+
+    assert!(get(port, "/health").ends_with("ok"));
+    let first = post(port, "/users", r#"{"n":1}"#);
+    assert!(first.contains("201"), "the write that finds the fault still lands: {first}");
+    for n in 2..5 {
+        let refused = post(port, "/users", &format!(r#"{{"n":{n}}}"#));
+        assert!(refused.contains("503 Service Unavailable"), "{refused}");
+        assert!(refused.ends_with(r#"{"error":"the log is not being written"}"#), "{refused}");
+    }
+    let put = request(
+        port,
+        "PUT /users/1 HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\nConnection: close\r\n\r\n{\"n\":99}",
+    );
+    assert!(put.contains("503"), "every route that writes is refused, not just one: {put}");
+
+    assert!(get(port, "/health").ends_with("ok"), "reads carry on");
+    assert!(get(port, "/users").ends_with(r#"[{"id":1,"n":1}]"#));
+    let m = get(port, "/_metrics");
+    assert!(m.contains(r#""wal_failures":"#) && !m.contains(r#""wal_failures":0"#), "{m}");
+
+    stop(&mut child, "-TERM");
+    let printed = std::fs::read_to_string(&said).unwrap_or_default();
+    assert_eq!(printed.matches("velo: wal").count(), 1, "one line, not one per write: {printed}");
+    for f in [&app, &log, &lock, &said] {
+        let _ = std::fs::remove_file(f);
+    }
+}

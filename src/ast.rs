@@ -601,6 +601,34 @@ fn keep_fields(v: Value, names: &[Arc<str>]) -> Value {
     crate::value::keep_selected(&v, &crate::value::keep_plan(names))
 }
 
+pub fn writes_to_store(e: &Expr) -> bool {
+    match e {
+        Expr::Db(_, op) => matches!(
+            op,
+            Op::Create(..)
+                | Op::Update(..)
+                | Op::Upsert(..)
+                | Op::Incr(..)
+                | Op::Delete(_)
+                | Op::DeleteWhere(..)
+                | Op::Clear
+        ),
+        Expr::Do(_) => true,
+        Expr::Field(base, _) | Expr::With(base, ..) => writes_to_store(base),
+        Expr::Select(base, rest) => writes_to_store(base) || rest.iter().any(writes_to_store),
+        Expr::Let(_, value, body) => writes_to_store(value) || writes_to_store(body),
+        Expr::If(cond, yes, no) => {
+            writes_to_store(cond) || writes_to_store(yes) || writes_to_store(no)
+        }
+        Expr::Object(fields) => fields.iter().any(|(_, e)| writes_to_store(e)),
+        Expr::Array(items) | Expr::Call(_, items) => items.iter().any(writes_to_store),
+        Expr::Cmp(l, _, r) | Expr::And(l, r) | Expr::Or(l, r) | Expr::Bin(_, l, r) => {
+            writes_to_store(l) || writes_to_store(r)
+        }
+        _ => false,
+    }
+}
+
 pub fn first_collection(e: &Expr) -> Option<&Arc<Collection>> {
     match e {
         Expr::Db(col, _) => Some(col),

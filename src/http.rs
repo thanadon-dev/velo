@@ -241,6 +241,13 @@ impl Server {
                 },
             }
         }
+        if rt.writes && self.store.wal_broken() {
+            return self.fail(
+                Some(idx),
+                Err_ { status: 503, msg: "the log is not being written" },
+                out,
+            );
+        }
         if let Some(g) = &rt.guard {
             match g.eval(ctx) {
                 Ok(v) if crate::parser::truthy(&v) => {}
@@ -322,6 +329,10 @@ impl Server {
         f(out, ",\"max_micros\":", self.max_micros.load(Ordering::Relaxed));
         f(out, ",\"routes\":", self.routes.len() as u64);
         f(out, ",\"workers\":", self.workers as u64);
+        let failed_writes = self.store.wal_failures();
+        if failed_writes != 0 {
+            f(out, ",\"wal_failures\":", failed_writes);
+        }
         let sent = crate::hook::SENT.load(Ordering::Relaxed);
         let failed = crate::hook::FAILED.load(Ordering::Relaxed);
         let dropped = crate::hook::DROPPED.load(Ordering::Relaxed);

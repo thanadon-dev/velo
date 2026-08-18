@@ -37,24 +37,51 @@ pub struct Wal {
     path: PathBuf,
     file: Mutex<std::fs::File>,
     sync: bool,
+    broken: std::sync::atomic::AtomicBool,
+    failures: std::sync::atomic::AtomicU64,
 }
 
 impl Wal {
     pub fn open(path: &Path) -> std::io::Result<Wal> {
         let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
         let sync = std::env::var("VELO_WAL_SYNC").is_ok_and(|v| v == "1" || v == "true");
-        Ok(Wal { path: path.to_path_buf(), file: Mutex::new(file), sync })
+        Ok(Wal {
+            path: path.to_path_buf(),
+            file: Mutex::new(file),
+            sync,
+            broken: std::sync::atomic::AtomicBool::new(false),
+            failures: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    pub fn broken(&self) -> bool {
+        self.broken.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn failures(&self) -> u64 {
+        self.failures.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn failed(&self, what: std::io::Error) {
+        self.failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if !self.broken.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("velo: wal {}: {what}", self.path.display());
+        }
     }
 
     fn append(&self, line: Vec<u8>) {
         let mut file = self.file.lock().unwrap();
         if let Err(e) = file.write_all(&line) {
-            eprintln!("velo: wal {}: {e}", self.path.display());
+            self.failed(e);
             return;
         }
         if self.sync {
-            let _ = file.sync_data();
+            if let Err(e) = file.sync_data() {
+                self.failed(e);
+                return;
+            }
         }
+        self.broken.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn put(&self, coll: &str, row: &Value) {
@@ -172,6 +199,9 @@ pub enum Entry {
 }
 
 pub fn read(path: &Path) -> Result<Vec<Entry>, String> {
+    if std::fs::metadata(path).is_ok_and(|m| !m.is_file()) {
+        return Ok(Vec::new());
+    }
     let raw = match std::fs::read(path) {
         Ok(raw) => raw,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -224,6 +254,41 @@ pub fn read(path: &Path) -> Result<Vec<Entry>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_log_that_cannot_be_written_says_so_and_keeps_saying_so() {
+        let full = std::path::Path::new("/dev/full");
+        if !full.exists() {
+            return;
+        }
+        let wal = super::Wal::open(full).unwrap();
+        assert!(!wal.broken(), "a log is not broken before anything is asked of it");
+        wal.delete("users", "a");
+        assert!(wal.broken(), "a write that failed must be remembered");
+        assert_eq!(wal.failures(), 1);
+        wal.delete("users", "b");
+        assert_eq!(wal.failures(), 2, "every failure counts");
+    }
+
+    #[test]
+    fn a_log_that_can_be_written_clears_itself() {
+        let path = std::env::temp_dir().join(format!("velo-wal-ok-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let wal = super::Wal::open(&path).unwrap();
+        wal.delete("users", "a");
+        assert!(!wal.broken());
+        assert_eq!(wal.failures(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_log_that_is_not_a_regular_file_has_nothing_to_replay() {
+        let full = std::path::Path::new("/dev/full");
+        if !full.exists() {
+            return;
+        }
+        assert!(super::read(full).unwrap().is_empty());
+    }
+
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {

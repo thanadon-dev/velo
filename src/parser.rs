@@ -31,6 +31,7 @@ pub struct Route {
     pub guard: Option<Expr>,
     pub guard_status: u16,
     pub guard_msg: Option<String>,
+    pub writes: bool,
     pub line: usize,
     pub source: Option<Arc<str>>,
 }
@@ -292,6 +293,7 @@ impl<'a> Parser<'a> {
         } else {
             (None, crate::http::JSON)
         };
+        let writes = crate::ast::writes_to_store(&expr);
         Ok(Route {
             method,
             pattern: path.text,
@@ -311,6 +313,7 @@ impl<'a> Parser<'a> {
             body_fields: std::mem::take(&mut self.body_fields),
             header_fields: std::mem::take(&mut self.header_fields),
             cookie_fields: std::mem::take(&mut self.cookie_fields),
+            writes,
             guard,
             guard_status,
             guard_msg,

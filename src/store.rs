@@ -954,6 +954,14 @@ impl Store {
         std::fs::rename(&tmp, path)
     }
 
+    pub fn wal_broken(&self) -> bool {
+        self.wal.get().is_some_and(|w| w.broken())
+    }
+
+    pub fn wal_failures(&self) -> u64 {
+        self.wal.get().map_or(0, |w| w.failures())
+    }
+
     pub fn wal(&self) -> Option<&crate::wal::Wal> {
         self.wal.get()
     }
