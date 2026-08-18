@@ -1208,3 +1208,162 @@ fn a_client_that_pipelines_without_reading_cannot_make_the_server_grow() {
     stop(&mut child, "-TERM");
     let _ = std::fs::remove_file(&app);
 }
+
+#[test]
+fn a_route_delivers_a_hook_without_the_response_waiting_for_it() {
+    let app = tmp("hook.velo");
+    let sink = TcpListener::bind("127.0.0.1:0").unwrap();
+    let inbox = sink.local_addr().unwrap().port();
+    let hook = format!("http://127.0.0.1:{inbox}/inbox");
+    let dead = format!("http://127.0.0.1:{}/gone", free_port());
+    write(
+        &app,
+        &format!(
+            "POST /orders => post(\"{hook}\", db.orders.create(body))\n\
+             POST /lost   => post(\"{dead}\", db.orders.create(body))\n"
+        ),
+    );
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .env("VELO_METRICS", "/_metrics")
+        .env("VELO_HOOK_MS", "1000")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let heard = std::thread::spawn(move || {
+        let (mut s, _) = sink.accept().unwrap();
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !got.windows(4).any(|w| w == b"\r\n\r\n") {
+            match s.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+            }
+        }
+        let want: usize = String::from_utf8_lossy(&got)
+            .lines()
+            .find_map(|l| l.strip_prefix("Content-Length: ").and_then(|n| n.trim().parse().ok()))
+            .unwrap_or(0);
+        let head = got.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
+        while got.len() < head + want {
+            match s.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(700));
+        let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        String::from_utf8_lossy(&got).into_owned()
+    });
+
+    let t0 = Instant::now();
+    let answer = post(port, "/orders", r#"{"item":"kettle"}"#);
+    let took = t0.elapsed();
+    assert!(answer.contains(r#""item":"kettle""#), "{answer}");
+    assert!(took < Duration::from_millis(300), "the response waited for the hook: {took:?}");
+
+    let sent = heard.join().unwrap();
+    assert!(sent.starts_with("POST /inbox HTTP/1.1\r\n"), "{sent}");
+    assert!(sent.contains("Content-Type: application/json\r\n"), "{sent}");
+    assert!(sent.contains(&format!("Host: 127.0.0.1:{inbox}\r\n")), "{sent}");
+    assert!(sent.ends_with(r#"{"id":1,"item":"kettle"}"#), "{sent}");
+
+    let lost = post(port, "/lost", r#"{"item":"ghost"}"#);
+    assert!(lost.contains(r#""item":"ghost""#), "{lost}");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let counters = loop {
+        let m = get(port, "/_metrics");
+        if m.contains(r#""hooks_sent":1"#) && m.contains(r#""hooks_failed":1"#) {
+            break m;
+        }
+        assert!(Instant::now() < deadline, "{m}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(counters.contains(r#""hooks_dropped":0"#), "{counters}");
+
+    stop(&mut child, "-TERM");
+    let _ = std::fs::remove_file(&app);
+}
+
+#[test]
+fn a_hook_endpoint_that_never_answers_cannot_make_the_queue_grow() {
+    let app = tmp("hookflood.velo");
+    let hole = TcpListener::bind("127.0.0.1:0").unwrap();
+    let hook = format!("http://127.0.0.1:{}/hole", hole.local_addr().unwrap().port());
+    write(&app, &format!("POST /events => post(\"{hook}\", db.events.create(body))\n"));
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .env("VELO_METRICS", "/_metrics")
+        .env("VELO_HOOK_QUEUE", "4")
+        .env("VELO_HOOK_THREADS", "1")
+        .env("VELO_HOOK_MS", "30000")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    for _ in 0..60 {
+        let answer = post(port, "/events", r#"{"kind":"tick"}"#);
+        assert!(answer.contains(r#""kind":"tick""#), "{answer}");
+    }
+    let m = get(port, "/_metrics");
+    let dropped: u64 = m
+        .rsplit(r#""hooks_dropped":"#)
+        .next()
+        .and_then(|t| t.split(['}', ',']).next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    assert!(dropped >= 50, "a stuck endpoint queued instead of dropping: {m}");
+    assert!(m.contains(r#""hooks_sent":0"#), "{m}");
+
+    stop(&mut child, "-TERM");
+    drop(hole);
+    let _ = std::fs::remove_file(&app);
+}
+
+#[test]
+fn a_hook_still_queued_when_the_server_is_told_to_stop_is_delivered_before_it_exits() {
+    let app = tmp("hookdrain.velo");
+    let sink = TcpListener::bind("127.0.0.1:0").unwrap();
+    let hook = format!("http://127.0.0.1:{}/inbox", sink.local_addr().unwrap().port());
+    write(&app, &format!("POST /events => post(\"{hook}\", db.events.create(body))\n"));
+    let port = free_port();
+    let mut child = Command::new(BIN)
+        .arg("run")
+        .arg(&app)
+        .arg(format!("127.0.0.1:{port}"))
+        .env("VELO_HOOK_THREADS", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let heard = std::thread::spawn(move || {
+        let mut seen = 0;
+        for stream in sink.incoming().take(3) {
+            let Ok(mut s) = stream else { break };
+            std::thread::sleep(Duration::from_millis(400));
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            seen += 1;
+        }
+        seen
+    });
+
+    for _ in 0..3 {
+        assert!(post(port, "/events", r#"{"kind":"tick"}"#).contains("tick"));
+    }
+    stop(&mut child, "-TERM");
+    assert_eq!(heard.join().unwrap(), 3, "queued hooks died with the process");
+    let _ = std::fs::remove_file(&app);
+}

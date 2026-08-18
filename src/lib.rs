@@ -6,6 +6,7 @@ pub mod bench;
 pub(crate) mod crypto;
 pub(crate) mod date;
 pub(crate) mod epoll;
+pub(crate) mod hook;
 pub mod http;
 pub(crate) mod lexer;
 pub mod openapi;

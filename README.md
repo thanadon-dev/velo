@@ -1,6 +1,6 @@
 # Velo
 
-**v1.50.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
+**v1.51.0** — a tiny language for HTTP APIs, written in Rust with zero dependencies. One line per endpoint, compiled to an expression tree, served by an epoll event loop.
 
 ```velo
 GET    /health     => "ok"
@@ -17,13 +17,15 @@ That file is a complete, running API server.
 
 Linux only: the event loop is epoll, and the build stops with a clear message anywhere else.
 
-[Scope](#scope) · [Quick start](#quick-start) · [Language](#language) · [Guards](#guards) · [OpenAPI](#openapi) · [Embedding](#embedding) · [Persistence](#persistence) · [Concurrency](#concurrency) · [Rate limiting](#rate-limiting) · [Metrics](#metrics) · [Deployment](#deployment) · [Design](#design) · [Benchmarks](#benchmarks) · [Tests](#tests) · [CI](#ci) · [Layout](#layout) · [Build notes](#build-notes) · [Releases](#releases)
+[Scope](#scope) · [Quick start](#quick-start) · [Language](#language) · [Guards](#guards) · [OpenAPI](#openapi) · [Embedding](#embedding) · [Persistence](#persistence) · [Concurrency](#concurrency) · [Rate limiting](#rate-limiting) · [Webhooks](#webhooks) · [Metrics](#metrics) · [Deployment](#deployment) · [Design](#design) · [Benchmarks](#benchmarks) · [Tests](#tests) · [CI](#ci) · [Layout](#layout) · [Build notes](#build-notes) · [Releases](#releases)
 
 ## Scope
 
 Velo suits a JSON API whose data fits in memory on one machine: an internal service, a mobile or web backend, a prototype that has to be fast, a sidecar that shapes data for something else. It compiles a fixed set of routes and precomputes as much of each response as it can.
 
 What a whole API needs is in the language rather than around it: CRUD, filters, sorting, paging and aggregates; password hashing and session lookups; cookies; per-key rate limits; per-condition validation with the reason the client is told; row expiry; atomic counters; field allowlists so a row never leaves with more than it should. A generated OpenAPI document, per-route metrics, request logs, `ETag`, CORS and a draining shutdown come with the server, not with a stack around it.
+
+A route can also tell another service what happened, with `post(url, value)`, so a write does not have to end at the edge of this process.
 
 It is deliberately not: a database (the store is memory-bound, single-process, snapshot-persisted), a TLS terminator, an HTTP/2 or WebSocket server, a file-upload endpoint, or a cluster. It has no joins, no transactions across two collections, and no user-defined functions: a request either fits one collection and one expression or belongs somewhere else. Put a proxy in front for TLS, compression, and HTTP/2, and keep the dataset within RAM.
 
@@ -264,11 +266,12 @@ Built-in functions:
 | `verify(x, stored)` | whether `x` is the password behind `stored` |
 | `setcookie(name, x)` | sets a hardened `Set-Cookie` on the response and returns `x` |
 | `limit(key, per_second)` | `true` while that key is under its rate, `429` once it is not |
+| `post(url, x)` | queues `x` as a JSON `POST` to `url` and returns `x` without waiting |
 | `check(condition, reason)` | `true` while the condition holds, `400` with that reason once it does not |
 | `openapi()` | this API's OpenAPI 3.0 document, rendered once at compile time |
 | `file("page.html")` | the file's contents, read at compile time, served with a content type from its extension |
 
-Everything but `now()`, `uuid()`, `date()`, `password()`, `verify()`, `setcookie()`, `limit()`, `check()` and `openapi()` is folded at compile time when its arguments are constant, so `upper("velo")` costs nothing at runtime.
+Everything but `now()`, `uuid()`, `date()`, `password()`, `verify()`, `setcookie()`, `limit()`, `post()`, `check()` and `openapi()` is folded at compile time when its arguments are constant, so `upper("velo")` costs nothing at runtime.
 
 ```velo
 GET  /users      => db.users.page(default(query.offset, 0), default(query.limit, 20))
@@ -487,6 +490,32 @@ Reads are snapshots too, so two reads in one route can disagree: `{ n: db.users.
 
 The check costs a lock and a hash per request. In a loopback benchmark, where every request shares one key and all workers contend on the same shard, `/health` drops from 90.6k to 71.9k req/s; real traffic spread over many client IPs spreads over the shards.
 
+## Webhooks
+
+`post(url, x)` hands `x` to another service as a JSON `POST` and returns `x`, so the same expression that writes a row also announces it:
+
+```velo
+POST /orders  => post(env("ORDER_HOOK"), db.orders.create(body))
+POST /signup  => post("http://crm.internal/leads", db.users.create(body.select("name", "email"), "email"))
+POST /events  => post(env("BUS"), db.events.create({ id: uuid(), at: now(), data: body })) : 202
+```
+
+The response does not wait for it. The call puts the rendered JSON on a queue and returns, and background threads deliver it, because a route that blocks on somebody else's server is a route whose latency is somebody else's to decide. A test proves the shape: the receiver sits on the request for 700 ms and the client is answered in under 300.
+
+That trade is the whole design, and it has to be said plainly: delivery is not guaranteed. A hook is queued in memory, and what velo promises is that a queued hook does not stall the request and does not grow without bound. The queue holds `VELO_HOOK_QUEUE` entries (1024) and drops the oldest arrivals beyond that rather than accepting them, so an endpoint that has stopped answering costs a counter rather than the process: a test points a route at a socket that accepts and never replies, sends sixty requests through a queue four deep, and every one of them is answered normally while the drops are counted. `VELO_HOOK_THREADS` (2) decides how many deliveries are in flight, and `VELO_HOOK_MS` (3000) bounds connect, write and read on each.
+
+A stop is not a drop. `SIGTERM` and `SIGINT` drain the queue before the process exits, within the same `VELO_DRAIN_MS` the connections get, so a deploy does not silently swallow the hooks that were in hand; a test queues three deliveries against a receiver that takes 400 ms each, stops the server immediately, and all three arrive.
+
+The URL must be `http://`. Velo speaks no TLS in either direction, so an `https` endpoint goes through a proxy on the host the same way inbound TLS does. A constant URL that is not plain http is a compile error rather than a delivery that quietly fails every time; a URL from `env()` is checked when it is used and counted as a failure.
+
+Counters live beside the rest, under `VELO_METRICS`, and appear once a hook has been attempted:
+
+```json
+{"hooks_sent":4120,"hooks_failed":3,"hooks_dropped":0}
+```
+
+`hooks_sent` counts a `2xx` or `3xx` answer, `hooks_failed` anything else including a refused connection, a timeout, or a URL that will not parse, and `hooks_dropped` counts what the queue would not take. Watch the last two: they are the only place a lost hook shows up.
+
 ## Logging
 
 `VELO_LOG=1` writes one line per request to stderr:
@@ -517,7 +546,7 @@ Set `VELO_METRICS=/_metrics` and that path answers:
 
 `paths` breaks the same counters down by route, labelled `METHOD /pattern` as written in the source, so a slow or failing endpoint is visible without a tracing stack. A route appears once it has been served, so the list stays as small as the traffic; a request that matched no route counts in the totals but has no route to belong to. `failures` here is any answer of 400 or above from that route, guard rejections included.
 
-`failures` counts responses velo generated itself (404, 405, 400, 401, 409, 413, and store misses), `connections` is the live count across workers. `avg_micros` and `max_micros` measure the time from parsed request to rendered response. Timing costs a clock read per request, so enabling metrics trades about 9% of peak throughput (94.0k to 85.3k req/s on `/health`); everything else, the per-route counters included, is relaxed atomics and does not move the number out of run-to-run noise. Point a monitor at it, or at any route in your API.
+`hooks_sent`, `hooks_failed` and `hooks_dropped` join them once a route has called `post()`. `failures` counts responses velo generated itself (404, 405, 400, 401, 409, 413, and store misses), `connections` is the live count across workers. `avg_micros` and `max_micros` measure the time from parsed request to rendered response. Timing costs a clock read per request, so enabling metrics trades about 9% of peak throughput (94.0k to 85.3k req/s on `/health`); everything else, the per-route counters included, is relaxed atomics and does not move the number out of run-to-run noise. Point a monitor at it, or at any route in your API.
 
 ## Deployment
 
@@ -768,7 +797,7 @@ velobench -c 8 -p 32 -d 5 http://127.0.0.1:8099/users/1
 cargo test
 ```
 
-197 tests (149 integration + 24 CLI + 8 fuzz + 16 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, a write-ahead log replayed after a SIGKILL, a second server refusing a data file that is taken, built-ins, CORS preflight, field projection and filters into nested objects, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, intersected filters, list membership through the index, grouped counts and aggregates, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
+202 tests (149 integration + 27 CLI + 8 fuzz + 18 unit): const folding, CRUD, chained reads, comparison filters, params, body fields, error codes, JSON round-trip and escaping, query params, percent-decoding, protocol edge cases, `where` filters, persistence round-trip, status overrides, paging, list-cache invalidation, graceful shutdown, a write-ahead log replayed after a SIGKILL, a second server refusing a data file that is taken, built-ins, CORS preflight, field projection and filters into nested objects, per-route metrics, indexed filters, password hashing, login and session flows, cookies read and written, cookie header injection, single-row projection, body allowlists, comparison deletes, row expiry, atomic counters that never lose an increment under eight threads, unique fields that hold through create, update and upsert when eight threads race the same email through a barrier, per-key rate limits, an outbound hook that the response does not wait for, a hook queue that drops rather than grows when the far end stops answering, hooks still in hand at a `SIGTERM` delivered before exit, intersected filters, list membership through the index, grouped counts and aggregates, partial sorts, mixed-type ordering, rows of differing shapes, repeated JSON keys, cache invalidation after a bulk delete, atomic snapshots, ids that survive a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, sorting, compile-error formatting, `Date` formatting, SHA-256, HMAC and PBKDF2 test vectors, cache-key construction, header hardening, sort-cache, filter-cache and chain-cache invalidation, chain cache keys that must not collide, large-list caching across writes, request headers, guards, client-supplied ids, metrics, ETag round-trip, rate limiting, raw-socket HTTP (keep-alive, pipelining, HEAD, chunked rejection, split requests, 100 concurrent connections), concurrent writes, and a read/write stress test that hammers the list, sort, filter, search, and aggregate caches from five reader threads while four writers insert, then checks the final data is consistent.
 
 The suite has been checked by breaking the code on purpose: twenty-one faults were reintroduced one at a time across the store, persistence, HTTP parsing, the compiler and the router, and the tests were run to see which went unnoticed. Fifteen were caught. Five of the six that were not have since been covered, and finding them is what added the tests for atomic snapshots, ids surviving a reload, bare-newline requests, empty path segments, guarded routes never folding, guard reasons, per-condition validation, pipelined responses keeping their own reasons and cookies, a rate ceiling under eight threads, expiry sweeping beside live traffic, and a filtered read repeated across a bulk delete. One of the faults turned out to be a real defect rather than an introduced one: a pattern with a parameter matched a path whose segment for it was empty. Changing the row chunk size in either direction is correctly unnoticed, since it is a performance parameter and no answer depends on it.
 

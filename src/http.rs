@@ -308,6 +308,14 @@ impl Server {
         f(out, ",\"max_micros\":", self.max_micros.load(Ordering::Relaxed));
         f(out, ",\"routes\":", self.routes.len() as u64);
         f(out, ",\"workers\":", self.workers as u64);
+        let sent = crate::hook::SENT.load(Ordering::Relaxed);
+        let failed = crate::hook::FAILED.load(Ordering::Relaxed);
+        let dropped = crate::hook::DROPPED.load(Ordering::Relaxed);
+        if sent | failed | dropped != 0 {
+            f(out, ",\"hooks_sent\":", sent);
+            f(out, ",\"hooks_failed\":", failed);
+            f(out, ",\"hooks_dropped\":", dropped);
+        }
         out.extend_from_slice(b",\"paths\":[");
         let mut first = true;
         for (rt, stat) in self.routes.iter().zip(&self.per_route) {
@@ -411,6 +419,7 @@ impl Server {
         for h in handles {
             let _ = h.join();
         }
+        crate::hook::drain(std::time::Duration::from_millis(self.drain_ms));
         res
     }
 }

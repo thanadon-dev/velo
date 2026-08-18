@@ -105,6 +105,7 @@ pub enum Builtin {
     Verify,
     SetCookie,
     Limit,
+    Post,
     Check,
 }
 
@@ -257,6 +258,12 @@ impl Expr {
                         return Err(TOO_MANY);
                     }
                     return Ok(Value::Bool(true));
+                }
+                if *f == Builtin::Post {
+                    let value = vals.pop().unwrap_or(Value::Null);
+                    let url = vals.pop().unwrap_or(Value::Null);
+                    crate::hook::send(&url.as_key(), value.to_json());
+                    return Ok(value);
                 }
                 if *f == Builtin::SetCookie {
                     let value = vals.pop().unwrap_or(Value::Null);
@@ -602,7 +609,7 @@ pub fn call_builtin(f: Builtin, args: &[Value]) -> Value {
         Builtin::Password => {
             Value::Str(Arc::from(crate::crypto::password(&args[0].as_key()).as_str()))
         }
-        Builtin::SetCookie => args[1].clone(),
+        Builtin::SetCookie | Builtin::Post => args[1].clone(),
         Builtin::Limit => Value::Bool(true),
         Builtin::Check => Value::Bool(true),
         Builtin::Verify => Value::Bool(match &args[1] {

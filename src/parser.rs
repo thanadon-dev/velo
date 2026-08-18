@@ -556,6 +556,7 @@ impl<'a> Parser<'a> {
                 "verify" => Builtin::Verify,
                 "setcookie" => Builtin::SetCookie,
                 "limit" => Builtin::Limit,
+                "post" => Builtin::Post,
                 "check" => Builtin::Check,
                 other => {
                     return Err(format!(
@@ -579,6 +580,7 @@ impl<'a> Parser<'a> {
                 | Builtin::Verify
                 | Builtin::SetCookie
                 | Builtin::Limit
+                | Builtin::Post
                 | Builtin::Check => 2,
                 _ => 1,
             };
@@ -601,9 +603,20 @@ impl<'a> Parser<'a> {
                     | Builtin::Verify
                     | Builtin::SetCookie
                     | Builtin::Limit
+                    | Builtin::Post
                     | Builtin::Check
             ) {
                 self.pure = false;
+            }
+            if f == Builtin::Post {
+                if let Expr::Const(Value::Str(url)) = &args[0] {
+                    if crate::hook::split(url).is_none() {
+                        return Err(format!(
+                            "line {}:{}: post() needs a http:// url, got {url:?}",
+                            head.line, head.col
+                        ));
+                    }
+                }
             }
             return self.fields(Expr::Call(f, args));
         }
