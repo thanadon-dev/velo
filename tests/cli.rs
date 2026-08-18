@@ -76,6 +76,19 @@ fn patch(port: u16, path: &str, body: &str) -> String {
     )
 }
 
+fn accept_by(listener: &TcpListener, limit: Duration) -> Option<TcpStream> {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if let Ok((s, _)) = listener.accept() {
+            s.set_nonblocking(false).unwrap();
+            return Some(s);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    None
+}
+
 fn stop(child: &mut Child, signal: &str) {
     let _ = Command::new("kill").arg(signal).arg(child.id().to_string()).status();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1236,7 +1249,7 @@ fn a_route_delivers_a_hook_without_the_response_waiting_for_it() {
         .unwrap();
 
     let heard = std::thread::spawn(move || {
-        let (mut s, _) = sink.accept().unwrap();
+        let mut s = accept_by(&sink, Duration::from_secs(4)).expect("no hook arrived");
         let mut got = Vec::new();
         let mut buf = [0u8; 4096];
         while !got.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -1349,8 +1362,8 @@ fn a_hook_still_queued_when_the_server_is_told_to_stop_is_delivered_before_it_ex
 
     let heard = std::thread::spawn(move || {
         let mut seen = 0;
-        for stream in sink.incoming().take(3) {
-            let Ok(mut s) = stream else { break };
+        while seen < 3 {
+            let Some(mut s) = accept_by(&sink, Duration::from_secs(4)) else { break };
             std::thread::sleep(Duration::from_millis(400));
             let mut buf = [0u8; 1024];
             let _ = s.read(&mut buf);

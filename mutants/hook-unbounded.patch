@@ -1,0 +1,13 @@
+diff --git a/src/hook.rs b/src/hook.rs
+index 8b963a5..1c82d3a 100644
+--- a/src/hook.rs
++++ b/src/hook.rs
+@@ -41,7 +41,7 @@ fn queue() -> &'static Queue {
+ pub fn send(url: &str, body: Vec<u8>) {
+     let q = queue();
+     let mut jobs = q.jobs.lock().unwrap();
+-    if jobs.len() >= q.depth {
++    if jobs.len() >= usize::MAX {
+         DROPPED.fetch_add(1, Ordering::Relaxed);
+         return;
+     }

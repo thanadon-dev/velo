@@ -1,0 +1,12 @@
+diff --git a/src/http.rs b/src/http.rs
+index 44050c0..880ce92 100644
+--- a/src/http.rs
++++ b/src/http.rs
+@@ -419,7 +419,6 @@ impl Server {
+         for h in handles {
+             let _ = h.join();
+         }
+-        crate::hook::drain(std::time::Duration::from_millis(self.drain_ms));
+         res
+     }
+ }

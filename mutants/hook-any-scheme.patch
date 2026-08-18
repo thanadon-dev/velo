@@ -1,0 +1,13 @@
+diff --git a/src/hook.rs b/src/hook.rs
+index 8b963a5..f85a22e 100644
+--- a/src/hook.rs
++++ b/src/hook.rs
+@@ -83,7 +83,7 @@ fn sender() {
+ }
+ 
+ pub fn split(url: &str) -> Option<(String, String)> {
+-    let rest = url.strip_prefix("http://")?;
++    let rest = url.trim_start_matches("http://").trim_start_matches("https://");
+     let (authority, path) = match rest.find('/') {
+         Some(cut) => (&rest[..cut], &rest[cut..]),
+         None => (rest, "/"),
