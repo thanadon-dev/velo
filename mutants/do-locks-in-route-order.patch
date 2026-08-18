@@ -1,0 +1,12 @@
+diff --git a/src/store.rs b/src/store.rs
+index 82e7e72..044fa8d 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1913,7 +1913,6 @@ pub fn commit(plan: Vec<(Arc<Collection>, Step)>) -> Result<Vec<Value>, (usize,
+             cols.push(col.clone());
+         }
+     }
+-    cols.sort_by(|a, b| a.tag.cmp(&b.tag));
+     let mut held: Vec<_> = cols.iter().map(|c| c.snap.write().unwrap()).collect();
+ 
+     let at = |col: &Arc<Collection>| cols.iter().position(|c| Arc::ptr_eq(c, col)).unwrap_or(0);

@@ -1,0 +1,26 @@
+diff --git a/src/store.rs b/src/store.rs
+index 82e7e72..fde1e8b 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1928,7 +1928,9 @@ pub fn commit(plan: Vec<(Arc<Collection>, Step)>) -> Result<Vec<Value>, (usize,
+         match col.apply_tx(&mut held[slot], step, &mut mine, &mut logged) {
+             Ok(value) => {
+                 undo.extend(mine.into_iter().map(|u| (slot, u)));
+-                log.extend(logged.into_iter().map(|e| (slot, e)));
++                for entry in &logged {
++                    col.write_log(entry);
++                }
+                 out.push(value);
+             }
+             Err(why) => {
+@@ -1939,9 +1941,7 @@ pub fn commit(plan: Vec<(Arc<Collection>, Step)>) -> Result<Vec<Value>, (usize,
+             }
+         }
+     }
+-    for (slot, entry) in &log {
+-        cols[*slot].write_log(entry);
+-    }
++    let _ = &log;
+     Ok(out)
+ }
+ 

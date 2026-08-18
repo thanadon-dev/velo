@@ -1,0 +1,14 @@
+diff --git a/src/store.rs b/src/store.rs
+index 82e7e72..95f863f 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1861,8 +1861,7 @@ impl Collection {
+ 
+     fn undo_tx(&self, s: &mut Snapshot, step: Undo) {
+         match step {
+-            Undo::Inserted(key, i) => {
+-                s.by_id.remove(&key);
++            Undo::Inserted(_key, i) => {
+                 s.rows.set(i, Value::Null);
+                 s.holes += 1;
+             }

@@ -1,0 +1,12 @@
+diff --git a/src/store.rs b/src/store.rs
+index 82e7e72..87b16ad 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1873,7 +1873,6 @@ impl Collection {
+                 s.holes -= 1;
+             }
+         }
+-        s.invalidate();
+         self.bump();
+     }
+ 

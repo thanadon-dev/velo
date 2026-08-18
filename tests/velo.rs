@@ -4030,10 +4030,10 @@ fn a_block_that_fails_under_contention_still_leaves_nothing_behind() {
         assert_eq!(call(&s, "POST", &format!("/seed/taken{i}"), "").0, 201);
     }
     let start = Arc::new(std::sync::Barrier::new(THREADS));
-    let mut workers = Vec::new();
+    let (tx, rx) = std::sync::mpsc::channel();
     for t in 0..THREADS {
-        let (s, start) = (s.clone(), start.clone());
-        workers.push(std::thread::spawn(move || {
+        let (s, start, tx) = (s.clone(), start.clone(), tx.clone());
+        std::thread::spawn(move || {
             start.wait();
             let mut kept = 0;
             for r in 0..ROUNDS {
@@ -4048,10 +4048,17 @@ fn a_block_that_fails_under_contention_still_leaves_nothing_behind() {
                     kept += 1;
                 }
             }
-            kept
-        }));
+            let _ = tx.send(kept);
+        });
     }
-    let kept: usize = workers.into_iter().map(|w| w.join().unwrap()).sum();
+    drop(tx);
+    let mut kept = 0;
+    for n in 0..THREADS {
+        match rx.recv_timeout(Duration::from_secs(20)) {
+            Ok(k) => kept += k,
+            Err(_) => panic!("only {n} of {THREADS} threads finished, two blocks are holding each other's collection"),
+        }
+    }
     assert_eq!(kept, THREADS * ROUNDS / 2, "only the fresh half should have been kept");
     assert_eq!(call(&s, "GET", "/a", "").1, kept.to_string());
     assert_eq!(call(&s, "GET", "/b", "").1, (kept + TAKEN).to_string());

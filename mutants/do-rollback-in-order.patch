@@ -1,0 +1,13 @@
+diff --git a/src/store.rs b/src/store.rs
+index 82e7e72..5836f50 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1932,7 +1932,7 @@ pub fn commit(plan: Vec<(Arc<Collection>, Step)>) -> Result<Vec<Value>, (usize,
+                 out.push(value);
+             }
+             Err(why) => {
+-                for (slot, step) in undo.into_iter().rev() {
++                for (slot, step) in undo.into_iter() {
+                     cols[slot].undo_tx(&mut held[slot], step);
+                 }
+                 return Err((n, why));

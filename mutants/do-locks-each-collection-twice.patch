@@ -1,0 +1,15 @@
+diff --git a/src/store.rs b/src/store.rs
+index 82e7e72..2af2034 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -1909,9 +1909,7 @@ fn keyed_row(id: &str, value: &Value) -> Value {
+ pub fn commit(plan: Vec<(Arc<Collection>, Step)>) -> Result<Vec<Value>, (usize, Refused)> {
+     let mut cols: Vec<Arc<Collection>> = Vec::with_capacity(plan.len());
+     for (col, _) in &plan {
+-        if !cols.iter().any(|held| Arc::ptr_eq(held, col)) {
+-            cols.push(col.clone());
+-        }
++        cols.push(col.clone());
+     }
+     cols.sort_by(|a, b| a.tag.cmp(&b.tag));
+     let mut held: Vec<_> = cols.iter().map(|c| c.snap.write().unwrap()).collect();

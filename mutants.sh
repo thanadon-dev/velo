@@ -45,7 +45,7 @@ for patch in mutants/*.patch; do
     current=""
     continue
   fi
-  if cargo test --profile mutants 2>&1 | grep -qE "^test result: FAILED"; then
+  if ! cargo test --profile mutants >/dev/null 2>&1; then
     echo "caught   $name"
     caught=$((caught + 1))
   else
