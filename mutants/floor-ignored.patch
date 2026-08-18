@@ -1,0 +1,14 @@
+diff --git a/src/store.rs b/src/store.rs
+index 3bb289e..20633e1 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -843,9 +843,6 @@ impl Collection {
+             Value::Num(n) => n + by,
+             _ => return Incr::NotNumber,
+         };
+-        if floor.is_some_and(|low| next < low) {
+-            return Incr::TooLow;
+-        }
+         let patch = Value::row(vec![(crate::value::intern(field), Value::Num(next))]);
+         let merged = as_row(merge(row, &patch));
+         s.rows.set(i, merged.clone());

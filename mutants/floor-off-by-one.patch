@@ -1,0 +1,13 @@
+diff --git a/src/store.rs b/src/store.rs
+index 3bb289e..bff263c 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -843,7 +843,7 @@ impl Collection {
+             Value::Num(n) => n + by,
+             _ => return Incr::NotNumber,
+         };
+-        if floor.is_some_and(|low| next < low) {
++        if floor.is_some_and(|low| next < low - 1.0) {
+             return Incr::TooLow;
+         }
+         let patch = Value::row(vec![(crate::value::intern(field), Value::Num(next))]);
