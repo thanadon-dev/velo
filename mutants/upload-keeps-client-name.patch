@@ -1,0 +1,17 @@
+diff --git a/src/multipart.rs b/src/multipart.rs
+index d837ee8..28037d0 100644
+--- a/src/multipart.rs
++++ b/src/multipart.rs
+@@ -61,11 +61,7 @@ pub fn parse(body: &[u8], boundary: &str, store: Option<&Path>) -> Result<Value,
+ }
+ 
+ fn kept(dir: &Path, filename: &str, ctype: String, content: &[u8]) -> Result<Value, Refused> {
+-    let mut at = dir.join(crate::ast::uuid());
+-    let suffix = extension(filename);
+-    if !suffix.is_empty() {
+-        at.set_extension(&suffix);
+-    }
++    let at = dir.join(filename);
+     if std::fs::create_dir_all(dir).is_err() || std::fs::write(&at, content).is_err() {
+         return Err(Refused::NoStore);
+     }

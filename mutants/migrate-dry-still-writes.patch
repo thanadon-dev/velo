@@ -1,0 +1,14 @@
+diff --git a/src/main.rs b/src/main.rs
+index 6cb370a..19b2a83 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -542,9 +542,6 @@ fn migrate(args: &[String]) {
+         rows.len(),
+         if dry { ", nothing written" } else { "" }
+     );
+-    if dry {
+-        return;
+-    }
+     if changed == 0 {
+         return;
+     }

@@ -1,0 +1,13 @@
+diff --git a/src/main.rs b/src/main.rs
+index 6cb370a..156f72b 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -582,7 +582,7 @@ fn rewrite(
+                 hit = true;
+                 next.push((k.clone(), literal()));
+             }
+-            ("default", true) => match matches!(v, velo::Value::Null) {
++            ("default", true) => match true {
+                 true => {
+                     hit = true;
+                     next.push((k.clone(), literal()));

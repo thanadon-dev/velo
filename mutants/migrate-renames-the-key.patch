@@ -1,0 +1,13 @@
+diff --git a/src/main.rs b/src/main.rs
+index 6cb370a..cee5d42 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -503,7 +503,7 @@ fn migrate(args: &[String]) {
+         eprintln!("velo: {action} takes {}", if needs_value { "a value" } else { "no value" });
+         exit(2);
+     }
+-    if field.is_empty() || (*field == "id" && action.as_str() != "default") {
++    if field.is_empty() {
+         eprintln!("velo: id is the key of a row and cannot be {action}d");
+         exit(2);
+     }

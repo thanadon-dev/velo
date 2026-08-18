@@ -1,0 +1,15 @@
+diff --git a/src/multipart.rs b/src/multipart.rs
+index d837ee8..2249237 100644
+--- a/src/multipart.rs
++++ b/src/multipart.rs
+@@ -81,9 +81,7 @@ fn kept(dir: &Path, filename: &str, ctype: String, content: &[u8]) -> Result<Val
+ fn extension(filename: &str) -> String {
+     let Some((_, tail)) = filename.rsplit_once('.') else { return String::new() };
+     let clean = tail.to_ascii_lowercase();
+-    let ok = !clean.is_empty()
+-        && clean.len() <= 8
+-        && clean.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
++    let ok = !clean.is_empty();
+     match ok {
+         true => clean,
+         false => String::new(),

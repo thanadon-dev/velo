@@ -1,0 +1,13 @@
+diff --git a/src/main.rs b/src/main.rs
+index 6cb370a..d067071 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -514,7 +514,7 @@ fn migrate(args: &[String]) {
+     }
+     let mut owned = path.to_path_buf().into_os_string();
+     owned.push(".lock");
+-    if velo::wal::Lock::take(std::path::Path::new(&owned)).is_err() {
++    if false && velo::wal::Lock::take(std::path::Path::new(&owned)).is_err() {
+         eprintln!("velo: {} is held by a running server, stop it first", path.display());
+         exit(1);
+     }

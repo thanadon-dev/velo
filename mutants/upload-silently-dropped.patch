@@ -1,0 +1,18 @@
+diff --git a/src/multipart.rs b/src/multipart.rs
+index d837ee8..5f1d22a 100644
+--- a/src/multipart.rs
++++ b/src/multipart.rs
+@@ -47,10 +47,11 @@ pub fn parse(body: &[u8], boundary: &str, store: Option<&Path>) -> Result<Value,
+                 Ok(text) => Value::str(text),
+                 Err(_) => return Err(Refused::NotText),
+             },
+-            Some(filename) => {
+-                let Some(dir) = store else { return Err(Refused::NoStore) };
++            Some(filename) if store.is_some() => {
++                let Some(dir) = store else { return Ok(Value::Null) };
+                 kept(dir, &filename, part_type(head), content)?
+             }
++            Some(_) => Value::Null,
+         };
+         match fields.iter_mut().find(|(k, _)| **k == *name) {
+             Some(slot) => slot.1 = value,

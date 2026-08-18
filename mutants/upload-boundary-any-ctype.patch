@@ -1,0 +1,14 @@
+diff --git a/src/multipart.rs b/src/multipart.rs
+index d837ee8..50a2601 100644
+--- a/src/multipart.rs
++++ b/src/multipart.rs
+@@ -3,9 +3,6 @@ use std::path::Path;
+ 
+ pub fn boundary_of(ctype: &str) -> Option<String> {
+     let (kind, rest) = ctype.split_once(';')?;
+-    if !kind.trim().eq_ignore_ascii_case("multipart/form-data") {
+-        return None;
+-    }
+     for param in rest.split(';') {
+         let (key, value) = param.split_once('=')?;
+         if key.trim().eq_ignore_ascii_case("boundary") {

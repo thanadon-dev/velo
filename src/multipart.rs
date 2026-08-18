@@ -164,6 +164,8 @@ mod tests {
             Some("a b".into())
         );
         assert_eq!(boundary_of("application/json"), None);
+        assert_eq!(boundary_of("application/json; boundary=abc"), None);
+        assert_eq!(boundary_of("multipart/mixed; boundary=abc"), None);
         assert_eq!(boundary_of("multipart/form-data"), None);
         assert_eq!(boundary_of("multipart/form-data; boundary="), None);
     }
